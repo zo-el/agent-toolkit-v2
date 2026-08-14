@@ -71,7 +71,7 @@ Everything else is silent. `permissions.defaultMode` is `auto` and `~/.claude`, 
 Opus 5 1M │ ⚡xhigh │ ▰▱▱▱▱▱▱▱ 18% 180k/1M │ +412/-96 │ ⏱ 63% 2h13m · 41% 3d2h │ ☰ 2/5 │ ⎇ main* #42 │ my-app │ ⬡ v10·12d438c
 ```
 
-A segment with nothing to say takes no width, so the line stays short when little is happening.
+A segment with nothing to say takes no width, so the line stays short when little is happening. Lines changed and rate limits are the exception: neither has its data on the first renders, so they hold their slot with a dim `+0/-0` and `⏱ —` instead of letting the bar change shape mid-session. A session that never reports rate limits — an API key rather than a subscription — keeps `⏱ —` throughout.
 
 - **`⏱ 63% 2h13m · 41% 3d2h`** — how much of each rate-limit window is used, and how long until it resets. The window's own length is deliberately not shown; a fixed `5h` label says nothing you can act on. Falls back to `5h` / `7d` labels only when the payload carries no reset time, since two bare percentages wouldn't say which is which.
 - **`☰ 2/5`** — tasks done out of open, from this session's own list. The platform clears the whole list once every task completes, so this only ever shows live work.

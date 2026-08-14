@@ -7,6 +7,12 @@ Reads the status JSON Claude Code pipes to stdin. Every segment is wrapped and
 degrades to nothing — a statusline must never crash or print a traceback, and a
 segment with nothing to say takes no width. stdlib only, so it has no npm or jq
 dependency at render time.
+
+lines and limits are the exception to the no-width rule: neither has its data on
+the first renders, so they hold their slot with a dim placeholder rather than let
+the bar change shape mid-session. A session that never reports rate limits — an
+API key rather than a subscription — keeps the limits placeholder for good, since
+the payload gives no way to tell that from not knowing yet.
 """
 
 import json
@@ -167,10 +173,11 @@ def segment_context(data, tail):
 
 
 def segment_lines(data):
-    cost = data.get("cost") or {}
+    cost = data.get("cost")
+    cost = cost if isinstance(cost, dict) else {}
     added, removed = cost.get("total_lines_added"), cost.get("total_lines_removed")
     if not (added or removed):
-        return None
+        return f"{DIM}+0/-0{RESET}"
     return f"{COLORS['green']}+{added or 0}{RESET}{DIM}/{RESET}{COLORS['red']}-{removed or 0}{RESET}"
 
 
@@ -196,9 +203,8 @@ def segment_limits(data, now):
     payload carries no reset time, since a bare pair of percentages would not
     say which window is which."""
     limits = data.get("rate_limits")
-    if not isinstance(limits, dict):
-        return None
-    parts = []
+    limits = limits if isinstance(limits, dict) else {}
+    parts, pcts = [], []
     for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
         window = limits.get(key)
         if not isinstance(window, dict):
@@ -206,16 +212,15 @@ def segment_limits(data, now):
         pct = window.get("used_percentage")
         if not isinstance(pct, (int, float)):
             continue
+        pcts.append(pct)
         resets = window.get("resets_at")
         left = None
         if isinstance(resets, (int, float)) and resets > now:
             left = compact_duration(resets - now)
         parts.append(f"{round(pct)}% {left}" if left else f"{label} {round(pct)}%")
     if not parts:
-        return None
-    worst = max(
-        w.get("used_percentage", 0) for w in limits.values() if isinstance(w, dict)
-    )
+        return f"{DIM}⏱ —{RESET}"
+    worst = max(pcts)
     color = DIM if worst < 50 else COLORS["yellow"] if worst < 80 else COLORS["red"]
     return f"{color}⏱ " + f"{RESET}{DIM} · {RESET}{color}".join(parts) + RESET
 

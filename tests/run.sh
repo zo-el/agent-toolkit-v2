@@ -255,6 +255,11 @@ check "pointer re-aimed at v2" "$ROOT" "$(readlink "$V1HOME/.claude/agent-toolki
 # ── statusline ───────────────────────────────────────────────────────────────
 echo "statusline.py"
 
+# Placeholders have to be inert next to the populated form, so these assertions
+# pin the escape sequences rather than the bare text.
+dim() { printf '\033[2m%s\033[0m' "$1"; }
+sep=$'\033[2m│\033[0m'
+
 # Reset times are relative to now, so the fixture computes them rather than
 # pinning epochs that would go stale and silently stop exercising the branch.
 # The extra 30s absorbs the seconds that pass before the script reads the clock:
@@ -280,8 +285,8 @@ check "renders the model"    "Opus 5" "$out"
 check "renders 1M marker"    "1M"     "$out"
 check "renders the effort"   "xhigh"  "$out"
 check "renders the context"  "12%"    "$out"
-check "renders lines changed" "+10"   "$out"
-check "renders hours left"   "2h14m"  "$out"
+check "renders lines changed" "$(printf '\033[32m+10\033[0m\033[2m/\033[0m\033[31m-2\033[0m')" "$out"
+check "renders hours left"   "$(printf '\033[2m⏱ 30%% 2h14m')" "$out"
 check "renders days left"    "4d3h"   "$out"
 check "renders task progress" "1/3"   "$out"
 check "renders the PR"       "#42"    "$out"
@@ -290,6 +295,20 @@ case "$out" in
   *'5h'*) bad "no fixed window label when a reset time is known" "printed: $out" ;;
   *)      ok "no dollar amount, no fixed window label" ;;
 esac
+
+# The opening of a session: the line counters are still 0, and the CLI omits
+# rate_limits until it has a window to report — on an API key, never. Both
+# segments hold their slot dim, in order, so the bar keeps its shape throughout.
+out="$(printf '%s' '{"cwd":"/","cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0}}' \
+  | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
+check "zero lines hold the slot"      "$(dim '+0/-0')" "$out"
+check "absent limits hold the slot"   "$(dim '⏱ —')"   "$out"
+check "placeholders keep their order" "$(dim '+0/-0') $sep $(dim '⏱ —')" "$out"
+
+# A rate_limits key carrying nothing usable is the same not-yet-known state.
+out="$(printf '%s' '{"cwd":"/","rate_limits":{"five_hour":{}}}' \
+  | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
+check "unusable limits hold the slot" "$(dim '⏱ —')" "$out"
 
 # Without resets_at the labels have to come back, or two bare percentages give
 # no way to tell the windows apart.
@@ -309,13 +328,16 @@ check "finds the team-named task dir" "1/2" "$out"
 out="$(printf '%s' '{"cwd":"/","session_id":"no-such-session-at-all"}' | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
 case "$out" in *☰*) bad "no task dir renders nothing" "printed: $out" ;; *) ok "no task dir renders nothing" ;; esac
 
-# A reset time already in the past must not render a negative or absurd span.
+# A reset time already in the past must not render a negative or absurd span: the
+# window drops back to its label. Asserted as the exact segment, since a glob for
+# a stray minus also matches the lines placeholder.
 past=$(( $(date +%s) - 500 ))
 out="$(printf '%s' '{"cwd":"/","rate_limits":{"five_hour":{"used_percentage":9,"resets_at":'"$past"'}}}' \
   | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
-case "$out" in *-*m*|*-*h*) bad "stale reset time never renders negative" "printed: $out" ;; *) ok "stale reset time never renders negative" ;; esac
+check "stale reset time renders the label, not a negative span" "$(dim '⏱ 5h 9%')" "$out"
 
-# With no payload, every segment fed by it must drop out rather than guess.
+# With no payload, every segment fed by it must drop out rather than guess —
+# except the two placeholders, which hold width without claiming a measurement.
 # Segments read from disk (directory, toolkit stamp) legitimately stay.
 for label in "empty stdin" "malformed stdin"; do
   [ "$label" = "empty stdin" ] && data="" || data="not json"
@@ -325,6 +347,7 @@ for label in "empty stdin" "malformed stdin"; do
     *%*|*'$'*|*⚡*|*▰*|*▱*)  bad "$label invents no payload segment" "printed: $out" ;;
     *)                       ok "$label degrades safely" ;;
   esac
+  check "$label keeps the placeholders" "$(dim '+0/-0') $sep $(dim '⏱ —')" "$out"
 done
 
 # ── bg + reap ────────────────────────────────────────────────────────────────
