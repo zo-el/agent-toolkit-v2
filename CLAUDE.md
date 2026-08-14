@@ -159,6 +159,7 @@ Everything below binds the session and every agent equally.
 - State the fact instead of pointing at the file that holds it.
 - Every fact has one home.
 - No unsolicited documents.
+- **A project repo never mentions this toolkit.** It exists on this machine only, so a toolkit path, skill name, or clone instruction in a repo's docs is broken for everyone else reading them. A repo's docs carry what is true about that repo; how I work is not.
 
 ## Verify before you claim
 
