@@ -43,7 +43,7 @@ Size the goal to the work — a whole feature or a single rename. An agent retur
 - Independent work → spawn every agent in one message so they run at once.
 - Dependent work → one agent, verify, then the next.
 - Never two agents writing in the same repo at once. Split by directory, give each `isolation: worktree`, or sequence them.
-- Lead each agent's description with its task number: `2.1 build the parser`.
+- Start each agent's description with its task number: `2.1 build the parser`.
 - Reach for `general-purpose` when no role fits. Don't invent new agents.
 
 ## Tasks

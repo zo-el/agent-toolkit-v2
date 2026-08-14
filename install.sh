@@ -54,6 +54,15 @@ else
     ln -sfn "$d" "$CLAUDE_DIR/skills/$(basename "$d")"
   done
   find "$CLAUDE_DIR/skills" -maxdepth 1 -type l ! -exec test -e {} \; -delete
+  # Links into the checkout we replaced still resolve, so they survive the prune
+  # above and keep firing skills this toolkit no longer has. Only that one path
+  # is swept, never anything the user linked themselves.
+  if [ -n "$PREV_ROOT" ] && [ "$PREV_ROOT" != "$ROOT" ]; then
+    for l in "$CLAUDE_DIR"/skills/*; do
+      [ -L "$l" ] || continue
+      case "$(readlink "$l")" in "$PREV_ROOT"/skills/*) rm -f "$l"; say "  - unlinked stale skill $(basename "$l")" ;; esac
+    done
+  fi
 fi
 
 # ── 3. agents — copied, because the agents file watcher does not reliably
@@ -117,6 +126,8 @@ WIRING='[
 desired_settings() {
   jq --arg base "$STABLE" --arg cfg "$CLAUDE_DIR" --arg root "$ROOT" \
      --arg scratch "$SCRATCH" --arg prev "$PREV_ROOT" --argjson wiring "$WIRING" '
+    # install-skills is matched so hook entries written by the previous
+    # generation of this toolkit are cleaned out rather than left to run.
     def ours: test("agent-toolkit|install-skills");
     def clean(a): (a // [])
       | map(select((((.hooks // []) | map(.command // "") | join(" ")) | ours) | not));
@@ -201,7 +212,7 @@ if [ -f "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
     case "$MODE" in
       --dry-run)
         echo "settings: $SETTINGS would change:"
-        printf '%s\n' "$new" | diff -u "$SETTINGS" - | sed 's/^/  /' | head -80
+        printf '%s\n' "$new" | diff -u "$SETTINGS" - | sed 's/^/  /' | head -200
         ;;
       --sync) warn "settings.json is stale — run: $STABLE/install.sh" ;;
       *)

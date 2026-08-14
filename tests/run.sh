@@ -130,6 +130,21 @@ agents="$(ls "$ROOT/agents"/*.md | wc -l | tr -d ' ')"
 out="$(run_install)"
 check "re-install is idempotent" "already current" "$out"
 
+# Replacing the checkout: links into the one we replaced still resolve, so they
+# survive the broken-link prune and would keep firing retired skills.
+OLD="$TMP/old-checkout"
+mkdir -p "$OLD/skills/retired" "$OLD/agents" "$OLD/hooks"
+touch "$OLD/skills/retired/SKILL.md"
+mkdir -p "$TMP/my-skills/mine-too"
+touch "$TMP/my-skills/mine-too/SKILL.md"
+ln -sfn "$OLD/skills/retired" "$FAKE/.claude/skills/retired"
+ln -sfn "$TMP/my-skills/mine-too" "$FAKE/.claude/skills/mine-too"   # the user's own, unrelated
+ln -sfn "$OLD" "$FAKE/.claude/agent-toolkit"
+run_install >/dev/null
+[ ! -e "$FAKE/.claude/skills/retired" ] && ok "stale checkout skill unlinked" || bad "stale checkout skill unlinked" "still linked"
+[ -L "$FAKE/.claude/skills/mine-too" ] && ok "unrelated skill link kept" || bad "unrelated skill link kept" "removed"
+rm -f "$FAKE/.claude/skills/mine-too"
+
 # A retired agent is pruned; one the user wrote is left alone.
 touch "$FAKE/.claude/agents/mine.md"
 echo "stale.md" >> "$FAKE/.claude/agents/.toolkit-agents"
@@ -160,15 +175,15 @@ check "renders the context" "12%"    "$out"
 check "renders the cost"    "1.50"   "$out"
 check "renders the limits"  "5h 30%" "$out"
 
-# With no data every segment must drop out, leaving only the directory, which
-# falls back to the process cwd. A separator would mean a segment guessed.
+# With no payload, every segment fed by it must drop out rather than guess.
+# Segments read from disk (directory, toolkit stamp) legitimately stay.
 for label in "empty stdin" "malformed stdin"; do
   [ "$label" = "empty stdin" ] && data="" || data="not json"
   out="$(printf '%s' "$data" | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
   case "$out" in
-    *Traceback*) bad "$label never crashes" "$out" ;;
-    *"│"*)       bad "$label renders only the directory" "printed: $out" ;;
-    *)           ok "$label degrades to the directory" ;;
+    *Traceback*)             bad "$label never crashes" "$out" ;;
+    *%*|*'$'*|*⚡*|*▰*|*▱*)  bad "$label invents no payload segment" "printed: $out" ;;
+    *)                       ok "$label degrades safely" ;;
   esac
 done
 
