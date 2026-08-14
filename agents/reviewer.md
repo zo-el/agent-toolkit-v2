@@ -32,6 +32,8 @@ Your brief must tell you **what we're trying to achieve and why**. Without it, a
 
 The code, writing, and documentation rules in `CLAUDE.md`. Comments explain why and nothing else; every fact has one home; structure is legible from the tree.
 
+**Is there more text than the work needs?** Report it like any other finding, in the diff and in the existing files it touches: comments narrating what the code says, a doc paragraph that a line would carry, a README grown into a manual, an explanation nobody asked for. Quote what you would cut and how much. This is a proposal, not a rewrite.
+
 ## How you size it
 
 - **Small or mechanical** — a rename, a config bump, a wrapper: read the diff yourself. Nothing else.
