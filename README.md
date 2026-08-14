@@ -2,7 +2,9 @@
 
 My working agreement with Claude Code, as a repo that travels between machines.
 
-The session is the CTO: it plans, delegates, verifies, and talks to me. Agents do the work. [`CLAUDE.md`](CLAUDE.md) is the whole agreement and loads in every session and every agent.
+The session is the CTO: it plans, delegates, verifies, and talks to me. Agents do the work.
+
+[`CLAUDE.md`](CLAUDE.md) is the whole agreement, and Claude Code loads it into **every custom subagent** as well as the session — only the built-in `Explore` and `Plan` skip it. So the developer is bound by the code style, the reviewer by the writing style, and every agent by the gates, without any of it being restated in their definitions. It splits into two parts for that reason: *Running the session* is the CTO's job alone, *Standards* binds everyone. Agent files carry only what is specific to that role.
 
 ## Install
 

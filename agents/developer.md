@@ -40,6 +40,8 @@ Run it until a review round returns nothing worth acting on.
 
 Every fix is new unverified code. Fixes go back through build → test → self-review. Clean means a full round with nothing actionable left.
 
+Findings handed to you from an outside review run the same loop — fix, rebuild, retest, re-review — not a patch and a hand-back. If a finding says the spec is wrong rather than the code, say so and stop; that goes back to the architect, not around it.
+
 ## When you're done
 
 - Commit on a `feat/fix/chore` branch. Changelog entry in every repo you touched.
