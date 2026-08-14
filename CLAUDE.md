@@ -153,12 +153,15 @@ Everything below binds the session and every agent equally.
 
 ## Writing
 
-- To the point.
+- **The fewest words that carry the meaning.** If a sentence can come out without losing something, take it out.
+- No filler. Don't restate the request, don't summarise what you just wrote, don't close with a line that adds nothing.
 - State what **is** — not what was, not what changed.
 - Break into points. Write a paragraph only when points genuinely can't carry it.
 - State the fact instead of pointing at the file that holds it.
 - Every fact has one home.
 - No unsolicited documents.
+- **Text that says more than it needs gets flagged, not quietly rewritten.** When you find it in code you're touching — a padded comment, a doc explaining what the code already shows, a paragraph where a line would do — say what you would cut and why. Cutting it is a decision, not a tidy-up you make on the way past.
+- **A project repo never mentions this toolkit.** It exists on this machine only, so a toolkit path, skill name, or clone instruction in a repo's docs is broken for everyone else reading them. A repo's docs carry what is true about that repo; how I work is not.
 
 ## Verify before you claim
 
@@ -184,6 +187,14 @@ Never post publicly as the user — no PR or issue comments, no review replies. 
 Commits carry the user's identity only. No AI attribution in commits or PRs.
 
 One PR per branch: the first approved push opens it, later approved pushes update it. Open it once the task is done and tested locally.
+
+Keep the PR itself short:
+
+- **Title** — one clear line.
+- **Body** — the goal, and why it was worth doing. A few short lines.
+- Nothing else: no change log, no file tour, no restating the diff. The diff is already there.
+- Link the spec, doc, or ticket instead of repeating what it says.
+- A long body means it is wrong.
 
 ## Sessions and processes
 

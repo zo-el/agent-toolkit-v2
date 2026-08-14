@@ -172,32 +172,186 @@ out="$(run_install --sync)"
 check "sync flags stale settings" "stale" "$out"
 run_install >/dev/null
 
+# ── switching off the previous generation ────────────────────────────────────
+# The whole point of the cutover: after installing over a v1 machine, nothing v1
+# may still be wired. A leftover skill or agent keeps instructing sessions from
+# a generation whose rules no longer hold.
+echo "switch from v1"
+
+# Names deliberately share no prefix: an assertion that matched one inside the
+# other would pass or fail for the wrong reason.
+V1="$TMP/old-checkout-v1"; V1HOME="$TMP/machine-on-v1"
+mkdir -p "$V1"/{hooks,agents} "$V1HOME/.claude"/{skills,agents}
+for s in orchestrating-subagents develop feature-spec linear-sync retro chore; do
+  mkdir -p "$V1/skills/group/$s" && touch "$V1/skills/group/$s/SKILL.md"
+done
+for a in architect-designer lead developer project-manager researcher reviewer; do
+  printf 'v1 agent\n' > "$V1/agents/$a.md"
+done
+for h in guard-git guard-config guard-linear format-on-edit sync-on-skill-edit reap-managed spawn-managed; do
+  printf '#!/bin/sh\n' > "$V1/hooks/$h.sh" && chmod +x "$V1/hooks/$h.sh"
+done
+printf '#!/bin/sh\n' > "$V1/install-skills.sh" && chmod +x "$V1/install-skills.sh"
+
+# Wire the fake home exactly as a v1 install leaves it.
+ln -sfn "$V1" "$V1HOME/.claude/agent-toolkit"
+for d in "$V1"/skills/group/*/; do ln -sfn "${d%/}" "$V1HOME/.claude/skills/$(basename "${d%/}")"; done
+for a in "$V1"/agents/*.md; do cp "$a" "$V1HOME/.claude/agents/"; basename "$a"; done > "$V1HOME/.claude/agents/.toolkit-agents"
+# ...plus things that are the user's, which must survive untouched.
+mkdir -p "$TMP/user-skill/my-skill" && touch "$TMP/user-skill/my-skill/SKILL.md"
+ln -sfn "$TMP/user-skill/my-skill" "$V1HOME/.claude/skills/my-skill"
+printf 'mine\n' > "$V1HOME/.claude/agents/my-agent.md"
+cat > "$V1HOME/.claude/settings.json" <<JSON
+{
+  "env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "3"},
+  "statusLine": {"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/statusline.py"},
+  "permissions": {"additionalDirectories": ["$V1"]},
+  "hooks": {
+    "SessionStart": [{"matcher": "startup", "hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/install.sh --sync"}]}],
+    "PreToolUse": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/guard-git.sh"}]},
+      {"matcher": "Write|Edit|NotebookEdit", "hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/guard-config.sh"}]},
+      {"matcher": "mcp__linear.*", "hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/guard-linear.sh"}]}
+    ],
+    "SubagentStop": [{"hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/reap-managed.sh"}]}]
+  }
+}
+JSON
+printf '@%s/.claude/agent-toolkit/CLAUDE.md\n' "$V1HOME" > "$V1HOME/.claude/CLAUDE.md"
+
+HOME="$V1HOME" "$ROOT/install.sh" >/dev/null 2>&1
+v1s() { jq -r "$1" "$V1HOME/.claude/settings.json" 2>/dev/null; }
+
+left="$(ls -1 "$V1HOME/.claude/skills" | grep -Ex 'orchestrating-subagents|develop|feature-spec|linear-sync|retro|chore' | tr '\n' ' ')"
+[ -z "$left" ] && ok "v1 skills unlinked" || bad "v1 skills unlinked" "still present: $left"
+
+left="$(ls -1 "$V1HOME/.claude/agents" | grep -Ex 'architect-designer.md|lead.md' | tr '\n' ' ')"
+[ -z "$left" ] && ok "retired v1 agents pruned" || bad "retired v1 agents pruned" "still present: $left"
+
+grep -q 'v1 agent' "$V1HOME/.claude/agents/developer.md" \
+  && bad "shared agent names overwritten" "developer.md is still the v1 file" \
+  || ok "shared agent names overwritten"
+
+wired="$(v1s '[.hooks[][].hooks[].command] + [.statusLine.command] | join(" ")')"
+left=""
+for h in guard-git guard-config guard-linear format-on-edit sync-on-skill-edit reap-managed install-skills; do
+  case "$wired" in *"$h"*) left="$left $h" ;; esac
+done
+[ -z "$left" ] && ok "no v1 hook still wired" || bad "no v1 hook still wired" "wired:$left"
+
+check "v1 SubagentStop entry dropped" "null" "$(v1s '.hooks.SubagentStop')"
+check "v1 agent-teams flag dropped"   "null" "$(v1s '.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS')"
+check "v1 spawn depth replaced"       "2"    "$(v1s '.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH')"
+
+jq -e --arg v "$V1" '(.permissions.additionalDirectories | index($v)) == null' \
+  "$V1HOME/.claude/settings.json" >/dev/null 2>&1 \
+  && ok "old checkout dropped from approved dirs" \
+  || bad "old checkout dropped from approved dirs" "$V1 is still approved"
+
+[ -L "$V1HOME/.claude/skills/my-skill" ] && ok "user's own skill survives" || bad "user's own skill survives" "removed"
+grep -q mine "$V1HOME/.claude/agents/my-agent.md" 2>/dev/null && ok "user's own agent survives" || bad "user's own agent survives" "removed"
+check "pointer re-aimed at v2" "$ROOT" "$(readlink "$V1HOME/.claude/agent-toolkit")"
+
 # ── statusline ───────────────────────────────────────────────────────────────
 echo "statusline.py"
 
+# Placeholders have to be inert next to the populated form, so these assertions
+# pin the escape sequences rather than the bare text.
+dim() { printf '\033[2m%s\033[0m' "$1"; }
+sep=$'\033[2m│\033[0m'
+
+# Reset times are relative to now, so the fixture computes them rather than
+# pinning epochs that would go stale and silently stop exercising the branch.
+# The extra 30s absorbs the seconds that pass before the script reads the clock:
+# remaining time is floored, so a bare 2h14m would render as 2h13m.
+in2h=$(( $(date +%s) + 2*3600 + 14*60 + 30 ))
+in4d=$(( $(date +%s) + 4*86400 + 3*3600 + 30 ))
+# The task directory is named for the full session id with agent teams off, and
+# session-<first8> with them on. Both layouts must be found.
+mkdir -p "$FAKE/.claude/tasks/abc12345-dead-beef"
+printf '{"id":"1","status":"completed"}' > "$FAKE/.claude/tasks/abc12345-dead-beef/1.json"
+printf '{"id":"2","status":"in_progress"}' > "$FAKE/.claude/tasks/abc12345-dead-beef/2.json"
+printf '{"id":"3","status":"pending"}' > "$FAKE/.claude/tasks/abc12345-dead-beef/3.json"
+
 payload='{"model":{"display_name":"Opus 5","id":"claude-opus-5[1m]"},
-  "cwd":"'"$ROOT"'","effort":{"level":"xhigh"},
+  "cwd":"'"$ROOT"'","effort":{"level":"xhigh"},"session_id":"abc12345-dead-beef",
   "context_window":{"total_input_tokens":120000,"used_percentage":12},
   "cost":{"total_cost_usd":1.5,"total_lines_added":10,"total_lines_removed":2},
-  "rate_limits":{"five_hour":{"used_percentage":30}}}'
+  "pr":{"number":42,"review_state":"approved"},
+  "rate_limits":{"five_hour":{"used_percentage":30,"resets_at":'"$in2h"'},
+                 "seven_day":{"used_percentage":12,"resets_at":'"$in4d"'}}}'
 out="$(printf '%s' "$payload" | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
-check "renders the model"   "Opus 5" "$out"
-check "renders 1M marker"   "1M"     "$out"
-check "renders the effort"  "xhigh"  "$out"
-check "renders the context" "12%"    "$out"
-check "renders the cost"    "1.50"   "$out"
-check "renders the limits"  "5h 30%" "$out"
+check "renders the model"    "Opus 5" "$out"
+check "renders 1M marker"    "1M"     "$out"
+check "renders the effort"   "xhigh"  "$out"
+check "renders the context"  "12%"    "$out"
+check "renders lines changed" "$(printf '\033[32m+10\033[0m\033[2m/\033[0m\033[31m-2\033[0m')" "$out"
+check "renders hours left"   "$(printf '\033[2m⏱ 30%% 2h14m')" "$out"
+check "renders days left"    "4d3h"   "$out"
+check "renders task progress" "1/3"   "$out"
+check "renders the PR"       "#42"    "$out"
+case "$out" in
+  *'$'*)  bad "never renders a dollar amount" "printed: $out" ;;
+  *'5h'*) bad "no fixed window label when a reset time is known" "printed: $out" ;;
+  *)      ok "no dollar amount, no fixed window label" ;;
+esac
 
-# With no payload, every segment fed by it must drop out rather than guess.
+# The opening of a session: the line counters are still 0, and the CLI omits
+# rate_limits until it has a window to report — on an API key, never. Both
+# segments hold their slot dim, in order, so the bar keeps its shape throughout.
+out="$(printf '%s' '{"cwd":"/","cost":{"total_cost_usd":0,"total_lines_added":0,"total_lines_removed":0}}' \
+  | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
+check "zero lines hold the slot"      "$(dim '+0/-0')" "$out"
+check "absent limits hold the slot"   "$(dim '⏱ —')"   "$out"
+check "placeholders keep their order" "$(dim '+0/-0') $sep $(dim '⏱ —')" "$out"
+
+# A rate_limits key carrying nothing usable is the same not-yet-known state.
+out="$(printf '%s' '{"cwd":"/","rate_limits":{"five_hour":{}}}' \
+  | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
+check "unusable limits hold the slot" "$(dim '⏱ —')" "$out"
+
+# Without resets_at the labels have to come back, or two bare percentages give
+# no way to tell the windows apart.
+out="$(printf '%s' '{"cwd":"/","rate_limits":{"five_hour":{"used_percentage":30},"seven_day":{"used_percentage":12}}}' \
+  | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
+check "falls back to window labels" "5h 30%" "$out"
+check "labels both windows"         "7d 12%" "$out"
+
+# The team-derived layout must be found too, so the segment survives whichever
+# way the platform names the directory.
+mkdir -p "$FAKE/.claude/tasks/session-99999999"
+printf '{"id":"1","status":"completed"}' > "$FAKE/.claude/tasks/session-99999999/1.json"
+printf '{"id":"2","status":"pending"}' > "$FAKE/.claude/tasks/session-99999999/2.json"
+out="$(printf '%s' '{"cwd":"/","session_id":"99999999-aaaa-bbbb"}' | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
+check "finds the team-named task dir" "1/2" "$out"
+
+out="$(printf '%s' '{"cwd":"/","session_id":"no-such-session-at-all"}' | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
+case "$out" in *☰*) bad "no task dir renders nothing" "printed: $out" ;; *) ok "no task dir renders nothing" ;; esac
+
+# A reset time already in the past must not render a negative or absurd span: the
+# window drops back to its label. Asserted as the exact segment, since a glob for
+# a stray minus also matches the lines placeholder.
+past=$(( $(date +%s) - 500 ))
+out="$(printf '%s' '{"cwd":"/","rate_limits":{"five_hour":{"used_percentage":9,"resets_at":'"$past"'}}}' \
+  | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
+check "stale reset time renders the label, not a negative span" "$(dim '⏱ 5h 9%')" "$out"
+
+# With no payload, every segment fed by it must drop out rather than guess —
+# except the two placeholders, which hold width without claiming a measurement.
 # Segments read from disk (directory, toolkit stamp) legitimately stay.
-for label in "empty stdin" "malformed stdin"; do
-  [ "$label" = "empty stdin" ] && data="" || data="not json"
+for label in "empty stdin" "malformed stdin" "non-object stdin"; do
+  case "$label" in
+    "empty stdin")  data="" ;;
+    "malformed stdin") data="not json" ;;
+    *)              data="[1,2]" ;;   # parses, then breaks every .get()
+  esac
   out="$(printf '%s' "$data" | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
   case "$out" in
     *Traceback*)             bad "$label never crashes" "$out" ;;
     *%*|*'$'*|*⚡*|*▰*|*▱*)  bad "$label invents no payload segment" "printed: $out" ;;
     *)                       ok "$label degrades safely" ;;
   esac
+  check "$label keeps the placeholders" "$(dim '+0/-0') $sep $(dim '⏱ —')" "$out"
 done
 
 # ── bg + reap ────────────────────────────────────────────────────────────────

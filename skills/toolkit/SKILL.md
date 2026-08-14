@@ -19,7 +19,7 @@ Find the checkout with `readlink ~/.claude/agent-toolkit`.
 | something that must hold even if the model forgets | `hooks/` + a case in `tests/run.sh` |
 | what `settings.json` points at | `install.sh` only |
 
-One home. Never state the same rule in two places — and never copy a toolkit rule into a project's own docs.
+One home. Never state the same rule in two places.
 
 `CLAUDE.md` loads in every session and every agent, so it stays short. If a rule needs a paragraph to explain itself, it is a skill.
 

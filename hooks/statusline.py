@@ -1,29 +1,49 @@
 #!/usr/bin/env python3
 """statusLine command, one line:
 
-    model │ effort │ context │ cost │ limits │ bg │ branch │ dir │ toolkit
+    model │ effort │ context │ lines │ limits │ tasks │ bg │ branch+PR │ dir │ toolkit
 
 Reads the status JSON Claude Code pipes to stdin. Every segment is wrapped and
-degrades to nothing — a statusline must never crash or print a traceback.
-stdlib only, so it has no npm or jq dependency at render time.
+degrades to nothing — a statusline must never crash or print a traceback, and a
+segment with nothing to say takes no width. stdlib only, so it has no npm or jq
+dependency at render time.
+
+lines and limits are the exception to the no-width rule: neither has its data on
+the first renders, so they hold their slot with a dim placeholder rather than let
+the bar change shape mid-session. A session that never reports rate limits — an
+API key rather than a subscription — keeps the limits placeholder for good, since
+the payload gives no way to tell that from not knowing yet.
 """
+
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 
 HOME = os.path.expanduser("~")
 DIM, BOLD, RESET = "\033[2m", "\033[1m", "\033[0m"
-COLORS = {"red": "\033[31m", "green": "\033[32m", "yellow": "\033[33m",
-          "blue": "\033[34m", "magenta": "\033[35m", "cyan": "\033[36m"}
+COLORS = {
+    "red": "\033[31m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "blue": "\033[34m",
+    "magenta": "\033[35m",
+    "cyan": "\033[36m",
+}
 SEP = f" {DIM}│{RESET} "
 
 TAIL_BYTES = 2 * 1024 * 1024
 HEAD_BYTES = 1 * 1024 * 1024
 
-EFFORT_STYLE = {"max": COLORS["magenta"] + BOLD, "xhigh": COLORS["red"],
-                "high": COLORS["yellow"], "medium": COLORS["cyan"], "low": DIM}
+EFFORT_STYLE = {
+    "max": COLORS["magenta"] + BOLD,
+    "xhigh": COLORS["red"],
+    "high": COLORS["yellow"],
+    "medium": COLORS["cyan"],
+    "low": DIM,
+}
 
 
 def read_chunks(path):
@@ -102,9 +122,11 @@ def segment_context(data, tail):
     if used is None:
         cur = native.get("current_usage") or {}
         if isinstance(cur, dict) and cur.get("input_tokens") is not None:
-            used = ((cur.get("input_tokens") or 0)
-                    + (cur.get("cache_creation_input_tokens") or 0)
-                    + (cur.get("cache_read_input_tokens") or 0))
+            used = (
+                (cur.get("input_tokens") or 0)
+                + (cur.get("cache_creation_input_tokens") or 0)
+                + (cur.get("cache_read_input_tokens") or 0)
+            )
     pct = native.get("used_percentage")
     if pct is None and isinstance(native.get("remaining_percentage"), (int, float)):
         pct = 100 - native["remaining_percentage"]
@@ -123,49 +145,124 @@ def segment_context(data, tail):
             usage = (entry.get("message") or {}).get("usage") or {}
             if "input_tokens" not in usage:
                 continue
-            used = ((usage.get("input_tokens") or 0)
-                    + (usage.get("cache_creation_input_tokens") or 0)
-                    + (usage.get("cache_read_input_tokens") or 0))
+            used = (
+                (usage.get("input_tokens") or 0)
+                + (usage.get("cache_creation_input_tokens") or 0)
+                + (usage.get("cache_read_input_tokens") or 0)
+            )
             break
     if used is None and pct is None:
         return None
     model_id = (data.get("model") or {}).get("id") or ""
-    window = native.get("context_window_size") or (1_000_000 if "[1m]" in model_id else 200_000)
+    window = native.get("context_window_size") or (
+        1_000_000 if "[1m]" in model_id else 200_000
+    )
     if pct is None:
         pct = used * 100 / window
     pct = max(0, min(100, round(pct)))
-    color = COLORS["green"] if pct < 60 else COLORS["yellow"] if pct < 80 else COLORS["red"]
+    color = (
+        COLORS["green"] if pct < 60 else COLORS["yellow"] if pct < 80 else COLORS["red"]
+    )
     bar = "▰" * min(8, round(pct * 8 / 100)) + "▱" * (8 - min(8, round(pct * 8 / 100)))
-    tokens = f" {DIM}{human_tokens(used)}/{human_tokens(window)}{RESET}" if used is not None else ""
+    tokens = (
+        f" {DIM}{human_tokens(used)}/{human_tokens(window)}{RESET}"
+        if used is not None
+        else ""
+    )
     return f"{color}{bar} {pct}%{RESET}{tokens}"
 
 
-def segment_cost(data):
-    cost = data.get("cost") or {}
-    parts = []
-    usd = cost.get("total_cost_usd")
-    if isinstance(usd, (int, float)) and usd > 0:
-        parts.append(f"{DIM}${usd:.2f}{RESET}")
+def segment_lines(data):
+    cost = data.get("cost")
+    cost = cost if isinstance(cost, dict) else {}
     added, removed = cost.get("total_lines_added"), cost.get("total_lines_removed")
-    if added or removed:
-        parts.append(f"{COLORS['green']}+{added or 0}{RESET}{DIM}/{RESET}{COLORS['red']}-{removed or 0}{RESET}")
-    return " ".join(parts) or None
+    if not (added or removed):
+        return f"{DIM}+0/-0{RESET}"
+    return f"{COLORS['green']}+{added or 0}{RESET}{DIM}/{RESET}{COLORS['red']}-{removed or 0}{RESET}"
 
 
-def segment_limits(data):
+def compact_duration(seconds):
+    """Coarsest useful form: 47m · 2h14m · 4d3h. Never more than two units —
+    the point is how long you have, not the exact remainder."""
+    if seconds < 60:
+        return "<1m"
+    m = int(seconds // 60)
+    if m < 60:
+        return f"{m}m"
+    h, m = divmod(m, 60)
+    if h < 24:
+        return f"{h}h{m:02d}m"
+    d, h = divmod(h, 24)
+    return f"{d}d{h}h"
+
+
+def segment_limits(data, now):
+    """Usage against each rate-limit window, with how long until it resets.
+    The window's own length is not shown — a fixed "5h" label says nothing you
+    can act on, while the time left does. Falls back to the labels when the
+    payload carries no reset time, since a bare pair of percentages would not
+    say which window is which."""
     limits = data.get("rate_limits")
-    if not isinstance(limits, dict):
-        return None
-    parts = []
+    limits = limits if isinstance(limits, dict) else {}
+    parts, pcts = [], []
     for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
-        pct = (limits.get(key) or {}).get("used_percentage")
-        if isinstance(pct, (int, float)):
-            parts.append((label, round(pct)))
+        window = limits.get(key)
+        if not isinstance(window, dict):
+            continue
+        pct = window.get("used_percentage")
+        if not isinstance(pct, (int, float)):
+            continue
+        pcts.append(pct)
+        resets = window.get("resets_at")
+        left = None
+        if isinstance(resets, (int, float)) and resets > now:
+            left = compact_duration(resets - now)
+        parts.append(f"{round(pct)}% {left}" if left else f"{label} {round(pct)}%")
     if not parts:
-        return None
-    worst = max(p for _, p in parts)
+        return f"{DIM}⏱ —{RESET}"
+    worst = max(pcts)
     color = DIM if worst < 50 else COLORS["yellow"] if worst < 80 else COLORS["red"]
-    return f"{color}⏱ " + "·".join(f"{l} {p}%" for l, p in parts) + RESET
+    return f"{color}⏱ " + f"{RESET}{DIM} · {RESET}{color}".join(parts) + RESET
+
+
+def segment_tasks(data):
+    """Done out of total for this session's task list — the same list the user
+    sees. Hidden when there are none, and the platform clears the whole list
+    once every task completes, so this only ever shows live work."""
+    sid = data.get("session_id")
+    if not isinstance(sid, str) or not sid:
+        return None
+    # Two layouts, because the directory is named for whichever construct owns
+    # the list: the full session id normally, and session-<first8> when agent
+    # teams are on and the team name derives the path.
+    root = os.path.join(HOME, ".claude", "tasks")
+    names = None
+    for d in (os.path.join(root, sid), os.path.join(root, f"session-{sid[:8]}")):
+        try:
+            found = os.listdir(d)
+        except OSError:
+            continue
+        if any(n.endswith(".json") for n in found):
+            names, base = found, d
+            break
+    if names is None:
+        return None
+    d = base
+    total = done = 0
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(d, name)) as f:
+                status = json.load(f).get("status")
+        except (OSError, ValueError):
+            continue
+        total += 1
+        done += status == "completed"
+    if not total:
+        return None
+    color = COLORS["green"] if done == total else DIM
+    return f"{color}☰ {done}/{total}{RESET}"
 
 
 def proc_start(pid):
@@ -218,7 +315,10 @@ def segment_bg():
                 entry = json.load(f)
         except (OSError, ValueError):
             continue
-        if str(entry.get("owner") or "") != owner or str(entry.get("owner_start") or "") != owner_start:
+        if (
+            str(entry.get("owner") or "") != owner
+            or str(entry.get("owner_start") or "") != owner_start
+        ):
             continue
         pid = str(entry.get("pid") or "")
         if not pid.isdigit():
@@ -232,19 +332,39 @@ def segment_bg():
     return f"{COLORS['blue']}⚙ {count} bg{RESET}" if count else None
 
 
-def segment_git(cwd):
-    def git(*args):
-        return subprocess.run(["git", "-C", cwd, *args],
-                              capture_output=True, text=True, timeout=0.2).stdout.strip()
+PR_STYLE = {
+    "approved": COLORS["green"],
+    "changes_requested": COLORS["red"],
+    "pending": COLORS["yellow"],
+    "draft": DIM,
+}
 
-    branch = git("symbolic-ref", "--short", "-q", "HEAD") or git("rev-parse", "--short", "HEAD")
+
+def segment_git(data, cwd):
+    """Branch, dirty marker, and the open PR for it. The PR rides here rather
+    than in its own segment because it is the same question — what state is
+    this branch in — and it costs no extra width when there is no PR."""
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", cwd, *args], capture_output=True, text=True, timeout=0.2
+        ).stdout.strip()
+
+    branch = git("symbolic-ref", "--short", "-q", "HEAD") or git(
+        "rev-parse", "--short", "HEAD"
+    )
     if not branch:
         return None
     try:
         dirty = "*" if git("status", "--porcelain", "-uno", "--no-renames") else ""
     except subprocess.TimeoutExpired:
         dirty = "?"
-    return f"{COLORS['cyan']}⎇ {branch}{dirty}{RESET}"
+    pr = data.get("pr")
+    pr_part = ""
+    if isinstance(pr, dict) and pr.get("number"):
+        style = PR_STYLE.get(pr.get("review_state"), DIM)
+        pr_part = f" {style}#{pr['number']}{RESET}"
+    return f"{COLORS['cyan']}⎇ {branch}{dirty}{RESET}{pr_part}"
 
 
 def segment_toolkit():
@@ -266,8 +386,18 @@ def segment_toolkit():
     if m:
         try:
             cur = subprocess.run(
-                ["git", "-C", os.path.join(HOME, ".claude", "agent-toolkit"), "rev-parse", "--short", "HEAD"],
-                capture_output=True, text=True, timeout=0.2).stdout.strip()
+                [
+                    "git",
+                    "-C",
+                    os.path.join(HOME, ".claude", "agent-toolkit"),
+                    "rev-parse",
+                    "--short",
+                    "HEAD",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=0.2,
+            ).stdout.strip()
             if cur == m.group(1):
                 marker = ""
             elif cur:
@@ -282,6 +412,9 @@ def main():
         data = json.load(sys.stdin)
     except Exception:
         data = {}
+    # Valid JSON that isn't an object parses fine and then breaks every .get().
+    if not isinstance(data, dict):
+        data = {}
 
     tail = head = ""
     transcript = data.get("transcript_path")
@@ -291,16 +424,22 @@ def main():
         except OSError:
             pass
 
-    cwd = (data.get("workspace") or {}).get("current_dir") or data.get("cwd") or os.getcwd()
+    cwd = (
+        (data.get("workspace") or {}).get("current_dir")
+        or data.get("cwd")
+        or os.getcwd()
+    )
+    now = time.time()
     segments = []
     for build in (
         lambda: segment_model(data),
         lambda: segment_effort(data, tail, head),
         lambda: segment_context(data, tail),
-        lambda: segment_cost(data),
-        lambda: segment_limits(data),
+        lambda: segment_lines(data),
+        lambda: segment_limits(data, now),
+        lambda: segment_tasks(data),
         lambda: segment_bg(),
-        lambda: segment_git(cwd),
+        lambda: segment_git(data, cwd),
         lambda: f"{DIM}{os.path.basename(cwd)}{RESET}",
         lambda: segment_toolkit(),
     ):
