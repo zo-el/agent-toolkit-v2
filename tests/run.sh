@@ -255,18 +255,65 @@ check "pointer re-aimed at v2" "$ROOT" "$(readlink "$V1HOME/.claude/agent-toolki
 # ── statusline ───────────────────────────────────────────────────────────────
 echo "statusline.py"
 
+# Reset times are relative to now, so the fixture computes them rather than
+# pinning epochs that would go stale and silently stop exercising the branch.
+# The extra 30s absorbs the seconds that pass before the script reads the clock:
+# remaining time is floored, so a bare 2h14m would render as 2h13m.
+in2h=$(( $(date +%s) + 2*3600 + 14*60 + 30 ))
+in4d=$(( $(date +%s) + 4*86400 + 3*3600 + 30 ))
+# The task directory is named for the full session id with agent teams off, and
+# session-<first8> with them on. Both layouts must be found.
+mkdir -p "$FAKE/.claude/tasks/abc12345-dead-beef"
+printf '{"id":"1","status":"completed"}' > "$FAKE/.claude/tasks/abc12345-dead-beef/1.json"
+printf '{"id":"2","status":"in_progress"}' > "$FAKE/.claude/tasks/abc12345-dead-beef/2.json"
+printf '{"id":"3","status":"pending"}' > "$FAKE/.claude/tasks/abc12345-dead-beef/3.json"
+
 payload='{"model":{"display_name":"Opus 5","id":"claude-opus-5[1m]"},
-  "cwd":"'"$ROOT"'","effort":{"level":"xhigh"},
+  "cwd":"'"$ROOT"'","effort":{"level":"xhigh"},"session_id":"abc12345-dead-beef",
   "context_window":{"total_input_tokens":120000,"used_percentage":12},
   "cost":{"total_cost_usd":1.5,"total_lines_added":10,"total_lines_removed":2},
-  "rate_limits":{"five_hour":{"used_percentage":30}}}'
+  "pr":{"number":42,"review_state":"approved"},
+  "rate_limits":{"five_hour":{"used_percentage":30,"resets_at":'"$in2h"'},
+                 "seven_day":{"used_percentage":12,"resets_at":'"$in4d"'}}}'
 out="$(printf '%s' "$payload" | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
-check "renders the model"   "Opus 5" "$out"
-check "renders 1M marker"   "1M"     "$out"
-check "renders the effort"  "xhigh"  "$out"
-check "renders the context" "12%"    "$out"
-check "renders the cost"    "1.50"   "$out"
-check "renders the limits"  "5h 30%" "$out"
+check "renders the model"    "Opus 5" "$out"
+check "renders 1M marker"    "1M"     "$out"
+check "renders the effort"   "xhigh"  "$out"
+check "renders the context"  "12%"    "$out"
+check "renders lines changed" "+10"   "$out"
+check "renders hours left"   "2h14m"  "$out"
+check "renders days left"    "4d3h"   "$out"
+check "renders task progress" "1/3"   "$out"
+check "renders the PR"       "#42"    "$out"
+case "$out" in
+  *'$'*)  bad "never renders a dollar amount" "printed: $out" ;;
+  *'5h'*) bad "no fixed window label when a reset time is known" "printed: $out" ;;
+  *)      ok "no dollar amount, no fixed window label" ;;
+esac
+
+# Without resets_at the labels have to come back, or two bare percentages give
+# no way to tell the windows apart.
+out="$(printf '%s' '{"cwd":"/","rate_limits":{"five_hour":{"used_percentage":30},"seven_day":{"used_percentage":12}}}' \
+  | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
+check "falls back to window labels" "5h 30%" "$out"
+check "labels both windows"         "7d 12%" "$out"
+
+# The team-derived layout must be found too, so the segment survives whichever
+# way the platform names the directory.
+mkdir -p "$FAKE/.claude/tasks/session-99999999"
+printf '{"id":"1","status":"completed"}' > "$FAKE/.claude/tasks/session-99999999/1.json"
+printf '{"id":"2","status":"pending"}' > "$FAKE/.claude/tasks/session-99999999/2.json"
+out="$(printf '%s' '{"cwd":"/","session_id":"99999999-aaaa-bbbb"}' | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
+check "finds the team-named task dir" "1/2" "$out"
+
+out="$(printf '%s' '{"cwd":"/","session_id":"no-such-session-at-all"}' | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
+case "$out" in *☰*) bad "no task dir renders nothing" "printed: $out" ;; *) ok "no task dir renders nothing" ;; esac
+
+# A reset time already in the past must not render a negative or absurd span.
+past=$(( $(date +%s) - 500 ))
+out="$(printf '%s' '{"cwd":"/","rate_limits":{"five_hour":{"used_percentage":9,"resets_at":'"$past"'}}}' \
+  | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
+case "$out" in *-*m*|*-*h*) bad "stale reset time never renders negative" "printed: $out" ;; *) ok "stale reset time never renders negative" ;; esac
 
 # With no payload, every segment fed by it must drop out rather than guess.
 # Segments read from disk (directory, toolkit stamp) legitimately stay.

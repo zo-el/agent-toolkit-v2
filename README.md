@@ -65,6 +65,15 @@ Everything else is silent. `permissions.defaultMode` is `auto` and `~/.claude`, 
 
 ## Statusline
 
-[`hooks/statusline.py`](hooks/statusline.py) shows: model · effort · context bar · cost · rate limits · background processes · branch · directory · toolkit version.
+[`hooks/statusline.py`](hooks/statusline.py) shows: model · effort · context bar · lines changed · rate limits · tasks · background processes · branch and PR · directory · toolkit version.
 
-`⬡ v<count>·<sha>` is the "are my changes applied?" light. A `⚠` means the repo has moved past the last install; a dim `?` means it could not be verified.
+```
+Opus 5 1M │ ⚡xhigh │ ▰▱▱▱▱▱▱▱ 18% 180k/1M │ +412/-96 │ ⏱ 63% 2h13m · 41% 3d2h │ ☰ 2/5 │ ⎇ main* #42 │ my-app │ ⬡ v10·12d438c
+```
+
+A segment with nothing to say takes no width, so the line stays short when little is happening.
+
+- **`⏱ 63% 2h13m · 41% 3d2h`** — how much of each rate-limit window is used, and how long until it resets. The window's own length is deliberately not shown; a fixed `5h` label says nothing you can act on. Falls back to `5h` / `7d` labels only when the payload carries no reset time, since two bare percentages wouldn't say which is which.
+- **`☰ 2/5`** — tasks done out of open, from this session's own list. The platform clears the whole list once every task completes, so this only ever shows live work.
+- **`⎇ main* #42`** — branch, dirty marker, and the open PR for it, coloured by review state.
+- **`⬡ v<count>·<sha>`** — the "are my changes applied?" light. A `⚠` means the repo has moved past the last install; a dim `?` means it couldn't be verified.
