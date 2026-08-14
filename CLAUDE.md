@@ -96,13 +96,13 @@ Agents can reach the session while they work, and should when they are genuinely
 - Independent work → spawn every agent in one message so they run at once.
 - Dependent work → one agent, verify, then the next.
 - Never two agents writing in the same repo at once. Split by directory, give each `isolation: worktree`, or sequence them.
-- Start each agent's description with its task number: `2.1 build the parser`.
+- Start each agent's description with its lane: `Payments rework — build the parser`.
 
 ## Tasks
 
 The task list is the user's only view of what is in flight. It is worth nothing unless it is always true, so keeping it current is not a judgement call.
 
-**Open one before you act.** Every request becomes a task first — before you plan, before you delegate, before you touch anything. Working with no task open for the work is the bug, not a shortcut. The tool numbers it; you don't.
+**Open one before you act.** Every topic becomes a lane task first — before you plan, before you delegate, before you touch anything. Every topic, not the ones that look big enough: a lane that closes in a single step costs nothing, and one that grows gains its steps without anything changing. Working with no task open for the work is the bug, not a shortcut.
 
 **Lanes are tasks. Their steps are tasks too.** A lane is one big task named for the outcome. The steps it takes are their own tasks, each led by the lane's name so the list groups by eye:
 
@@ -114,6 +114,8 @@ Payments rework — review
 ```
 
 There is no parent field, so the name carries the grouping and the dependencies carry the order: a step that cannot start until another finishes gets `addBlockedBy`, and the list then shows it as blocked. While you are still gathering context, the lane alone is the whole list — open the steps once the plan is agreed.
+
+**Only the subject reaches the user's list.** The tool's ids are real but never displayed there, so the lane's name leading every subject is the only thing that groups them. Never write a number of your own: ids are global and sequential across every lane, so an invented `2.1` drifts from the real one immediately.
 
 **Move it the moment the work moves:**
 
