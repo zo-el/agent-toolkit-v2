@@ -412,6 +412,9 @@ def main():
         data = json.load(sys.stdin)
     except Exception:
         data = {}
+    # Valid JSON that isn't an object parses fine and then breaks every .get().
+    if not isinstance(data, dict):
+        data = {}
 
     tail = head = ""
     transcript = data.get("transcript_path")

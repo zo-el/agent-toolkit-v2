@@ -339,8 +339,12 @@ check "stale reset time renders the label, not a negative span" "$(dim '⏱ 5h 9
 # With no payload, every segment fed by it must drop out rather than guess —
 # except the two placeholders, which hold width without claiming a measurement.
 # Segments read from disk (directory, toolkit stamp) legitimately stay.
-for label in "empty stdin" "malformed stdin"; do
-  [ "$label" = "empty stdin" ] && data="" || data="not json"
+for label in "empty stdin" "malformed stdin" "non-object stdin"; do
+  case "$label" in
+    "empty stdin")  data="" ;;
+    "malformed stdin") data="not json" ;;
+    *)              data="[1,2]" ;;   # parses, then breaks every .get()
+  esac
   out="$(printf '%s' "$data" | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
   case "$out" in
     *Traceback*)             bad "$label never crashes" "$out" ;;
