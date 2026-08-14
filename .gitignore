@@ -1,0 +1,6 @@
+# The hook runner executes statusline.py and caches bytecode next to it.
+__pycache__/
+*.pyc
+
+# Secrets never land here. Keys live device-local, in ~/.claude.json.
+*.api.key

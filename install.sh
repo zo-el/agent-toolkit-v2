@@ -1,0 +1,329 @@
+#!/usr/bin/env bash
+# Install or repair this toolkit on a machine.
+#
+#   ./install.sh            full install: symlink, skills, agents, settings, pointer, doctor
+#   ./install.sh --sync     session-start mode: re-link and re-check, print only problems
+#   ./install.sh --dry-run  show every change a full install would make, write nothing
+#
+# Device config points at the stable path ~/.claude/agent-toolkit, a symlink
+# this script owns, so moving the checkout is repaired by re-running from the
+# new location — only the symlink changes.
+set -uo pipefail
+
+# pwd -P: --sync runs through the stable symlink, and the logical path would
+# make ln -sfn point the symlink at itself.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+CLAUDE_DIR="$HOME/.claude"
+STABLE="$CLAUDE_DIR/agent-toolkit"
+SETTINGS="$CLAUDE_DIR/settings.json"
+POINTER="$CLAUDE_DIR/CLAUDE.md"
+SCRATCH="/tmp/claude-$(id -u)"
+AGENTS_DST="$CLAUDE_DIR/agents"
+MANIFEST="$AGENTS_DST/.toolkit-agents"
+MODE="${1:-full}"
+ts="$(date +%Y%m%d-%H%M%S)"
+problems=0
+
+say()  { [ "$MODE" != "--sync" ] && echo "$@" || true; }
+warn() { echo "agent-toolkit: ✗ $*"; problems=$((problems + 1)); }
+need() { command -v "$1" >/dev/null 2>&1 || warn "missing dependency: $1"; }
+need jq; need python3; need git
+
+# Where the checkout lived at the last install. Read before section 1 re-aims
+# the symlink, so a moved checkout can be dropped from the approved directories.
+PREV_ROOT="$(readlink "$STABLE" 2>/dev/null || true)"
+
+# ── 1. stable symlink ────────────────────────────────────────────────────────
+if [ "$MODE" = "--dry-run" ]; then
+  cur="$(readlink "$STABLE" 2>/dev/null || echo "<none>")"
+  [ "$cur" = "$ROOT" ] || echo "symlink: $STABLE → $ROOT (was $cur)"
+else
+  mkdir -p "$CLAUDE_DIR"
+  [ "$(readlink "$STABLE" 2>/dev/null)" = "$ROOT" ] || ln -sfn "$ROOT" "$STABLE"
+fi
+
+# ── 2. skills — symlinked, so an edit is live without re-installing ──────────
+skill_count="$(find "$ROOT/skills" -name SKILL.md 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$MODE" = "--dry-run" ]; then
+  echo "skills: $skill_count symlinked into $CLAUDE_DIR/skills"
+else
+  mkdir -p "$CLAUDE_DIR/skills"
+  # -sfn so a moved skill repoints instead of nesting inside the old link.
+  find "$ROOT/skills" -name SKILL.md -print0 2>/dev/null | while IFS= read -r -d '' f; do
+    d="$(dirname "$f")"
+    ln -sfn "$d" "$CLAUDE_DIR/skills/$(basename "$d")"
+  done
+  find "$CLAUDE_DIR/skills" -maxdepth 1 -type l ! -exec test -e {} \; -delete
+fi
+
+# ── 3. agents — copied, because the agents file watcher does not reliably
+# follow symlinks. The manifest names what this toolkit owns, so a renamed or
+# retired agent is pruned without touching agents the user wrote. ────────────
+agent_count="$(ls "$ROOT"/agents/*.md 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$MODE" = "--dry-run" ]; then
+  echo "agents: $agent_count copied into $AGENTS_DST"
+else
+  mkdir -p "$AGENTS_DST"
+  if [ -f "$MANIFEST" ]; then
+    while IFS= read -r name; do
+      [ -n "$name" ] && [ ! -f "$ROOT/agents/$name" ] && rm -f "$AGENTS_DST/$name"
+    done < "$MANIFEST"
+  fi
+  : > "$MANIFEST.tmp"
+  for a in "$ROOT"/agents/*.md; do
+    [ -e "$a" ] || continue
+    n="$(basename "$a")"
+    if ! cmp -s "$a" "$AGENTS_DST/$n" 2>/dev/null; then
+      # A file we do not already own is the user's — keep a dated copy.
+      if [ -f "$AGENTS_DST/$n" ] && ! grep -qxF "$n" "$MANIFEST" 2>/dev/null; then
+        mkdir -p "$CLAUDE_DIR/backups/agents"
+        cp "$AGENTS_DST/$n" "$CLAUDE_DIR/backups/agents/$n.$ts"
+        say "  ! kept your existing $n → backups/agents/$n.$ts"
+      fi
+      cp -f "$a" "$AGENTS_DST/$n"
+    fi
+    printf '%s\n' "$n" >> "$MANIFEST.tmp"
+  done
+  mv "$MANIFEST.tmp" "$MANIFEST"
+  "$ROOT/hooks/reap.sh" </dev/null >/dev/null 2>&1 || true
+fi
+
+# ── 4. settings.json ─────────────────────────────────────────────────────────
+# The wiring is declared once here: the merge builds settings.json from it, and
+# the doctor checks the installed file against it. Neither side can drift.
+# Commands are relative to $STABLE; matcher "" means the event takes none.
+#
+# Notification events (Notification, Stop) are deliberately absent — the
+# claude-notifications-go plugin owns them, and its suppressForSubagents keeps
+# a sub-agent finishing from ever being a false cue.
+WIRING='[
+  {"event":"SessionStart","matcher":"startup|resume|clear",
+   "hooks":[{"command":"/install.sh --sync"}]},
+  {"event":"PreToolUse","matcher":"Bash",
+   "hooks":[{"command":"/hooks/guard.sh"}]},
+  {"event":"PreToolUse","matcher":"mcp__linear.*",
+   "hooks":[{"command":"/hooks/guard.sh"}]},
+  {"event":"PostToolUse","matcher":"Write|Edit",
+   "hooks":[{"command":"/hooks/sync.sh"},
+            {"command":"/hooks/format.sh","async":true}]},
+  {"event":"SessionEnd","matcher":"",
+   "hooks":[{"command":"/hooks/reap.sh"}]}
+]'
+
+# No apostrophes anywhere in the jq program below — it is a single-quoted shell
+# argument, and two of them balance out, so bash accepts the script while jq
+# receives a program truncated at the first one. A truncated program writes a
+# settings.json with the statusline and every hook missing, and reports success.
+desired_settings() {
+  jq --arg base "$STABLE" --arg cfg "$CLAUDE_DIR" --arg root "$ROOT" \
+     --arg scratch "$SCRATCH" --arg prev "$PREV_ROOT" --argjson wiring "$WIRING" '
+    def ours: test("agent-toolkit|install-skills");
+    def clean(a): (a // [])
+      | map(select((((.hooks // []) | map(.command // "") | join(" ")) | ours) | not));
+
+    # Directories an agent works in outside the repo it was started in. A path
+    # inside one is approved before any rule is consulted, for writes as much as
+    # reads, which is what stops a background agent stalling on a prompt.
+    def dirs: [$cfg, $scratch, $root];
+    # A checkout that moved: drop the path it used to live at rather than leave
+    # it write-approved for whatever occupies it next.
+    def stale: [$prev] | map(select(length > 0 and . != $root));
+    # ~/.claude is approved wholesale above, which would otherwise hand over the
+    # credentials file and the settings files, whose env block carries MCP tokens
+    # on machines this toolkit travels to. A deny is evaluated first, and governs
+    # the Read tool only, so jq and python still reach settings.
+    # The leading slash is doubled because $cfg is already absolute; a single one
+    # anchors the pattern at the settings directory, where it matches nothing.
+    def denied: ["Read(/" + $cfg + "/.credentials.json)",
+                 "Read(/" + $cfg + "/settings*.json)",
+                 "Read(/" + $cfg + "/backups/settings.json.*)",
+                 "Read(/" + $cfg + "/backups/.claude.json.backup.*)"];
+
+    # Depth 2 lets a subagent spawn one layer of its own and no further: the
+    # developer and reviewer need it to run their review agents.
+    # AGENT_TEAMS is deleted rather than merely not written, so a settings.json
+    # from an earlier install stops making every session on this machine visible
+    # to every other one.
+    .env = ((.env // {}) + {CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "2"}
+            | del(.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, .CLAUDE_CODE_ENABLE_TASKS))
+
+    # Auto mode is what lets an agent finish unattended. It is safe because the
+    # guard hook fires independently of permission mode and re-introduces a
+    # prompt exactly where one is wanted.
+    | .permissions = ((.permissions // {}) + {defaultMode: "auto"})
+    | .permissions.additionalDirectories =
+        (((.permissions.additionalDirectories // []) - (dirs + stale)) + dirs)
+    | .permissions.deny = (((.permissions.deny // []) - denied) + denied)
+
+    # Mechanical version of the no-attribution rule.
+    | .includeCoAuthoredBy = false
+
+    # The agents spawned as review gates live in pr-review-toolkit; the turn-is-
+    # yours notifications live in claude-notifications-go. Every other plugin is
+    # the users own choice and is left alone.
+    | .enabledPlugins = ((.enabledPlugins // {})
+        + {"pr-review-toolkit@claude-plugins-official": true,
+           "claude-notifications-go@claude-notifications-go": true})
+
+    | .statusLine = {type: "command", command: ($base + "/hooks/statusline.py"), padding: 0}
+
+    # Every event is cleaned of our entries first, including events we no longer
+    # wire, so retiring one cleans up after itself. Only arrays are cleaned: a
+    # malformed foreign entry is left alone rather than failing the whole merge,
+    # which would write nothing and report success.
+    | .hooks = (reduce $wiring[] as $w (
+        ((.hooks // {}) | with_entries(if (.value | type) == "array"
+                                       then .value = clean(.value) else . end));
+        .[$w.event] = ((.[$w.event] // []) + [
+          (if $w.matcher == "" then {} else {matcher: $w.matcher} end)
+          + {hooks: ($w.hooks | map({type: "command", command: ($base + .command)}
+                                    + (if .async then {async: true} else {} end)))}]))
+        | with_entries(select((.value | length) > 0)))
+  ' "$1"
+}
+
+if [ ! -f "$SETTINGS" ]; then
+  case "$MODE" in
+    --dry-run) echo "settings: $SETTINGS would be created" ;;
+    --sync)    warn "settings.json missing — run: $STABLE/install.sh" ;;
+    *)         printf '{}\n' > "$SETTINGS" ;;
+  esac
+fi
+if [ -f "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+  new="$(desired_settings "$SETTINGS")"; rc=$?
+  # A merge that aborted looks exactly like "nothing to change" — jq exits
+  # non-zero with no output when, say, permissions.allow is a string. Branch on
+  # the status, and on empty output from a non-empty file, or a failed install
+  # reports success and stamps a version it never applied.
+  if [ "$rc" -ne 0 ] || { [ -z "$new" ] && [ -s "$SETTINGS" ]; }; then
+    warn "settings.json merge failed — nothing applied. Run: $STABLE/install.sh"
+  elif ! printf '%s\n' "$new" | cmp -s - "$SETTINGS"; then
+    case "$MODE" in
+      --dry-run)
+        echo "settings: $SETTINGS would change:"
+        printf '%s\n' "$new" | diff -u "$SETTINGS" - | sed 's/^/  /' | head -80
+        ;;
+      --sync) warn "settings.json is stale — run: $STABLE/install.sh" ;;
+      *)
+        mkdir -p "$CLAUDE_DIR/backups"
+        cp "$SETTINGS" "$CLAUDE_DIR/backups/settings.json.$ts"
+        printf '%s\n' "$new" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+        say "✓ settings.json updated (backup: backups/settings.json.$ts)"
+        ;;
+    esac
+  else
+    say "✓ settings.json already current"
+  fi
+fi
+
+# ── 5. device pointer ────────────────────────────────────────────────────────
+pointer_content() {
+  cat <<EOF
+# Global instructions
+
+Everything lives in the portable agent-toolkit repo. This file is only this device's pointer to it. New rules go into the toolkit, never here.
+
+@$STABLE/CLAUDE.md
+EOF
+}
+
+if ! pointer_content | cmp -s - "$POINTER" 2>/dev/null; then
+  case "$MODE" in
+    --dry-run)
+      echo "pointer: $POINTER would change:"
+      pointer_content | diff -u "$POINTER" - 2>/dev/null | sed 's/^/  /' | head -20
+      ;;
+    --sync) warn "~/.claude/CLAUDE.md does not point at $STABLE — run: $STABLE/install.sh" ;;
+    *)
+      mkdir -p "$CLAUDE_DIR/backups"
+      [ -f "$POINTER" ] && cp "$POINTER" "$CLAUDE_DIR/backups/CLAUDE.md.$ts"
+      pointer_content > "$POINTER"
+      say "✓ ~/.claude/CLAUDE.md points at $STABLE"
+      ;;
+  esac
+else
+  say "✓ ~/.claude/CLAUDE.md already current"
+fi
+
+# ── 6. doctor ────────────────────────────────────────────────────────────────
+for f in "$ROOT"/hooks/*.sh "$ROOT"/hooks/*.py "$ROOT/install.sh"; do
+  [ -x "$f" ] || warn "not executable: $f"
+done
+
+# Our wiring must be present, not merely valid. Checking only the paths found in
+# settings passes a settings.json that lost every hook — there is nothing left to
+# check — and the next --sync compares it against the same output and calls it
+# current, so the whole gate can vanish while both checks report green.
+if [ "$MODE" != "--dry-run" ] && [ -f "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
+  if ! gone="$(jq -r --argjson want "$WIRING" --arg base "$STABLE" '
+    [ $want[] as $w | $w.hooks[] as $h
+      | {event: $w.event, matcher: $w.matcher, command: ($base + $h.command)} ] as $want_t
+    | [ (.hooks // {}) | to_entries[] as $ev | $ev.value[] as $e | ($e.hooks // [])[] as $h
+        | {event: $ev.key, matcher: ($e.matcher // ""), command: ($h.command // "")} ] as $have_t
+    | (if ((.statusLine.command // "") | test("agent-toolkit")) then [] else ["statusLine"] end)
+      + (($want_t - $have_t) | map(.event + "[" + .matcher + "] " + .command))
+    | join(", ")' "$SETTINGS" 2>/dev/null)"; then
+    warn "cannot verify the wiring (unreadable settings.json) — run: $STABLE/install.sh"
+  elif [ -n "$gone" ]; then
+    warn "settings.json is missing wiring ($gone) — run: $STABLE/install.sh"
+  fi
+  # Every referenced hook path must exist and run.
+  while IFS= read -r cmd; do
+    case "$cmd" in
+      "$STABLE"/*".sh "*) exe="${cmd%".sh "*}.sh" ;;
+      "$STABLE"/*".py "*) exe="${cmd%".py "*}.py" ;;
+      /*)                 exe="${cmd%% *}" ;;
+      *)                  continue ;;
+    esac
+    [ -x "$exe" ] || warn "settings references a missing or non-executable command: $exe"
+  done < <(jq -r '([.statusLine.command] + [.hooks[]?[]?.hooks[]?.command]) | .[]? // empty' "$SETTINGS" 2>/dev/null)
+fi
+
+if [ -f "$POINTER" ]; then
+  # The import path is the whole rest of the line, so a home directory with a
+  # space in it is not truncated.
+  while IFS= read -r imp; do
+    [ -e "${imp#@}" ] || warn "~/.claude/CLAUDE.md imports a missing file: ${imp#@}"
+  done < <(grep -oE '^@/.+' "$POINTER" || true)
+fi
+
+if [ "$MODE" != "--dry-run" ]; then
+  linked="$(find "$CLAUDE_DIR/skills" -maxdepth 1 -type l 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$linked" -ge "$skill_count" ] || warn "only $linked of $skill_count skills are linked"
+  copied=0
+  for a in "$ROOT"/agents/*.md; do
+    [ -e "$a" ] && cmp -s "$a" "$AGENTS_DST/$(basename "$a")" 2>/dev/null && copied=$((copied + 1))
+  done
+  [ "$copied" -ge "$agent_count" ] || warn "only $copied of $agent_count agents are installed and current"
+fi
+
+# Enabling a plugin is not installing it. Advisory rather than a failure: a
+# re-install cannot fix it, so it must not withhold the version stamp.
+if [ "$MODE" != "--dry-run" ] && command -v jq >/dev/null 2>&1; then
+  for p in pr-review-toolkit@claude-plugins-official \
+           claude-notifications-go@claude-notifications-go; do
+    jq -e --arg k "$p" '(.plugins[$k] // []) | length > 0' \
+      "$CLAUDE_DIR/plugins/installed_plugins.json" >/dev/null 2>&1 \
+      || echo "agent-toolkit: ! plugin $p is enabled but not installed — see README"
+  done
+  ncfg="$CLAUDE_DIR/claude-notifications-go/config.json"
+  [ ! -f "$ncfg" ] || jq -e '.notifications.suppressForSubagents == true' "$ncfg" >/dev/null 2>&1 \
+    || echo "agent-toolkit: ! notifications fire for sub-agents — set notifications.suppressForSubagents to true in $ncfg"
+fi
+
+# ── 7. version stamp ─────────────────────────────────────────────────────────
+# The statusline shows this and flags it once the repo moves past it. Any run
+# that actually applies something stamps; only --dry-run is excluded. Held back
+# while a problem stands, so the light never claims changes are applied when a
+# stale settings.json means they are not.
+if [ "$MODE" != "--dry-run" ] && [ "$problems" -eq 0 ] && git -C "$ROOT" rev-parse HEAD >/dev/null 2>&1; then
+  printf 'v%s·%s\n' "$(git -C "$ROOT" rev-list --count HEAD)" \
+                    "$(git -C "$ROOT" rev-parse --short HEAD)" > "$CLAUDE_DIR/agent-toolkit-version"
+fi
+
+if [ "$problems" -eq 0 ]; then
+  say "✓ all checks green ($skill_count skills, $agent_count agents, wired via $STABLE)"
+else
+  say "$problems problem(s) above"
+  exit 1
+fi

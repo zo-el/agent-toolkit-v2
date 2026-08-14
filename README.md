@@ -1,0 +1,65 @@
+# agent-toolkit
+
+My working agreement with Claude Code, as a repo that travels between machines.
+
+The session is the CTO: it plans, delegates, verifies, and talks to me. Agents do the work. [`CLAUDE.md`](CLAUDE.md) is the whole agreement and loads in every session and every agent.
+
+## Install
+
+```bash
+git clone git@github.com:zo-el/agent-toolkit.git && cd agent-toolkit
+./install.sh          # preview first with: ./install.sh --dry-run
+```
+
+Two plugins are enabled by the installer but have to be installed once per machine:
+
+```bash
+claude plugin install pr-review-toolkit@claude-plugins-official --scope user
+```
+
+Notifications come from [claude-notifications-go](https://github.com/777genius/claude-notifications-go) — install it from its README, then `/claude-notifications-go:settings`. It fires when the main agent finishes or needs you, and stays quiet for sub-agents.
+
+The checkout can live anywhere. Device config reaches it only through the `~/.claude/agent-toolkit` symlink, so moving it is one `./install.sh` from the new location. On another machine, `git pull` is the whole upgrade — the next session start re-links everything.
+
+## What's here
+
+| | |
+| ------------- | ---------------------------------------------------------------------- |
+| `CLAUDE.md` | the agreement: the CTO loop, tasks, code and writing style, the gates |
+| `agents/` | architect · developer · reviewer · project-manager · researcher |
+| `skills/` | `toolkit` (change this repo) · `ui-review` (screenshot galleries) |
+| `hooks/` | the guard, the statusline, the formatter, background process tracking |
+| `install.sh` | wiring and the doctor |
+| `RETRO.md` | learnings collected from sessions, reviewed on demand |
+| `docs/brief.md` | what this toolkit is for |
+
+## The agents
+
+Each runs in its own context with a tool allowlist as its outer boundary and its definition as the role it keeps inside it.
+
+| Agent | Effort | Cannot |
+| ----------------- | ------ | ------------------------------ |
+| `architect` | max | write application source |
+| `developer` | xhigh | push, or touch Linear |
+| `reviewer` | xhigh | write anything |
+| `project-manager` | high | write anything but Linear |
+| `researcher` | high | write anything |
+
+Linear tools live only in `project-manager`. Only `developer` can edit source. Subagents nest one level deep, which is what lets the developer and reviewer run their review agents.
+
+## Enforcement
+
+[`hooks/guard.sh`](hooks/guard.sh) is the only gate, and it fires regardless of permission mode, inside subagents too:
+
+- **denies** posting publicly as the user — PR and issue comments, review submissions.
+- **asks** before anything leaves the machine (push, PR, release, package publish), before Linear writes, before touching the device outside the workspace, and before the few git commands the reflog cannot undo.
+
+Everything else is silent. `permissions.defaultMode` is `auto` and `~/.claude`, the scratchpad, and this checkout are approved working directories, so an agent runs unattended instead of stalling on a prompt nobody is watching. `Read` is denied on the credentials and settings files, which carry API tokens.
+
+[`tests/run.sh`](tests/run.sh) is the regression suite for all of it.
+
+## Statusline
+
+[`hooks/statusline.py`](hooks/statusline.py) shows: model · effort · context bar · cost · rate limits · background processes · branch · directory · toolkit version.
+
+`⬡ v<count>·<sha>` is the "are my changes applied?" light. A `⚠` means the repo has moved past the last install; a dim `?` means it could not be verified.

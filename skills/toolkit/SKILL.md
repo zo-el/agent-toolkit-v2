@@ -1,0 +1,52 @@
+---
+name: toolkit
+description: Change the agent toolkit itself, and review the retro log. Use when the user says "add this to the toolkit", "remember this globally", "make this a rule everywhere", when editing anything in the agent-toolkit repo (CLAUDE.md, agents/, skills/, hooks/, install.sh), when reviewing RETRO.md or asking what the toolkit should learn, or when the session-start doctor reports the toolkit broken.
+---
+
+# Toolkit
+
+The toolkit is the instruction set every future session on every machine runs on. Change it with the same discipline as production code.
+
+Find the checkout with `readlink ~/.claude/agent-toolkit`.
+
+## Where a change goes
+
+| The change is… | It goes in… |
+| ------------------------------------------------- | ------------------------ |
+| a rule that is true for every task | `CLAUDE.md` — one line |
+| one agent's role, loop, or boundary | `agents/<name>.md` |
+| a procedure that should load only when relevant | a new `skills/<name>/SKILL.md` |
+| something that must hold even if the model forgets | `hooks/` + a case in `tests/run.sh` |
+| what `settings.json` points at | `install.sh` only |
+
+One home. Never state the same rule in two places — and never copy a toolkit rule into a project's own docs.
+
+`CLAUDE.md` loads in every session and every agent, so it stays short. If a rule needs a paragraph to explain itself, it is a skill.
+
+## Reviewing the retro log
+
+`RETRO.md` collects one-line learnings from sessions and agents. Review it on demand, never mid-task.
+
+1. Read the log. Group lines that are the same underlying problem worded differently.
+2. Rank by recurrence, and above all by how many different projects a line appears in — the same slip across several projects is a toolkit problem, the same slip in one repo is usually a quirk of that repo.
+3. For each group, decide: is this a rule we don't have, or a rule we have that didn't fire? A rule that didn't fire needs sharper wording, not a second rule beside it.
+4. Present the candidates to the user as a checklist. Only ticked ones land.
+5. Delete the lines you acted on. Leave the ones that are still just noise.
+
+## Verifying a change
+
+- **Skill added or renamed** — `ls -l ~/.claude/skills/<name>` shows the symlink. The session-start and on-edit hooks sync it automatically.
+- **Agent added or renamed** — agents are copied, not linked. Run `./install.sh`, then `ls ~/.claude/agents/`.
+- **Hook changed** — add the case to `tests/run.sh` and run the suite. All green before committing.
+- **Wiring changed** — `./install.sh --dry-run` shows the exact device-config diff. Then `./install.sh`.
+- **Anything renamed** — grep the whole repo for the old name. README and `CLAUDE.md` are the usual stragglers.
+
+## Probing a guard by hand
+
+Guards read their payload from stdin. Write it to a file and redirect — `hooks/guard.sh < payload.json`. Piping the payload inline puts the dangerous-looking text on the command line, where the guard flags it as data it can't distinguish from a real invocation.
+
+## Landing it
+
+Commit in the toolkit repo. Then ask the user to approve the push — other machines only get the change once it's on origin.
+
+On another machine, `git pull` is the whole upgrade. The next session start re-links skills and re-checks the wiring. A new machine is `git clone` plus `./install.sh`.
