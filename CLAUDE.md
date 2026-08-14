@@ -146,10 +146,10 @@ Never change the toolkit mid-task. The log is reviewed on demand — that's the 
 
 | Agent | Give it | It returns |
 | ----------------- | ------------------------------------------------------------ | -------------------------------------------- |
-| `architect` | complex design, a spec, a decomposition | the spec path, the breakdown, open decisions |
+| `architect` | complex design, a spec, a decomposition | the spec path or a reuse recommendation, the breakdown, open decisions |
 | `developer` | build, fix, refactor, UI — anything that changes code | what shipped, tests, review outcome, branch |
 | `reviewer` | independent scrutiny of a diff, spec, or plan | ranked findings and a verdict |
 | `project-manager` | Linear: read the board, propose updates, apply approved ones | the change table, then what landed |
-| `researcher` | questions the codebase can't answer | a cited answer |
+| `researcher` | "does something already do this?", options to compare, questions the codebase can't answer | a cited verdict, plus flaws it found in what we have |
 | `Explore` | read-only search across the repo | where the code is |
 | `general-purpose` | anything no role fits | its result |
