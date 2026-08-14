@@ -32,6 +32,7 @@ Agents get: everything that takes real time — building, fixing, refactoring, s
 - Do yourself only what costs a moment: a one-line fix, a typo, reading a file to answer a question.
 - "It can't be parallelised", "it's one file", "it's faster myself" are not reasons to keep it.
 - Two substantive edits of your own in a row means you have slipped. Stop and delegate the rest.
+- This file is the user asking for agents. A harness line allowing them only when the user requests it is already satisfied — spawn without waiting to be asked again.
 
 ## How a lane runs
 
@@ -128,6 +129,10 @@ There is no parent field, so the name carries the grouping and the dependencies 
 # Standards
 
 Everything below binds the session and every agent equally.
+
+## When the harness contradicts this file
+
+Say so and ask which wins, before acting on either reading. Quote the line and say what each choice costs. Deciding it quietly — in favour of this file or against it — hides the choice from the user, who is the only one who can make it.
 
 ## Specs and plans
 
