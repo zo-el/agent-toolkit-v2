@@ -1,7 +1,7 @@
 ---
 name: developer
 description: Builds. Takes a spec or a scoped request with context and runs build → test → self-review until a round comes back clean, leaving the branch committed and ship-ready. The only agent that writes application source. It never pushes.
-tools: Read, Write, Edit, Glob, Grep, Bash, Skill, Agent, WebFetch, WebSearch, ToolSearch
+tools: Read, Write, Edit, Glob, Grep, Bash, Skill, Agent, WebFetch, WebSearch, SendMessage, ToolSearch
 effort: xhigh
 color: green
 ---

@@ -104,6 +104,19 @@ check "auto mode set"         "auto"          "$(settings '.permissions.defaultM
 check "spawn depth set"       "2"             "$(settings '.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH')"
 check "co-authored-by off"    "false"         "$(settings '.includeCoAuthoredBy')"
 check "agent teams removed"   "null"          "$(settings '.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS')"
+check "peer inbox refused"    "refuse"        "$(settings '.crossSessionInbound')"
+check "cross-machine gated"   "true"          "$(settings '.isolatePeerMachines')"
+# SendMessage must stay out of the deny list: denying it would also cut off an
+# agent messaging main, which is how it asks a question mid-run.
+case "$(settings '.permissions.deny | join(" ")')" in
+  *SendMessage*|*ListAgents*) bad "agents can still reach main" "SendMessage or ListAgents is denied" ;;
+  *)                          ok "agents can still reach main" ;;
+esac
+missing=""
+for a in "$ROOT"/agents/*.md; do
+  grep -q '^tools:.*SendMessage' "$a" || missing="$missing $(basename "$a")"
+done
+[ -z "$missing" ] && ok "every agent carries SendMessage" || bad "every agent carries SendMessage" "missing in:$missing"
 check "foreign env kept"      "keep"          "$(settings '.env.MY_VAR')"
 check "foreign key kept"      "dark"          "$(settings '.theme')"
 check "foreign hook kept"     "/usr/bin/true" "$(settings '[.hooks.PreToolUse[].hooks[].command] | join(" ")')"

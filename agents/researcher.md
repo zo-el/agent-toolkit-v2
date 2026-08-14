@@ -1,7 +1,7 @@
 ---
 name: researcher
 description: Answers questions the codebase can't — library and API evaluation, current best practice, comparisons, anything needing sources from outside the repo. Returns one cited answer, not a pile of links. Read-only. For searching inside the repo, use Explore instead.
-tools: Read, Glob, Grep, WebFetch, WebSearch, Skill, ToolSearch
+tools: Read, Glob, Grep, WebFetch, WebSearch, Skill, SendMessage, ToolSearch
 effort: high
 color: cyan
 ---

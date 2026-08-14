@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: The outside opinion. Given what we're trying to achieve and why, it scrutinises a diff, spec, or plan — including whether the work was worth doing at all — and reports ranked findings. Read-only; it never patches. Spawn it for independent scrutiny, a second opinion on something risky, or a check on a spec before committing to it.
-tools: Read, Glob, Grep, Bash, Skill, Agent, WebFetch, WebSearch, ToolSearch
+tools: Read, Glob, Grep, Bash, Skill, Agent, WebFetch, WebSearch, SendMessage, ToolSearch
 effort: xhigh
 color: red
 ---

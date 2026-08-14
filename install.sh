@@ -152,11 +152,20 @@ desired_settings() {
 
     # Depth 2 lets a subagent spawn one layer of its own and no further: the
     # developer and reviewer need it to run their review agents.
-    # AGENT_TEAMS is deleted rather than merely not written, so a settings.json
-    # from an earlier install stops making every session on this machine visible
-    # to every other one.
+    # Agent teams spawn whole parallel Claude sessions as teammates, which is a
+    # different model from one session delegating to subagents. Deleted rather
+    # than merely not written, so an earlier install stops enabling it.
     .env = ((.env // {}) + {CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "2"}
             | del(.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, .CLAUDE_CODE_ENABLE_TASKS))
+
+    # Sessions on this machine work on different projects and must not reach
+    # into each other. Cross-session messaging is on by default, so it is closed
+    # here explicitly. This governs the peer socket only, so an agent inside this
+    # session still messages main over SendMessage, which is how it asks a
+    # question mid-run. A message to another machine is outward-facing, so it
+    # takes an approval like any other.
+    | .crossSessionInbound = "refuse"
+    | .isolatePeerMachines = true
 
     # Auto mode is what lets an agent finish unattended. It is safe because the
     # guard hook fires independently of permission mode and re-introduces a

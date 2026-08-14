@@ -7,11 +7,10 @@ The session is the CTO: it plans, delegates, verifies, and talks to me. Agents d
 ## Install
 
 ```bash
-git clone git@github.com:zo-el/agent-toolkit.git && cd agent-toolkit
 ./install.sh          # preview first with: ./install.sh --dry-run
 ```
 
-Two plugins are enabled by the installer but have to be installed once per machine:
+The installer enables two plugins but cannot install them. Once per machine:
 
 ```bash
 claude plugin install pr-review-toolkit@claude-plugins-official --scope user
@@ -27,11 +26,11 @@ The checkout can live anywhere. Device config reaches it only through the `~/.cl
 | ------------- | ---------------------------------------------------------------------- |
 | `CLAUDE.md` | the agreement: the CTO loop, tasks, code and writing style, the gates |
 | `agents/` | architect · developer · reviewer · project-manager · researcher |
-| `skills/` | `toolkit` (change this repo) · `ui-review` (screenshot galleries) |
+| `skills/` | `backlog` · `toolkit` (change this repo) · `ui-review` (screenshot galleries) |
 | `hooks/` | the guard, the statusline, the formatter, background process tracking |
 | `install.sh` | wiring and the doctor |
 | `RETRO.md` | learnings collected from sessions, reviewed on demand |
-| `docs/brief.md` | what this toolkit is for |
+| `documentation/brief.md` | what this toolkit is for |
 
 ## The agents
 
@@ -45,7 +44,11 @@ Each runs in its own context with a tool allowlist as its outer boundary and its
 | `project-manager` | high | write anything but Linear |
 | `researcher` | high | write anything |
 
-Linear tools live only in `project-manager`. Only `developer` can edit source. Subagents nest one level deep, which is what lets the developer and reviewer run their review agents.
+Linear tools live only in `project-manager`. Only `developer` can edit source. Subagents nest one level deep, which is what lets the developer and reviewer run their review agents. Every agent carries `SendMessage`, so it can reach the session mid-run when it is genuinely blocked instead of finishing a long task on a wrong assumption.
+
+## Session isolation
+
+Sessions on this machine work on different projects and must not reach into each other. Cross-session messaging is on by default in Claude Code, so `install.sh` closes it: `crossSessionInbound: "refuse"` drops messages arriving from your other sessions, and `isolatePeerMachines: true` requires approval before any message leaves the machine. Both are scoped to the peer socket, so an agent inside a session still messages `main` normally. Agent teams stay off — they spawn whole parallel sessions as teammates, which is a different model from one session delegating to subagents.
 
 ## Enforcement
 
