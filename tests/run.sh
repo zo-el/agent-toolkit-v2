@@ -172,6 +172,86 @@ out="$(run_install --sync)"
 check "sync flags stale settings" "stale" "$out"
 run_install >/dev/null
 
+# ── switching off the previous generation ────────────────────────────────────
+# The whole point of the cutover: after installing over a v1 machine, nothing v1
+# may still be wired. A leftover skill or agent keeps instructing sessions from
+# a generation whose rules no longer hold.
+echo "switch from v1"
+
+# Names deliberately share no prefix: an assertion that matched one inside the
+# other would pass or fail for the wrong reason.
+V1="$TMP/old-checkout-v1"; V1HOME="$TMP/machine-on-v1"
+mkdir -p "$V1"/{hooks,agents} "$V1HOME/.claude"/{skills,agents}
+for s in orchestrating-subagents develop feature-spec linear-sync retro chore; do
+  mkdir -p "$V1/skills/group/$s" && touch "$V1/skills/group/$s/SKILL.md"
+done
+for a in architect-designer lead developer project-manager researcher reviewer; do
+  printf 'v1 agent\n' > "$V1/agents/$a.md"
+done
+for h in guard-git guard-config guard-linear format-on-edit sync-on-skill-edit reap-managed spawn-managed; do
+  printf '#!/bin/sh\n' > "$V1/hooks/$h.sh" && chmod +x "$V1/hooks/$h.sh"
+done
+printf '#!/bin/sh\n' > "$V1/install-skills.sh" && chmod +x "$V1/install-skills.sh"
+
+# Wire the fake home exactly as a v1 install leaves it.
+ln -sfn "$V1" "$V1HOME/.claude/agent-toolkit"
+for d in "$V1"/skills/group/*/; do ln -sfn "${d%/}" "$V1HOME/.claude/skills/$(basename "${d%/}")"; done
+for a in "$V1"/agents/*.md; do cp "$a" "$V1HOME/.claude/agents/"; basename "$a"; done > "$V1HOME/.claude/agents/.toolkit-agents"
+# ...plus things that are the user's, which must survive untouched.
+mkdir -p "$TMP/user-skill/my-skill" && touch "$TMP/user-skill/my-skill/SKILL.md"
+ln -sfn "$TMP/user-skill/my-skill" "$V1HOME/.claude/skills/my-skill"
+printf 'mine\n' > "$V1HOME/.claude/agents/my-agent.md"
+cat > "$V1HOME/.claude/settings.json" <<JSON
+{
+  "env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "3"},
+  "statusLine": {"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/statusline.py"},
+  "permissions": {"additionalDirectories": ["$V1"]},
+  "hooks": {
+    "SessionStart": [{"matcher": "startup", "hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/install.sh --sync"}]}],
+    "PreToolUse": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/guard-git.sh"}]},
+      {"matcher": "Write|Edit|NotebookEdit", "hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/guard-config.sh"}]},
+      {"matcher": "mcp__linear.*", "hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/guard-linear.sh"}]}
+    ],
+    "SubagentStop": [{"hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/reap-managed.sh"}]}]
+  }
+}
+JSON
+printf '@%s/.claude/agent-toolkit/CLAUDE.md\n' "$V1HOME" > "$V1HOME/.claude/CLAUDE.md"
+
+HOME="$V1HOME" "$ROOT/install.sh" >/dev/null 2>&1
+v1s() { jq -r "$1" "$V1HOME/.claude/settings.json" 2>/dev/null; }
+
+left="$(ls -1 "$V1HOME/.claude/skills" | grep -Ex 'orchestrating-subagents|develop|feature-spec|linear-sync|retro|chore' | tr '\n' ' ')"
+[ -z "$left" ] && ok "v1 skills unlinked" || bad "v1 skills unlinked" "still present: $left"
+
+left="$(ls -1 "$V1HOME/.claude/agents" | grep -Ex 'architect-designer.md|lead.md' | tr '\n' ' ')"
+[ -z "$left" ] && ok "retired v1 agents pruned" || bad "retired v1 agents pruned" "still present: $left"
+
+grep -q 'v1 agent' "$V1HOME/.claude/agents/developer.md" \
+  && bad "shared agent names overwritten" "developer.md is still the v1 file" \
+  || ok "shared agent names overwritten"
+
+wired="$(v1s '[.hooks[][].hooks[].command] + [.statusLine.command] | join(" ")')"
+left=""
+for h in guard-git guard-config guard-linear format-on-edit sync-on-skill-edit reap-managed install-skills; do
+  case "$wired" in *"$h"*) left="$left $h" ;; esac
+done
+[ -z "$left" ] && ok "no v1 hook still wired" || bad "no v1 hook still wired" "wired:$left"
+
+check "v1 SubagentStop entry dropped" "null" "$(v1s '.hooks.SubagentStop')"
+check "v1 agent-teams flag dropped"   "null" "$(v1s '.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS')"
+check "v1 spawn depth replaced"       "2"    "$(v1s '.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH')"
+
+jq -e --arg v "$V1" '(.permissions.additionalDirectories | index($v)) == null' \
+  "$V1HOME/.claude/settings.json" >/dev/null 2>&1 \
+  && ok "old checkout dropped from approved dirs" \
+  || bad "old checkout dropped from approved dirs" "$V1 is still approved"
+
+[ -L "$V1HOME/.claude/skills/my-skill" ] && ok "user's own skill survives" || bad "user's own skill survives" "removed"
+grep -q mine "$V1HOME/.claude/agents/my-agent.md" 2>/dev/null && ok "user's own agent survives" || bad "user's own agent survives" "removed"
+check "pointer re-aimed at v2" "$ROOT" "$(readlink "$V1HOME/.claude/agent-toolkit")"
+
 # ── statusline ───────────────────────────────────────────────────────────────
 echo "statusline.py"
 
