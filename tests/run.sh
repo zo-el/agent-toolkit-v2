@@ -87,7 +87,7 @@ settings() { jq -r "$1" "$FAKE/.claude/settings.json" 2>/dev/null; }
 cat > "$FAKE/.claude/settings.json" <<'JSON'
 {
   "theme": "dark",
-  "env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1", "MY_VAR": "keep"},
+  "env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1", "CLAUDE_CODE_ENABLE_TASKS": "false", "MY_VAR": "keep"},
   "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "/usr/bin/true"}]}]},
   "permissions": {"additionalDirectories": ["/my/own/dir"]}
 }
@@ -102,6 +102,8 @@ check "install reports green" "all checks green" "$out"
 check "statusline wired"      "statusline.py" "$(settings '.statusLine.command')"
 check "auto mode set"         "auto"          "$(settings '.permissions.defaultMode')"
 check "spawn depth set"       "2"             "$(settings '.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH')"
+check "todo tools enabled"    "1"             "$(settings '.env.CLAUDE_CODE_ENABLE_TODO_TOOLS')"
+check "tasks opt-out kept"    "false"         "$(settings '.env.CLAUDE_CODE_ENABLE_TASKS')"
 check "co-authored-by off"    "false"         "$(settings '.includeCoAuthoredBy')"
 check "agent teams removed"   "null"          "$(settings '.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS')"
 check "peer inbox refused"    "refuse"        "$(settings '.crossSessionInbound')"

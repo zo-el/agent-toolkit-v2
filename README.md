@@ -76,7 +76,7 @@ Tasks: 2 open · Retro — spec (in_progress, arch-retro) · Retro — build (bl
 - **Nothing open** prints `Tasks: none open — open a lane before acting`, and names the task tools, which are deferred: a session that never searched for their schemas cannot call them and has nothing to show that it failed. Once tasks exist the tools are demonstrably loaded and the hint drops.
 - **A list read only in part** — a file being written as it is read, or one that will not open — says `(partial list)` after the count. A list that cannot be read at all prints nothing: "none open" would be a guess, and it is a guess that tells the model to open a lane that already exists.
 
-It never blocks a turn and exits 0 on every path, including its own failure.
+Two separate things stand between a session and its task list, and `install.sh` settles both: `CLAUDE_CODE_ENABLE_TODO_TOOLS` opts out of the removal of the tools for this generation of models, and the hint above covers the deferral that keeps their schemas unloaded until something asks. The hook itself never blocks a turn and exits 0 on every path, including its own failure.
 
 ## Statusline
 

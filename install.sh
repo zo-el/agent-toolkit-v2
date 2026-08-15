@@ -157,11 +157,18 @@ desired_settings() {
 
     # Depth 2 lets a subagent spawn one layer of its own and no further: the
     # developer and reviewer need it to run their review agents.
+    # CLAUDE_CODE_ENABLE_TODO_TOOLS opts out of a vendor deprecation: the task
+    # tools are removed by default for this generation of models, and without
+    # them the task list this toolkit runs on cannot exist. Written over whatever
+    # is there, because a session without the task tools is not one we support.
     # Agent teams spawn whole parallel Claude sessions as teammates, which is a
     # different model from one session delegating to subagents. Deleted rather
     # than merely not written, so an earlier install stops enabling it.
-    .env = ((.env // {}) + {CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "2"}
-            | del(.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, .CLAUDE_CODE_ENABLE_TASKS))
+    # CLAUDE_CODE_ENABLE_TASKS is deleted by neither: it is opt-out only, so
+    # setting it changes nothing and deleting it would discard a deliberate off.
+    .env = ((.env // {}) + {CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "2",
+                            CLAUDE_CODE_ENABLE_TODO_TOOLS: "1"}
+            | del(.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS))
 
     # Sessions on this machine work on different projects and must not reach
     # into each other. Cross-session messaging is on by default, so it is closed
