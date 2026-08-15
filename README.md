@@ -29,7 +29,7 @@ The checkout can live anywhere. Device config reaches it only through the `~/.cl
 | `CLAUDE.md` | the agreement: the CTO loop, tasks, code and writing style, the gates |
 | `agents/` | architect · developer · reviewer · project-manager · researcher |
 | `skills/` | `backlog` · `toolkit` (change this repo) · `ui-review` (screenshot galleries) |
-| `hooks/` | the guard, the statusline, the formatter, background process tracking |
+| `hooks/` | the guard, the statusline, the task line, the formatter, background process tracking |
 | `install.sh` | wiring and the doctor |
 | `RETRO.md` | learnings collected from sessions, reviewed on demand |
 | `documentation/brief.md` | what this toolkit is for |
@@ -63,6 +63,21 @@ Everything else is silent. `permissions.defaultMode` is `auto` and `~/.claude`, 
 
 [`tests/run.sh`](tests/run.sh) is the regression suite for all of it.
 
+## Task line
+
+[`hooks/taskline.py`](hooks/taskline.py) puts the session's own task list into context on every turn, so the rule to open a task before acting cannot quietly decay:
+
+```
+Tasks: 2 open · Retro — spec (in_progress, arch-retro) · Retro — build (blocked)
+```
+
+- **`(blocked)`** — pending, with a blocker that has not finished. The platform stores no such status; it is read off `blockedBy`.
+- **Four tasks named**, in-progress first, then `+N more` for the rest. The count covers every open task, named or not.
+- **Nothing open** prints `Tasks: none open — open a lane before acting`, and names the task tools, which are deferred: a session that never searched for their schemas cannot call them and has nothing to show that it failed. Once tasks exist the tools are demonstrably loaded and the hint drops.
+- **A list read only in part** — a file being written as it is read, or one that will not open — says `(partial list)` after the count. A list that cannot be read at all prints nothing: "none open" would be a guess, and it is a guess that tells the model to open a lane that already exists.
+
+It never blocks a turn and exits 0 on every path, including its own failure.
+
 ## Statusline
 
 [`hooks/statusline.py`](hooks/statusline.py) shows: model · effort · context bar · lines changed · rate limits · tasks · background processes · branch and PR · directory · toolkit version.
@@ -74,6 +89,6 @@ Opus 5 1M │ ⚡xhigh │ ▰▱▱▱▱▱▱▱ 18% 180k/1M │ +412/-96 │
 A segment with nothing to say takes no width, so the line stays short when little is happening. Lines changed and rate limits are the exception — they hold their slot with a dim `+0/-0` and `⏱ —` so the bar doesn't change shape mid-session. An API-key session never reports rate limits, so it keeps `⏱ —` throughout.
 
 - **`⏱ 63% 2h13m · 41% 3d2h`** — how much of each rate-limit window is used, and how long until it resets. The window's own length is deliberately not shown; a fixed `5h` label says nothing you can act on. Falls back to `5h` / `7d` labels only when the payload carries no reset time, since two bare percentages wouldn't say which is which.
-- **`☰ 2/5`** — tasks done out of open, from this session's own list. The platform clears the whole list once every task completes, so this only ever shows live work.
+- **`☰ 2/5`** — tasks done out of open, from this session's own list. The platform clears the whole list once every task completes, so this only ever shows live work. A `?` means part of the list would not read, and the count is of what did; green is kept for a whole list with nothing left open.
 - **`⎇ main* #42`** — branch, dirty marker, and the open PR for it, coloured by review state.
 - **`⬡ v<count>·<sha>`** — the "are my changes applied?" light. A `⚠` means the repo has moved past the last install; a dim `?` means it couldn't be verified.

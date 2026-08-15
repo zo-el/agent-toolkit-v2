@@ -127,10 +127,15 @@ check "review plugin enabled" "true" "$(settings '.enabledPlugins["pr-review-too
 check "pointer written"       "$ROOT"         "$(readlink "$FAKE/.claude/agent-toolkit")"
 check "pointer imports CLAUDE.md" "agent-toolkit/CLAUDE.md" "$(cat "$FAKE/.claude/CLAUDE.md")"
 
-for want in "guard.sh" "reap.sh" "format.sh" "sync.sh" "install.sh --sync"; do
+for want in "guard.sh" "reap.sh" "format.sh" "sync.sh" "taskline.py" "install.sh --sync"; do
   check "wires $want" "$want" "$(settings '[.hooks[][].hooks[].command] | join(" ")')"
 done
 check "linear matcher wired" "mcp__linear.*" "$(settings '[.hooks.PreToolUse[].matcher] | join(" ")')"
+# An async hook's stdout is never injected as context, so an async taskline
+# would print into the void. Asserted as the whole array, which also pins that
+# exactly one entry runs it.
+check "taskline is wired synchronously" "[false]" \
+  "$(settings '[.hooks.UserPromptSubmit[].hooks[] | select((.command // "") | test("taskline")) | (.async // false)] | tostring')"
 
 linked="$(find "$FAKE/.claude/skills" -maxdepth 1 -type l | wc -l | tr -d ' ')"
 have="$(find "$ROOT/skills" -name SKILL.md | wc -l | tr -d ' ')"
@@ -328,6 +333,23 @@ check "finds the team-named task dir" "1/2" "$out"
 out="$(printf '%s' '{"cwd":"/","session_id":"no-such-session-at-all"}' | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
 case "$out" in *☰*) bad "no task dir renders nothing" "printed: $out" ;; *) ok "no task dir renders nothing" ;; esac
 
+# The session's own empty directory must not win over the team-named one that
+# holds the list; and a file that is valid JSON but not an object costs its own
+# entry plus the claim that the count is the whole list — the ? says so, and the
+# green "everything is done" is withheld because it would not be true.
+mkdir -p "$FAKE/.claude/tasks/slteam77-aaaa-bbbb" "$FAKE/.claude/tasks/session-slteam77"
+printf '{"id":"1","status":"completed"}' > "$FAKE/.claude/tasks/session-slteam77/1.json"
+printf '[1,2]' > "$FAKE/.claude/tasks/session-slteam77/2.json"
+out="$(printf '%s' '{"cwd":"/","session_id":"slteam77-aaaa-bbbb"}' | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
+check "an empty directory does not hide the team-named list" "$(dim '☰ 1/1?')" "$out"
+
+# A list read whole, with nothing left open, is the one case that renders green.
+mkdir -p "$FAKE/.claude/tasks/sldone-aaaa-bbbb"
+printf '{"id":"1","status":"completed"}' > "$FAKE/.claude/tasks/sldone-aaaa-bbbb/1.json"
+printf '{"id":"2","status":"completed"}' > "$FAKE/.claude/tasks/sldone-aaaa-bbbb/2.json"
+out="$(printf '%s' '{"cwd":"/","session_id":"sldone-aaaa-bbbb"}' | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
+check "a whole list with nothing open renders green" "$(printf '\033[32m☰ 2/2\033[0m')" "$out"
+
 # A reset time already in the past must not render a negative or absurd span: the
 # window drops back to its label. Asserted as the exact segment, since a glob for
 # a stray minus also matches the lines placeholder.
@@ -353,6 +375,256 @@ for label in "empty stdin" "malformed stdin" "non-object stdin"; do
   esac
   check "$label keeps the placeholders" "$(dim '+0/-0') $sep $(dim '⏱ —')" "$out"
 done
+
+# ── taskline ─────────────────────────────────────────────────────────────────
+echo "taskline.py"
+
+# The contract is: exactly one line, on stdout, only when it is true, and never
+# a failed turn. stdout and stderr are captured apart — the harness injects only
+# stdout, so a line written to stderr would kill the feature while looking fine.
+HINT='Tasks: none open — open a lane before acting. Tools are deferred: ToolSearch "select:TaskCreate,TaskUpdate,TaskGet,TaskList"'
+SPEC='Retro — spec (in_progress, arch-retro)'
+
+tl_with() { # environment assignments, payload → tl_out, tl_err, tl_rc
+  tl_out="$(printf '%s' "$2" | env HOME="$FAKE" $1 python3 "$ROOT/hooks/taskline.py" 2>"$TMP/tl.err")"; tl_rc=$?
+  tl_err="$(cat "$TMP/tl.err")"
+}
+tl() { tl_with "" "$1"; }
+prompt() { printf '{"hook_event_name":"UserPromptSubmit","session_id":"%s","prompt":"go"}' "$1"; }
+task() { mkdir -p "$1" && printf '%s' "$3" > "$1/$2"; }   # dir, file, json
+
+clean() { # name → true when the turn survived: exit 0, nothing on stderr
+  { [ "$tl_rc" = 0 ] && [ -z "$tl_err" ]; } && return 0
+  bad "$1" "exit $tl_rc, stderr: ${tl_err:-<none>}"; return 1
+}
+survives() { clean "$1" && ok "$1"; }
+is_line() { # name — one non-empty line on stdout
+  clean "$1" || return
+  [ -n "$tl_out" ] || { bad "$1" "printed nothing"; return; }
+  [ "$(printf '%s\n' "$tl_out" | wc -l)" = 1 ] && ok "$1" || bad "$1" "not one line: $tl_out"
+}
+exact() { # name, expected stdout
+  clean "$1" || return
+  [ "$tl_out" = "$2" ] && ok "$1" || bad "$1" "expected '$2', got '${tl_out:-<empty>}'"
+}
+quiet() { tl "$2"; exact "$1" ""; }   # name, payload
+
+OPEN="$FAKE/.claude/tasks/tl-open"
+task "$OPEN" 1.json '{"id":"1","subject":"Retro — audit","status":"completed","blocks":[],"blockedBy":[]}'
+task "$OPEN" 2.json '{"id":"2","subject":"Retro — spec","status":"in_progress","owner":"arch-retro","blocks":["3"],"blockedBy":[]}'
+task "$OPEN" 3.json '{"id":"3","subject":"Retro — build","status":"pending","blocks":[],"blockedBy":["2"]}'
+tl "$(prompt tl-open)"
+is_line "an open list is one line"
+exact "names every open task with status and owner" "Tasks: 2 open · $SPEC · Retro — build (blocked)"
+
+# An ascii output encoding would raise on the first separator and lose the whole
+# line. PYTHONIOENCODING stands in for the C-locale machine that does the same.
+tl_with "PYTHONIOENCODING=ascii" "$(prompt tl-open)"
+exact "an ascii output encoding keeps the line whole" "Tasks: 2 open · $SPEC · Retro — build (blocked)"
+
+# The line sits in a block buffer until the process ends, so a reader that
+# closed the pipe turns the interpreter's own shutdown flush into a failed turn
+# — after every guard in the hook has gone out of scope.
+printf '%s' "$(prompt tl-open)" > "$TMP/tl.payload"
+HOME="$FAKE" python3 "$ROOT/hooks/taskline.py" < "$TMP/tl.payload" 2>"$TMP/tl.err" | true
+tl_rc=${PIPESTATUS[0]}
+{ [ "$tl_rc" = 0 ] && [ ! -s "$TMP/tl.err" ]; } \
+  && ok "a closed pipe is still a clean exit" \
+  || bad "a closed pipe is still a clean exit" "exit $tl_rc, stderr: $(cat "$TMP/tl.err")"
+
+# stdout closed outright, where python hands the hook no stream at all. The line
+# has nowhere to go, which is not a bug and must not be reported as one.
+HOME="$FAKE" python3 "$ROOT/hooks/taskline.py" < "$TMP/tl.payload" >&- 2>"$TMP/tl.err"
+tl_rc=$?
+{ [ "$tl_rc" = 0 ] && [ ! -s "$TMP/tl.err" ]; } \
+  && ok "closed stdout is still a clean exit" \
+  || bad "closed stdout is still a clean exit" "exit $tl_rc, stderr: $(cat "$TMP/tl.err")"
+
+# hooks/lib/__init__.py is a comment and nothing else, and it is load-bearing:
+# without it, any lib package on PYTHONPATH takes over the import.
+mkdir -p "$TMP/shadow/lib"
+: > "$TMP/shadow/lib/__init__.py"
+cat > "$TMP/shadow/lib/tasks.py" <<'PY'
+from collections import namedtuple
+
+TaskList = namedtuple("TaskList", "tasks complete")
+
+
+def load_tasks(_):
+    return TaskList([{"id": "1", "subject": "HIJACKED", "status": "pending"}], True)
+PY
+tl_with "PYTHONPATH=$TMP/shadow" "$(prompt tl-open)"
+exact "a lib on PYTHONPATH cannot hijack the import" "Tasks: 2 open · $SPEC · Retro — build (blocked)"
+
+# blocked is derived, so every way of not being blocked must read as pending: a
+# blocker that finished, one that is not in the list at all, and a field of the
+# wrong type — which must cost the derivation and not the line.
+task "$OPEN" 3.json '{"id":"3","subject":"Retro — build","status":"pending","blocks":[],"blockedBy":["1"]}'
+tl "$(prompt tl-open)"
+exact "a finished blocker does not block" "Tasks: 2 open · $SPEC · Retro — build (pending)"
+task "$OPEN" 3.json '{"id":"3","subject":"Retro — build","status":"pending","blocks":[],"blockedBy":["99"]}'
+tl "$(prompt tl-open)"
+exact "a dangling blocker does not block" "Tasks: 2 open · $SPEC · Retro — build (pending)"
+task "$OPEN" 3.json '{"id":"3","subject":"Retro — build","status":"pending","blocks":[],"blockedBy":7}'
+tl "$(prompt tl-open)"
+exact "an unusable blockedBy costs the derivation only" "Tasks: 2 open · $SPEC · Retro — build (pending)"
+# Ids are strings on disk today; integers must derive the same answer. Both the
+# id and the blocker are integers here, or the comparison passes on one side.
+task "$OPEN" 2.json '{"id":2,"subject":"Retro — spec","status":"in_progress","owner":"arch-retro","blocks":[3],"blockedBy":[]}'
+task "$OPEN" 3.json '{"id":3,"subject":"Retro — build","status":"pending","blocks":[],"blockedBy":[2]}'
+tl "$(prompt tl-open)"
+exact "integer ids still derive blocked" "Tasks: 2 open · $SPEC · Retro — build (blocked)"
+# Every field on the line is free text on the same line, so every field is cut.
+task "$OPEN" 3.json "{\"id\":\"3\",\"subject\":\"Retro — build\",\"status\":\"pending\",\"owner\":\"$(printf 'o%.0s' $(seq 40))\",\"blockedBy\":[]}"
+tl "$(prompt tl-open)"
+exact "a long owner is cut too" "Tasks: 2 open · $SPEC · Retro — build (pending, $(printf 'o%.0s' $(seq 23))…)"
+task "$OPEN" 3.json "{\"id\":\"3\",\"subject\":\"Retro — build\",\"status\":\"$(printf 's%.0s' $(seq 40))\",\"blockedBy\":[]}"
+tl "$(prompt tl-open)"
+exact "a long status is cut too" "Tasks: 2 open · $SPEC · Retro — build ($(printf 's%.0s' $(seq 15))…)"
+
+# The tools are deferred, so a session that never searched for their schemas
+# cannot open a task at all — which is exactly the session this line lands in.
+tl "$(prompt tl-no-such-session)"
+is_line "an empty list is one line"
+exact "no task dir names the deferred tools" "$HINT"
+
+task "$FAKE/.claude/tasks/tl-all-done" 1.json '{"id":"1","subject":"Lane — build","status":"completed","blocks":[],"blockedBy":[]}'
+tl "$(prompt tl-all-done)"
+exact "an all-complete list counts as none open" "$HINT"
+
+# Agent teams name the directory session-<first8>, and the session's own empty
+# directory sits beside it. The decoy must not win, or the list goes quiet.
+mkdir -p "$FAKE/.claude/tasks/tlteam99-aaaa-bbbb"
+TEAM="$FAKE/.claude/tasks/session-tlteam99"
+task "$TEAM" 1.json '{"id":"1","subject":"Lane — spec","status":"completed","blocks":[],"blockedBy":[]}'
+task "$TEAM" 2.json '{"id":"2","status":"pending","blocks":[],"blockedBy":[]}'
+tl "$(prompt tlteam99-aaaa-bbbb)"
+exact "an empty dir does not hide the team-named list" 'Tasks: 1 open · untitled (pending)'
+
+# A list read in part says so. A bare count would read as the whole truth, and
+# task files are written while this hook reads them on every prompt. Nesting
+# deep enough to exhaust the stack is a file that will not parse like any other.
+MAL="$FAKE/.claude/tasks/tl-malformed"
+task "$MAL" 1.json 'not json at all'
+task "$MAL" 2.json '[1,2]'
+task "$MAL" 4.json "$(python3 -c "import sys; sys.stdout.write('[' * 200000)")"
+task "$MAL" 3.json '{"id":"3","subject":"Lane — sane\nsecond line","status":"pending","blocks":[],"blockedBy":[]}'
+tl "$(prompt tl-malformed)"
+is_line "a partly read list is one line"
+exact "an unparsable entry marks the line partial" \
+  'Tasks: 1 open (partial list) · Lane — sane second line (pending)'
+rm -f "$MAL/3.json"
+quiet "a list that will not parse at all says nothing" "$(prompt tl-malformed)"
+
+# Root reads a chmod 000 file regardless, so the assertions that depend on the
+# read failing are skipped there rather than inverted.
+UNREAD="$FAKE/.claude/tasks/tl-unreadable"
+task "$UNREAD" 1.json '{"id":"1","subject":"Lane — build","status":"pending","blocks":[],"blockedBy":[]}'
+task "$UNREAD" 2.json '{"id":"2","subject":"Lane — hidden","status":"pending","blocks":[],"blockedBy":[]}'
+chmod 000 "$UNREAD/2.json"
+tl "$(prompt tl-unreadable)"
+survives "an unreadable file never fails the turn"
+[ "$(id -u)" -eq 0 ] || exact "an unreadable file marks the line partial" \
+  'Tasks: 1 open (partial list) · Lane — build (pending)'
+chmod 644 "$UNREAD/2.json"
+
+# A task file that is already gone is not one that would not read: the platform
+# deletes the whole list when the last task completes, and a read that races it
+# is still a whole read of what is there. A dangling symlink stands in for the
+# file that disappears between the listing and the open.
+GONE="$FAKE/.claude/tasks/tl-gone"
+task "$GONE" 1.json '{"id":"1","subject":"Lane — build","status":"pending","blocks":[],"blockedBy":[]}'
+ln -sfn /nonexistent-task-file "$GONE/2.json"
+tl "$(prompt tl-gone)"
+exact "a task file already gone is not an unreadable one" 'Tasks: 1 open · Lane — build (pending)'
+
+# A directory that will not list is not an empty one, and saying "none open"
+# there would instruct the model to open a lane that already exists.
+BLOCKED="$FAKE/.claude/tasks/tl-blocked-dir"
+task "$BLOCKED" 1.json '{"id":"1","subject":"Lane — build","status":"pending","blocks":[],"blockedBy":[]}'
+chmod 000 "$BLOCKED"
+tl "$(prompt tl-blocked-dir)"
+survives "an unlistable task dir never fails the turn"
+[ "$(id -u)" -eq 0 ] || exact "an unlistable task dir says nothing rather than guessing" ""
+chmod 755 "$BLOCKED"
+
+# Whichever layout answered first, an unlistable one beside it means the list
+# may not be the whole list — the flag has to survive the early answer. This is
+# the agent-teams shape: a stale directory found first, the real one refusing.
+ASYM="$FAKE/.claude/tasks/tlasym01-aaaa-bbbb"
+task "$ASYM" 1.json '{"id":"1","subject":"Lane — stale","status":"pending","blocks":[],"blockedBy":[]}'
+TEAMDIR="$FAKE/.claude/tasks/session-tlasym01"
+task "$TEAMDIR" 9.json '{"id":"9","subject":"Lane — real","status":"in_progress","blocks":[],"blockedBy":[]}'
+chmod 000 "$TEAMDIR"
+tl "$(prompt tlasym01-aaaa-bbbb)"
+survives "an unlistable second layout never fails the turn"
+[ "$(id -u)" -eq 0 ] || exact "an unlistable second layout still marks the line partial" \
+  'Tasks: 1 open (partial list) · Lane — stale (pending)'
+chmod 755 "$TEAMDIR"
+
+# Over a partial list an unknown blocker is more likely a file that would not
+# read than a dangling reference, and "pending" is the one wrong answer that
+# gets the task picked up while something else owns it.
+PART="$FAKE/.claude/tasks/tl-part-blocker"
+task "$PART" 1.json '{"id":"1","subject":"Lane — spec","status":"in_progress","blocks":["2"],"blockedBy":[]}'
+task "$PART" 2.json '{"id":"2","subject":"Lane — build","status":"pending","blocks":[],"blockedBy":["1"]}'
+chmod 000 "$PART/1.json"
+tl "$(prompt tl-part-blocker)"
+[ "$(id -u)" -eq 0 ] || exact "a blocker that would not read still blocks" \
+  'Tasks: 1 open (partial list) · Lane — build (blocked)'
+chmod 644 "$PART/1.json"
+
+# Sizing. At the cap every task is named and nothing is elided; past it the
+# count stays true to every open task and what was dropped is stated.
+MANY="$FAKE/.claude/tasks/tl-many"
+for i in 1 2 3 4; do
+  task "$MANY" "$i.json" "{\"id\":\"$i\",\"subject\":\"Lane — step $i\",\"status\":\"pending\",\"blocks\":[],\"blockedBy\":[]}"
+done
+tl "$(prompt tl-many)"
+exact "at the cap nothing is elided" \
+  'Tasks: 4 open · Lane — step 1 (pending) · Lane — step 2 (pending) · Lane — step 3 (pending) · Lane — step 4 (pending)'
+case "$tl_out" in
+  *ToolSearch*) bad "no tool hint while tasks are open" "printed: $tl_out" ;;
+  *)            ok "no tool hint while tasks are open" ;;
+esac
+
+# Ids are numbers written as text, and a lane is past 9 quickly: a string sort
+# would name 1, 10, 11, 2 and drop the steps actually in front of the user.
+for i in 10 11; do
+  task "$MANY" "$i.json" "{\"id\":\"$i\",\"subject\":\"Lane — step $i\",\"status\":\"pending\",\"blocks\":[],\"blockedBy\":[]}"
+done
+tl "$(prompt tl-many)"
+exact "ids sort as numbers, not as text" \
+  'Tasks: 6 open · Lane — step 1 (pending) · Lane — step 2 (pending) · Lane — step 3 (pending) · Lane — step 4 (pending) · +2 more'
+
+# One line for the rest of the sizing contract: the running work is named first
+# however late its id, a subject is cut to a fixed width with the cut visible,
+# and the elided count covers everything that did not fit.
+task "$MANY" 12.json "{\"id\":\"12\",\"subject\":\"Lane — $(printf 'x%.0s' $(seq 70))\",\"status\":\"in_progress\",\"owner\":\"dev-x\",\"blocks\":[],\"blockedBy\":[]}"
+tl "$(prompt tl-many)"
+is_line "a long list is still one line"
+exact "running work first, subject cut, remainder counted" \
+  "Tasks: 7 open · Lane — $(printf 'x%.0s' $(seq 52))… (in_progress, dev-x) · Lane — step 1 (pending) · Lane — step 2 (pending) · Lane — step 3 (pending) · +3 more"
+
+# Nothing to say beats a guess: without a session there is no list to speak for.
+quiet "no session id prints nothing"    '{"hook_event_name":"UserPromptSubmit","prompt":"go"}'
+quiet "empty stdin prints nothing"      ''
+quiet "malformed stdin prints nothing"  'not json'
+quiet "non-object stdin prints nothing" '[1,2]'
+
+# Both hooks import a shared module inside their own guards, so a broken one
+# degrades quietly by design — the doctor is what says it out loud. Run against
+# a copy of the tree, never the checkout itself.
+COPY="$TMP/copy"
+mkdir -p "$COPY"
+tar --exclude=.git --exclude=__pycache__ -cf - -C "$ROOT" . | tar -xf - -C "$COPY"
+rm -f "$COPY/hooks/lib/tasks.py"
+check "the doctor flags a broken shared module" "hooks/lib does not import" \
+  "$(HOME="$TMP/home-copy" "$COPY/install.sh" --dry-run 2>&1)"
+tar --exclude=.git --exclude=__pycache__ -cf - -C "$ROOT" . | tar -xf - -C "$COPY"
+printf '\ndef broken(\n' >> "$COPY/hooks/taskline.py"
+check "the doctor flags a hook that will not compile" "does not compile" \
+  "$(HOME="$TMP/home-copy" "$COPY/install.sh" --dry-run 2>&1)"
 
 # ── bg + reap ────────────────────────────────────────────────────────────────
 echo "bg.sh + reap.sh"

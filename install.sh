@@ -105,9 +105,14 @@ fi
 # Notification events (Notification, Stop) are deliberately absent — the
 # claude-notifications-go plugin owns them, and its suppressForSubagents keeps
 # a sub-agent finishing from ever being a false cue.
+#
+# taskline must stay synchronous: only a hook that finishes before the turn does
+# has its stdout injected as context, and an async one would print into the void.
 WIRING='[
   {"event":"SessionStart","matcher":"startup|resume|clear",
    "hooks":[{"command":"/install.sh --sync"}]},
+  {"event":"UserPromptSubmit","matcher":"",
+   "hooks":[{"command":"/hooks/taskline.py"}]},
   {"event":"PreToolUse","matcher":"Bash",
    "hooks":[{"command":"/hooks/guard.sh"}]},
   {"event":"PreToolUse","matcher":"mcp__linear.*",
@@ -269,6 +274,20 @@ fi
 for f in "$ROOT"/hooks/*.sh "$ROOT"/hooks/*.py "$ROOT/install.sh"; do
   [ -x "$f" ] || warn "not executable: $f"
 done
+
+# The python hooks import their shared modules inside their own guards, and a
+# hook that will not compile is just as quiet: both cost a statusline segment
+# and the whole task line while still exiting clean. This is what says so out
+# loud, and it carries the interpreter's own last line so the reason is not lost.
+if command -v python3 >/dev/null 2>&1; then
+  if ! err="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import lib.tasks' \
+              "$ROOT/hooks" 2>&1)"; then
+    warn "hooks/lib does not import — $(printf '%s' "$err" | tail -1)"
+  fi
+  if ! err="$(python3 -m py_compile "$ROOT"/hooks/*.py "$ROOT"/hooks/lib/*.py 2>&1)"; then
+    warn "a python hook does not compile — $(printf '%s' "$err" | tail -1)"
+  fi
+fi
 
 # Our wiring must be present, not merely valid. Checking only the paths found in
 # settings passes a settings.json that lost every hook — there is nothing left to
