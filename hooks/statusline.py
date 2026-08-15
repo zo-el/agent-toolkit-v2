@@ -228,41 +228,22 @@ def segment_limits(data, now):
 def segment_tasks(data):
     """Done out of total for this session's task list — the same list the user
     sees. Hidden when there are none, and the platform clears the whole list
-    once every task completes, so this only ever shows live work."""
-    sid = data.get("session_id")
-    if not isinstance(sid, str) or not sid:
+    once every task completes, so this only ever shows live work.
+
+    A ? marks a list read only in part, where the ratio counts what could be
+    read. Green says the lane is finished, which needs the whole list to be
+    true, so a partial read never earns it."""
+    # Imported here so a broken shared module costs this segment rather than the
+    # whole line: main() guards each segment, not the module body.
+    from lib.tasks import load_tasks
+
+    listing = load_tasks(data.get("session_id"))
+    if not listing.tasks:
         return None
-    # Two layouts, because the directory is named for whichever construct owns
-    # the list: the full session id normally, and session-<first8> when agent
-    # teams are on and the team name derives the path.
-    root = os.path.join(HOME, ".claude", "tasks")
-    names = None
-    for d in (os.path.join(root, sid), os.path.join(root, f"session-{sid[:8]}")):
-        try:
-            found = os.listdir(d)
-        except OSError:
-            continue
-        if any(n.endswith(".json") for n in found):
-            names, base = found, d
-            break
-    if names is None:
-        return None
-    d = base
-    total = done = 0
-    for name in names:
-        if not name.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(d, name)) as f:
-                status = json.load(f).get("status")
-        except (OSError, ValueError):
-            continue
-        total += 1
-        done += status == "completed"
-    if not total:
-        return None
-    color = COLORS["green"] if done == total else DIM
-    return f"{color}☰ {done}/{total}{RESET}"
+    done = sum(t.get("status") == "completed" for t in listing.tasks)
+    color = COLORS["green"] if listing.complete and done == len(listing.tasks) else DIM
+    mark = "" if listing.complete else "?"
+    return f"{color}☰ {done}/{len(listing.tasks)}{mark}{RESET}"
 
 
 def proc_start(pid):
