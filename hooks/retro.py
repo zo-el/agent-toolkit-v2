@@ -1250,7 +1250,9 @@ def lock_held():
     try:
         age = time.time() - os.path.getmtime(LOCK_PATH)
         with open(LOCK_PATH) as f:
-            pid = f.read().strip()
+            # A pid and nothing else. Whatever is in there, only this much of it
+            # is ever read.
+            pid = f.read(32).strip()
     except OSError:
         return False
     if age > LOCK_STALE_SECONDS:
@@ -1345,13 +1347,14 @@ def record(args):
     try:
         since_epoch, fresh = read_since()
         db = open_store()
-        if db is not None and not fresh:
+        if db is not None:
             try:
-                sweep(db, since_epoch)
+                # A marker written this run records nothing: everything on disk
+                # predates it, and reading it would be the backfill.
+                if not fresh:
+                    sweep(db, since_epoch)
             finally:
                 db.close()
-        elif db is not None:
-            db.close()
         touch(SWEPT_PATH)
     finally:
         try:
