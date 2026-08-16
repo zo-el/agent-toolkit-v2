@@ -365,7 +365,19 @@ if os.path.exists(db):
         print("retro.db will not open — %s" % failure)
 PY
 )"
-  [ -z "$retro_state" ] || echo "agent-toolkit: ! $retro_state"
+  # One line each: the block can report a marker and a store in the same breath,
+  # and a single prefixed echo would label the first and orphan the second.
+  # --dry-run wrote nothing, so it does not also complain that nothing is there;
+  # it has already said it would create it.
+  # The || keeps the last line: the block's output has no trailing newline, and
+  # read reports failure on it while still having filled the variable.
+  printf '%s' "$retro_state" | while IFS= read -r problem || [ -n "$problem" ]; do
+    [ -z "$problem" ] && continue
+    case "$MODE:$problem" in
+      --dry-run:*"since is missing"*) continue ;;
+    esac
+    echo "agent-toolkit: ! $problem"
+  done
 fi
 
 # Our wiring must be present, not merely valid. Checking only the paths found in

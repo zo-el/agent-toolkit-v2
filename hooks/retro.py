@@ -33,6 +33,7 @@ import shlex
 import stat
 import sys
 import time
+from collections import namedtuple
 from datetime import datetime
 
 HOME = os.path.expanduser("~")
@@ -45,7 +46,7 @@ SINCE_PATH = os.path.join(STORE, "since")
 SWEPT_PATH = os.path.join(STORE, "last-sweep")
 LOCK_PATH = os.path.join(STORE, "sweep.lock")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 HEAD_BYTES = 4096
 FIRST_TS_BYTES = 64 * 1024
 CHUNK = 1 << 20
@@ -72,7 +73,9 @@ CREATE TABLE IF NOT EXISTS cursor(
   base_offset INTEGER,
   ordinal INTEGER,
   segment_id TEXT,
-  last_ts TEXT);
+  last_ts TEXT,
+  last_message TEXT,
+  last_skill TEXT);
 
 CREATE TABLE IF NOT EXISTS segment(
   id TEXT PRIMARY KEY,
@@ -95,84 +98,352 @@ CREATE TABLE IF NOT EXISTS segment(
   agent_fences_lost INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS segment_session ON segment(session_id, closed_seq);
 
-CREATE TABLE IF NOT EXISTS tool_use(
-  segment_id TEXT, agent TEXT, tool TEXT,
-  n INTEGER NOT NULL DEFAULT 0, errors INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY(segment_id, agent, tool));
-
-CREATE TABLE IF NOT EXISTS bash_verb(
-  segment_id TEXT, agent TEXT, verb TEXT,
-  n INTEGER NOT NULL DEFAULT 0, errors INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY(segment_id, agent, verb));
-
-CREATE TABLE IF NOT EXISTS denial(
-  segment_id TEXT, agent TEXT, kind TEXT, signature TEXT,
-  n INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY(segment_id, agent, kind, signature));
-
-CREATE TABLE IF NOT EXISTS skill_use(
-  segment_id TEXT, agent TEXT, skill TEXT,
-  n INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY(segment_id, agent, skill));
-
-CREATE TABLE IF NOT EXISTS mcp_use(
-  segment_id TEXT, agent TEXT, server TEXT,
-  n INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY(segment_id, agent, server));
-
-CREATE TABLE IF NOT EXISTS agent_run(
-  segment_id TEXT, agent_type TEXT, status TEXT, spawn_depth INTEGER,
-  n INTEGER NOT NULL DEFAULT 0, agents INTEGER NOT NULL DEFAULT 0,
-  tokens_in INTEGER NOT NULL DEFAULT 0, tokens_out INTEGER NOT NULL DEFAULT 0,
-  cache_read INTEGER NOT NULL DEFAULT 0, cache_create INTEGER NOT NULL DEFAULT 0,
-  tool_uses INTEGER NOT NULL DEFAULT 0,
-  ms_total INTEGER NOT NULL DEFAULT 0, ms_max INTEGER NOT NULL DEFAULT 0);
--- spawn_depth is NULL when no meta file named it, and SQLite holds NULLs
--- distinct in a unique index, so the key coalesces it or every unknown-depth
--- fence would insert a new row instead of adding to the one already there.
-CREATE UNIQUE INDEX IF NOT EXISTS agent_run_key
-  ON agent_run(segment_id, agent_type, status, IFNULL(spawn_depth, -1));
-
-CREATE TABLE IF NOT EXISTS hook_run(
-  segment_id TEXT, hook TEXT,
-  n INTEGER NOT NULL DEFAULT 0, errors INTEGER NOT NULL DEFAULT 0,
-  ms_total INTEGER NOT NULL DEFAULT 0, ms_max INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY(segment_id, hook));
-
 CREATE TABLE IF NOT EXISTS retro_line(
   source_uuid TEXT PRIMARY KEY,
   segment_id TEXT, author TEXT, text TEXT, at TEXT);
 """
 
 # The deliberate exception to "no command arguments": a permission prompt cannot
-# be recognised as recurring without knowing which command it was.
-DRIVERS = {
-    "git",
-    "gh",
-    "npm",
-    "pnpm",
-    "yarn",
-    "bun",
-    "cargo",
-    "docker",
-    "kubectl",
-    "systemctl",
-    "apt",
-    "apt-get",
-    "brew",
-    "pip",
-    "pip3",
-    "python",
-    "python3",
-    "node",
-    "make",
-    "go",
-    "terraform",
-    "aws",
-    "gcloud",
-    "sudo",
-    "nix",
+# be recognised as recurring without knowing which command it was. `git push` is
+# a different question from `git log`, and only the second word says which.
+#
+# Written out rather than matched, because a pattern admits whatever the user
+# typed: `python3 migrate_prod_secrets.py` and `make deploy-acme` are a filename
+# and a target, which are theirs. The only second word that can never be one is
+# a word this file already contains. A subcommand missing from a list below
+# costs the pair and keeps the driver, which is a figure that reads low rather
+# than one that leaks.
+SUBCOMMANDS = {
+    "git": frozenset(
+        (
+            "add",
+            "am",
+            "apply",
+            "archive",
+            "bisect",
+            "blame",
+            "branch",
+            "checkout",
+            "cherry-pick",
+            "clean",
+            "clone",
+            "commit",
+            "config",
+            "describe",
+            "diff",
+            "fetch",
+            "fsck",
+            "gc",
+            "grep",
+            "init",
+            "log",
+            "ls-files",
+            "ls-remote",
+            "merge",
+            "mv",
+            "notes",
+            "pull",
+            "push",
+            "rebase",
+            "reflog",
+            "remote",
+            "reset",
+            "restore",
+            "revert",
+            "rev-list",
+            "rev-parse",
+            "rm",
+            "shortlog",
+            "show",
+            "stash",
+            "status",
+            "submodule",
+            "switch",
+            "tag",
+            "worktree",
+        )
+    ),
+    "gh": frozenset(
+        (
+            "api",
+            "auth",
+            "browse",
+            "cache",
+            "codespace",
+            "extension",
+            "gist",
+            "issue",
+            "label",
+            "org",
+            "pr",
+            "project",
+            "release",
+            "repo",
+            "ruleset",
+            "run",
+            "search",
+            "secret",
+            "status",
+            "variable",
+            "workflow",
+        )
+    ),
+    "npm": frozenset(
+        (
+            "audit",
+            "cache",
+            "ci",
+            "config",
+            "dedupe",
+            "exec",
+            "init",
+            "install",
+            "link",
+            "login",
+            "ls",
+            "outdated",
+            "pack",
+            "publish",
+            "run",
+            "start",
+            "test",
+            "uninstall",
+            "update",
+            "version",
+            "view",
+            "whoami",
+        )
+    ),
+    "cargo": frozenset(
+        (
+            "add",
+            "bench",
+            "build",
+            "check",
+            "clean",
+            "clippy",
+            "doc",
+            "fetch",
+            "fmt",
+            "install",
+            "new",
+            "publish",
+            "remove",
+            "run",
+            "test",
+            "tree",
+            "update",
+            "vendor",
+        )
+    ),
+    "docker": frozenset(
+        (
+            "build",
+            "compose",
+            "cp",
+            "exec",
+            "images",
+            "inspect",
+            "kill",
+            "load",
+            "login",
+            "logs",
+            "ps",
+            "pull",
+            "push",
+            "restart",
+            "rm",
+            "rmi",
+            "run",
+            "save",
+            "start",
+            "stop",
+            "tag",
+            "volume",
+        )
+    ),
+    "kubectl": frozenset(
+        (
+            "apply",
+            "config",
+            "cordon",
+            "create",
+            "delete",
+            "describe",
+            "drain",
+            "edit",
+            "exec",
+            "get",
+            "logs",
+            "patch",
+            "port-forward",
+            "rollout",
+            "scale",
+            "top",
+        )
+    ),
+    "systemctl": frozenset(
+        (
+            "daemon-reload",
+            "disable",
+            "enable",
+            "is-active",
+            "list-units",
+            "mask",
+            "reload",
+            "restart",
+            "start",
+            "status",
+            "stop",
+            "unmask",
+        )
+    ),
+    "pip": frozenset(("download", "freeze", "install", "list", "show", "uninstall")),
+    "go": frozenset(
+        (
+            "build",
+            "clean",
+            "doc",
+            "fmt",
+            "generate",
+            "get",
+            "install",
+            "list",
+            "mod",
+            "run",
+            "test",
+            "tool",
+            "vet",
+            "work",
+        )
+    ),
+    "terraform": frozenset(
+        (
+            "apply",
+            "destroy",
+            "fmt",
+            "import",
+            "init",
+            "output",
+            "plan",
+            "providers",
+            "refresh",
+            "show",
+            "state",
+            "validate",
+            "workspace",
+        )
+    ),
+    "brew": frozenset(
+        (
+            "cleanup",
+            "doctor",
+            "info",
+            "install",
+            "link",
+            "list",
+            "outdated",
+            "reinstall",
+            "search",
+            "services",
+            "tap",
+            "uninstall",
+            "update",
+            "upgrade",
+        )
+    ),
+    "nix": frozenset(
+        (
+            "build",
+            "develop",
+            "flake",
+            "profile",
+            "run",
+            "shell",
+            "store",
+        )
+    ),
+    "aws": frozenset(
+        (
+            "cloudformation",
+            "cloudwatch",
+            "ec2",
+            "ecr",
+            "ecs",
+            "iam",
+            "lambda",
+            "logs",
+            "rds",
+            "route53",
+            "s3",
+            "s3api",
+            "secretsmanager",
+            "sts",
+        )
+    ),
+    "gcloud": frozenset(
+        (
+            "artifacts",
+            "auth",
+            "compute",
+            "config",
+            "container",
+            "functions",
+            "iam",
+            "projects",
+            "run",
+            "secrets",
+            "sql",
+            "storage",
+        )
+    ),
 }
+# The same vocabulary under the names that share it.
+for _driver, _alias in (
+    ("npm", "pnpm"),
+    ("npm", "yarn"),
+    ("npm", "bun"),
+    ("pip", "pip3"),
+    ("kubectl", "k9s"),
+):
+    SUBCOMMANDS.setdefault(_alias, SUBCOMMANDS[_driver])
+for _apt in ("apt", "apt-get"):
+    SUBCOMMANDS[_apt] = frozenset(
+        (
+            "autoremove",
+            "install",
+            "list",
+            "purge",
+            "remove",
+            "search",
+            "show",
+            "update",
+            "upgrade",
+        )
+    )
+# What follows sudo is another command, not an argument, so the drivers name
+# themselves. Anything else it runs is a path the user chose.
+SUBCOMMANDS["sudo"] = frozenset(SUBCOMMANDS) | frozenset(
+    (
+        "apt",
+        "apt-get",
+        "systemctl",
+        "docker",
+        "kubectl",
+        "nix",
+        "make",
+        "reboot",
+        "shutdown",
+        "mount",
+        "umount",
+        "chown",
+        "chmod",
+        "tee",
+        "sysctl",
+    )
+)
+DRIVERS = frozenset(SUBCOMMANDS)
+
 SEPARATORS = frozenset(("&&", "||", ";", ";;", "|", "|&", "&"))
 # A keyword is not the command; the command is the word after it.
 KEYWORDS = frozenset(
@@ -328,17 +599,14 @@ def bash_verbs(command):
             verbs.append("other")
             continue
         verb = head
-        if head in DRIVERS and len(tokens) > 1:
-            # The subcommand is the very next word or there is none. A bare word
-            # further along is a flag's value — `git -C <repo>`, `kubectl -n
-            # <namespace>`, `aws --profile <account>` — and a value is an
-            # argument, which is the one thing a verb may never carry.
+        if head in SUBCOMMANDS and len(tokens) > 1:
+            # The subcommand is the very next word, and only when it is one this
+            # file names. A bare word further along is a flag's value — `git -C
+            # <repo>`, `kubectl -n <namespace>` — and a word that is not in the
+            # list is a filename or a target, which are arguments. Either is the
+            # one thing a verb may never carry.
             second = unquote(tokens[1])
-            if (
-                not second.startswith("-")
-                and not second.isdigit()
-                and VERB_OK.match(second)
-            ):
+            if second in SUBCOMMANDS[head]:
                 verb = head + " " + second
         verbs.append(verb)
     return verbs
@@ -473,6 +741,7 @@ def open_store(create=True):
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version == 0:
                 db.executescript(SCHEMA)
+                db.executescript(child_ddl())
                 db.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
             elif version != SCHEMA_VERSION:
                 db.close()
@@ -517,6 +786,11 @@ def meta_set(db, key, value):
 
 # The segment's own counters, once: the accumulator, the write and the clearing
 # a rebuild does all read this list.
+# What the segment says about itself rather than counts: every one of these is
+# written with IFNULL, so a rebuild has to blank them or the old file's answer
+# outlives the file.
+SEGMENT_DERIVED = ("repo", "started_at", "ended_at", "cli_version", "branch")
+
 SEGMENT_SCALARS = (
     "user_turns",
     "wake_turns",
@@ -567,6 +841,49 @@ def as_key(key):
     return key if isinstance(key, tuple) else (key,)
 
 
+# Every key column holds text but this one, which holds a number or nothing.
+# SQLite's affinity is not decoration: text affinity would store the depth as
+# "2" and IFNULL(spawn_depth, -1) would stop comparing.
+INTEGER_KEYS = frozenset(("spawn_depth",))
+
+
+def child_ddl():
+    """The child tables, from the one place that describes them.
+
+    Written out beside CHILD_TABLES instead, the two would have to agree by eye,
+    and a column added to one and not the other fails at the first write rather
+    than at review.
+    """
+    statements = []
+    for _, table, keys, sums, maxes, target in CHILD_TABLES:
+        columns = ["segment_id TEXT"]
+        columns += [
+            "%s %s" % (key, "INTEGER" if key in INTEGER_KEYS else "TEXT")
+            for key in keys
+        ]
+        columns += [
+            "%s INTEGER NOT NULL DEFAULT 0" % column
+            for column in tuple(sums) + tuple(maxes)
+        ]
+        if target:
+            # A key with a NULL in it: SQLite holds NULLs distinct in a unique
+            # index, so the target coalesces and the table carries no primary
+            # key of its own.
+            statements.append(
+                "CREATE TABLE IF NOT EXISTS %s(%s);" % (table, ", ".join(columns))
+            )
+            statements.append(
+                "CREATE UNIQUE INDEX IF NOT EXISTS %s_key ON %s(%s);"
+                % (table, table, target)
+            )
+        else:
+            columns.append("PRIMARY KEY(segment_id, %s)" % ", ".join(keys))
+            statements.append(
+                "CREATE TABLE IF NOT EXISTS %s(%s);" % (table, ", ".join(columns))
+            )
+    return "\n".join(statements)
+
+
 def bump(mapping, key, values, maxes=0):
     """Fold one row's values into an accumulator. The last `maxes` of them take
     the larger value rather than the sum, the way their columns do."""
@@ -611,7 +928,12 @@ class Span:
         self.hooks = {}  # hook -> [n, errors, ms_total, ms_max]
         self.retro = []  # (uuid, text, at)
         self.pending = {}  # tool_use id -> (tool, verbs)
+        # A message's content blocks are written as one record each, and a
+        # sweep can land between two of them. Both of these carry across that
+        # boundary on the cursor, or the second half of a message is summed a
+        # second time and a skill still running is activated twice.
         self.messages = set()  # message ids whose usage is already summed
+        self.last_message = None  # the newest of them, which the cursor keeps
         self.skill_now = None
         self.user_turns = 0
         self.wake_turns = 0
@@ -720,6 +1042,7 @@ def feed_assistant(span, rec):
         # carrying the same message id and the same usage block: summing per
         # record would roughly double every token figure.
         span.messages.add(message_id)
+        span.last_message = message_id
         span.tokens[0] += num(usage.get("input_tokens"))
         span.tokens[1] += num(usage.get("output_tokens"))
         span.tokens[2] += num(usage.get("cache_read_input_tokens"))
@@ -967,30 +1290,37 @@ class Bucket:
 # ── the sweep ────────────────────────────────────────────────────────────────
 
 
+# The cursor row by name. Eleven fields positionally is a mistake waiting for
+# the twelfth.
+Cursor = namedtuple(
+    "Cursor",
+    "agent_id inode head_len head_sha offset base_offset ordinal segment_id"
+    " last_ts last_message last_skill",
+)
+CURSOR_COLUMNS = ", ".join('"%s"' % f for f in Cursor._fields)
+
+
 def get_cursor(db, path):
-    return db.execute(
-        'SELECT agent_id, inode, head_len, head_sha, "offset", base_offset, '
-        "ordinal, segment_id, last_ts FROM cursor WHERE path=?",
-        (path,),
+    row = db.execute(
+        "SELECT %s FROM cursor WHERE path=?" % CURSOR_COLUMNS, (path,)
     ).fetchone()
+    return Cursor(*row) if row else None
 
 
-def put_cursor(db, path, row):
+def put_cursor(db, path, cursor):
+    columns = ", ".join(['"path"'] + ['"%s"' % f for f in Cursor._fields])
+    sets = ", ".join('"%s"=excluded."%s"' % (f, f) for f in Cursor._fields)
     db.execute(
-        'INSERT INTO cursor(path, agent_id, inode, head_len, head_sha, "offset", '
-        "base_offset, ordinal, segment_id, last_ts) VALUES(?,?,?,?,?,?,?,?,?,?) "
-        "ON CONFLICT(path) DO UPDATE SET agent_id=excluded.agent_id, "
-        "inode=excluded.inode, head_len=excluded.head_len, head_sha=excluded.head_sha, "
-        '"offset"=excluded."offset", base_offset=excluded.base_offset, '
-        "ordinal=excluded.ordinal, segment_id=excluded.segment_id, last_ts=excluded.last_ts",
-        (path,) + row,
+        "INSERT INTO cursor(%s) VALUES(%s) ON CONFLICT(path) DO UPDATE SET %s"
+        % (columns, ",".join("?" * (len(Cursor._fields) + 1)), sets),
+        (path,) + tuple(cursor),
     )
 
 
 def unchanged(st, cur):
     """A transcript that has gained nothing since its cursor, decided from stat
     alone so the bulk of a corpus is never opened."""
-    return cur is not None and cur[1] == st.st_ino and cur[4] == st.st_size
+    return cur is not None and cur.inode == st.st_ino and cur.offset == st.st_size
 
 
 def head_of(f, size):
@@ -1007,21 +1337,29 @@ def plan(f, st, cur, since_epoch):
     """
     size = st.st_size
     if cur is not None:
-        _, inode, head_len, head_sha, offset, base, ordinal, _, _ = cur
-        same = inode == st.st_ino and sha_head(f, min(head_len or 0, size)) == head_sha
-        if same and size > offset:
-            return "resume", offset, ordinal or 0, base, None
-        if same and base is not None and size >= base:
+        same = (
+            cur.inode == st.st_ino
+            and sha_head(f, min(cur.head_len or 0, size)) == cur.head_sha
+        )
+        if same and size > cur.offset:
+            return "resume", cur.offset, cur.ordinal or 0, cur.base_offset, None
+        if same and cur.base_offset is not None and size >= cur.base_offset:
             # Rewound or truncated, but the same file: the open segment starts
             # where it always did, so only it is rebuilt. Closed segments are
             # never re-derived, which is what makes them immutable in fact and
             # not just by convention.
-            return "reparse", base, ordinal or 0, base, None
+            return (
+                "reparse",
+                cur.base_offset,
+                cur.ordinal or 0,
+                cur.base_offset,
+                None,
+            )
     head = head_of(f, size)
     # An ordinal already reached is kept even when nothing here may be read: it
     # is what the records this file gains next belong to, and starting again
     # from 0 would put them in a segment that has already been closed.
-    reached = (cur[6] or 0) if cur is not None else 0
+    reached = (cur.ordinal or 0) if cur is not None else 0
     if cur is None and st.st_mtime < since_epoch:
         # A transcript untouched since before the marker cannot hold a record
         # after it, so first contact stays cheap over an existing corpus.
@@ -1120,7 +1458,13 @@ def clear_open(db, segment_ids):
     it would simply lose the delegation figures. The scalars go back to zero
     because the rebuild adds to them.
     """
-    scalars = ", ".join("%s=0" % c for c in SEGMENT_SCALARS)
+    # The counters go back to zero because the rebuild adds to them, and the
+    # descriptive columns go back to NULL because the rebuild uses IFNULL to
+    # keep what is already there — which would keep the replaced file's repo,
+    # branch and dates, describing a window that never happened.
+    blanked = ", ".join(
+        ["%s=0" % c for c in SEGMENT_SCALARS] + ["%s=NULL" % c for c in SEGMENT_DERIVED]
+    )
     for segment_id in segment_ids:
         for _, table, keys, _, _, _ in CHILD_TABLES:
             if "agent" in keys:
@@ -1133,7 +1477,7 @@ def clear_open(db, segment_ids):
         db.execute(
             "DELETE FROM retro_line WHERE segment_id=? AND author='main'", (segment_id,)
         )
-        db.execute("UPDATE segment SET " + scalars + " WHERE id=?", (segment_id,))
+        db.execute("UPDATE segment SET " + blanked + " WHERE id=?", (segment_id,))
 
 
 def write_bucket(db, segment_id, bucket, session, project, ordinal, compact=None):
@@ -1226,7 +1570,7 @@ def fold_fence(db, session_path, segment_id, bucket, agent_id, status, rebuild):
     start, head = 0, None
     # An agent counts once per segment that fenced it, however many times that
     # segment stops it.
-    first_seen = cur is None or cur[7] != segment_id
+    first_seen = cur is None or cur.segment_id != segment_id
     if rebuild and not first_seen:
         # A rebuild re-delivers fences this segment already counted, and its
         # agent_run row was kept precisely because it cannot be re-derived. If
@@ -1235,46 +1579,42 @@ def fold_fence(db, session_path, segment_id, bucket, agent_id, status, rebuild):
         # round twice.
         return
     if cur is not None:
-        _, inode, head_len, head_sha, offset, _, _, _, _ = cur
         with open(path, "rb") as f:
             same = (
-                inode == st.st_ino
-                and sha_head(f, min(head_len or 0, st.st_size)) == head_sha
+                cur.inode == st.st_ino
+                and sha_head(f, min(cur.head_len or 0, st.st_size)) == cur.head_sha
             )
-        if same and st.st_size >= offset:
-            head = (head_len, head_sha)
-            start = offset
+        if same and st.st_size >= cur.offset:
+            head = (cur.head_len, cur.head_sha)
+            start = cur.offset
     if head is None:
         with open(path, "rb") as f:
             head = head_of(f, st.st_size)
 
-    span = Span()
-    consumed = start
+    span = resumed_span(cur, start > 0)
     with open(path, "rb") as f:
-        for line, at in read_lines(f, start):
-            consumed = at
-            rec = parse_record(line)
-            if rec is None:
-                if line.strip():
-                    span.malformed += 1
-                continue
+        reader = Reader(f, start, lambda: span)
+        for rec in reader.records():
             # A nested agent's fence reaches the root session transcript, not
             # this one, so a fence here would be a second delivery of a stop the
             # root already counted.
             feed(span, rec, False)
+        consumed = reader.at
     put_cursor(
         db,
         path,
-        (
-            agent_id,
-            st.st_ino,
-            head[0],
-            head[1],
-            consumed,
-            None,
-            None,
-            segment_id,
-            span.last_ts,
+        Cursor(
+            agent_id=agent_id,
+            inode=st.st_ino,
+            head_len=head[0],
+            head_sha=head[1],
+            offset=consumed,
+            base_offset=None,
+            ordinal=None,
+            segment_id=segment_id,
+            last_ts=span.last_ts,
+            last_message=span.last_message,
+            last_skill=span.skill_now,
         ),
     )
     if consumed <= start:
@@ -1290,6 +1630,49 @@ def parse_record(line):
     except ValueError:
         return None
     return rec if isinstance(rec, dict) else None
+
+
+def resumed_span(cur, resuming):
+    """A span that knows what the span before it had already counted.
+
+    Only on a resume: a rebuild re-reads bytes from the segment's start, so it
+    must sum them again rather than skip the message it stopped inside.
+    """
+    span = Span()
+    if cur is not None and resuming:
+        if cur.last_message:
+            span.messages.add(cur.last_message)
+            span.last_message = cur.last_message
+        span.skill_now = cur.last_skill
+    return span
+
+
+class Reader:
+    """Complete records from an offset, and the offset itself.
+
+    The position belongs here rather than to a span because a session
+    transcript's span is replaced at every boundary, while the file is read
+    straight through. `current` is what hands an unparsable line to whichever
+    span is counting when it turns up.
+    """
+
+    def __init__(self, f, start, current):
+        self.f = f
+        self.at = start
+        self.current = current
+
+    def records(self):
+        """Each record that parses. One that does not is counted and skipped —
+        it never costs the rest of the file — and the position still moves past
+        it, so it is read once and not again."""
+        for line, at in read_lines(self.f, self.at):
+            self.at = at
+            rec = parse_record(line)
+            if rec is None:
+                if line.strip():
+                    self.current().malformed += 1
+                continue
+            yield rec
 
 
 def sweep_transcript(db, path, project, since_epoch):
@@ -1334,21 +1717,25 @@ def sweep_transcript(db, path, project, since_epoch):
                 put_cursor(
                     db,
                     path,
-                    (
-                        None,
-                        st.st_ino,
-                        head[0],
-                        head[1],
-                        start,
-                        start,
-                        ordinal,
-                        cur[7] if cur is not None else None,
-                        None,
+                    Cursor(
+                        agent_id=None,
+                        inode=st.st_ino,
+                        head_len=head[0],
+                        head_sha=head[1],
+                        offset=start,
+                        base_offset=start,
+                        ordinal=ordinal,
+                        segment_id=cur.segment_id if cur is not None else None,
+                        last_ts=None,
+                        # Nothing of this file was read, so nothing it said
+                        # before carries into what it says next.
+                        last_message=None,
+                        last_skill=None,
                     ),
                 )
                 db.execute("COMMIT")
                 return
-            consumed, last_ts, ordinal, base, segment_id, seen = scan_session(
+            consumed, last_ts, ordinal, base, segment_id, seen, span = scan_session(
                 db,
                 f,
                 path,
@@ -1358,22 +1745,24 @@ def sweep_transcript(db, path, project, since_epoch):
                 ordinal,
                 base,
                 closed,
-                bool(cleared),
+                (cur, bool(cleared)),
             )
             drop_segments(db, [s for s in cleared if s not in seen])
             put_cursor(
                 db,
                 path,
-                (
-                    None,
-                    st.st_ino,
-                    head[0] if head else cur[2],
-                    head[1] if head else cur[3],
-                    consumed,
-                    base,
-                    ordinal,
-                    segment_id,
-                    last_ts or (cur[8] if cur is not None else None),
+                Cursor(
+                    agent_id=None,
+                    inode=st.st_ino,
+                    head_len=head[0] if head else cur.head_len,
+                    head_sha=head[1] if head else cur.head_sha,
+                    offset=consumed,
+                    base_offset=base,
+                    ordinal=ordinal,
+                    segment_id=segment_id,
+                    last_ts=last_ts or (cur.last_ts if cur is not None else None),
+                    last_message=span.last_message,
+                    last_skill=span.skill_now,
                 ),
             )
             db.execute("COMMIT")
@@ -1388,22 +1777,17 @@ def sweep_transcript(db, path, project, since_epoch):
             raise
 
 
-def scan_session(db, f, path, session, project, start, ordinal, base, closed, rebuild):
+def scan_session(db, f, path, session, project, start, ordinal, base, closed, state):
     """Consume a span of a session transcript. Returns (offset, last timestamp,
     ordinal, the offset the open segment began at, its id, and the ids written)."""
-    consumed = start
+    cur, rebuild = state
     last_ts = None
     seen = set()
     segment_id = "%s#%d" % (session, ordinal)
     active = segment_id not in closed
-    span, bucket = Span(), Bucket()
-    for line, at in read_lines(f, start):
-        consumed = at
-        rec = parse_record(line)
-        if rec is None:
-            if line.strip():
-                span.malformed += 1
-            continue
+    span, bucket = resumed_span(cur, not rebuild), Bucket()
+    reader = Reader(f, start, lambda: span)
+    for rec in reader.records():
         event = feed(span, rec, True)
         if span.last_ts and (last_ts is None or span.last_ts > last_ts):
             last_ts = span.last_ts
@@ -1417,9 +1801,11 @@ def scan_session(db, f, path, session, project, start, ordinal, base, closed, re
                 )
                 seen.add(segment_id)
             ordinal += 1
-            base = consumed
+            base = reader.at
             segment_id = "%s#%d" % (session, ordinal)
             active = segment_id not in closed
+            # A boundary ends the message and the skill run with the segment, so
+            # the next one starts remembering nothing.
             span, bucket = Span(), Bucket()
         elif active:
             try:
@@ -1442,12 +1828,39 @@ def scan_session(db, f, path, session, project, start, ordinal, base, closed, re
     # belong to a new one, or a reviewed segment would gain rows after the fact.
     while segment_id in closed:
         ordinal += 1
-        base = consumed
+        base = reader.at
         segment_id = "%s#%d" % (session, ordinal)
-    return consumed, last_ts, ordinal, base, segment_id, seen
+    return reader.at, last_ts, ordinal, base, segment_id, seen, span
+
+
+def prune_agent_cursors(db):
+    """Agent cursors whose transcript the 30-day cleanup has taken.
+
+    They are never walked and never idle-closed, so nothing else would ever
+    remove them — and there are ten agent transcripts for every session one, so
+    the table would grow without bound. A row that goes and whose file comes
+    back is read from 0 again, which is the same answer it gave the first time.
+    """
+    rows = db.execute("SELECT path FROM cursor WHERE agent_id IS NOT NULL").fetchall()
+    gone = [(path,) for (path,) in rows if not os.path.exists(path)]
+    if not gone:
+        return
+    try:
+        db.execute("BEGIN IMMEDIATE")
+    except Exception:
+        return
+    try:
+        db.executemany("DELETE FROM cursor WHERE path=?", gone)
+        db.execute("COMMIT")
+    except Exception:
+        try:
+            db.execute("ROLLBACK")
+        except Exception:
+            pass
 
 
 def close_stale(db, now):
+    prune_agent_cursors(db)
     rows = db.execute(
         "SELECT path, segment_id, ordinal FROM cursor WHERE agent_id IS NULL"
     ).fetchall()
@@ -1525,7 +1938,10 @@ def sweep(db, since_epoch):
                 # without this a file that fails every sweep is invisible.
                 failed += 1
     try:
-        meta_set(db, "transcripts_failed", failed)
+        # Added, not assigned: the digest prints this as an all-time figure, and
+        # one clean sweep would otherwise erase a week of failures from the line
+        # that explains why a number is short.
+        meta_set(db, "transcripts_failed", meta_get(db, "transcripts_failed") + failed)
     except Exception:
         pass
     close_stale(db, time.time())
@@ -1544,6 +1960,25 @@ def lock_pid():
         return ""
 
 
+def alive(pid):
+    """Whether a process is still running. Signal 0 checks for it without
+    sending anything, and answers on every platform — /proc does not exist off
+    Linux, and reading a lock as unheld there would let two sweeps run at once.
+    A pid this process does not own answers EPERM, which is still alive."""
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    except (ValueError, OverflowError):
+        # Not a pid this system could ever have issued, so the lock holding it
+        # is corrupt — and a corrupt lock nothing can steal wedges the recorder
+        # for good.
+        return False
+    return True
+
+
 def lock_held():
     """True when another sweep owns the lock. A lock older than ten minutes, or
     one whose process is gone, is stolen."""
@@ -1554,7 +1989,7 @@ def lock_held():
     if age > LOCK_STALE_SECONDS:
         return False
     pid = lock_pid()
-    return bool(pid) and pid.isdigit() and os.path.exists("/proc/%s" % pid)
+    return bool(pid) and pid.isdigit() and alive(pid)
 
 
 def take_lock():
@@ -1688,6 +2123,10 @@ def drain_stdin():
 
 
 def record(args):
+    # Before anything that can return: the payload is on the pipe whether or not
+    # this run sweeps, and the trigger that carries --interval is the one that
+    # no-ops most. Draining after the gate would mean never draining at all.
+    drain_stdin()
     interval = 0
     if "--interval" in args:
         try:
@@ -1700,7 +2139,6 @@ def record(args):
                 return 0
         except OSError:
             pass
-    drain_stdin()
     try:
         # The lock lives in the store, so the store has to exist before anyone
         # can hold it. install.sh creates it too; neither may depend on the other.
@@ -2017,12 +2455,21 @@ def store_problem():
         return "python3 has no sqlite3 module, so nothing has ever been recorded"
     if not os.path.exists(DB_PATH):
         return "nothing recorded yet — no store at %s" % DB_PATH
+    db = None
     try:
         db = sqlite3.connect(DB_PATH)
         version = db.execute("PRAGMA user_version").fetchone()[0]
-        db.close()
-    except sqlite3.DatabaseError as failure:
+    except Exception as failure:
+        # The one function whose whole job is explaining an unreadable store
+        # may not answer with a traceback, so it catches whatever comes —
+        # permission, encoding, a path that is a directory.
         return "%s will not open: %s" % (DB_PATH, failure)
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
     if version != SCHEMA_VERSION:
         return "%s is schema version %d; this build reads version %d" % (
             DB_PATH,
@@ -2035,6 +2482,8 @@ def store_problem():
 def accept(db, args):
     """Move the marker, and say what that hid. A digest nobody can get back is
     not something to do on a typo."""
+    from lib.out import print_line
+
     try:
         seq = int(args[args.index("--accept") + 1])
     except (IndexError, ValueError):
@@ -2062,13 +2511,18 @@ def accept(db, args):
         (through, seq),
     ).fetchone()[0]
     meta_set(db, "reviewed_through", seq)
-    sys.stdout.write(
-        "accepted %d segments · reviewed_through %d → %d\n" % (covered, through, seq)
+    print_line(
+        "accepted %d segments · reviewed_through %d → %d" % (covered, through, seq)
     )
     return 0
 
 
 def review(args):
+    # Imported here rather than at module level so a broken checkout costs the
+    # digest and not the recorder: everything record() does is guarded, and a
+    # module-level import is not.
+    from lib.out import print_line
+
     db = open_store(create=False)
     if db is None:
         sys.stderr.write("retro: %s\n" % store_problem())
@@ -2076,15 +2530,12 @@ def review(args):
     try:
         if "--accept" in args:
             return accept(db, args)
-        try:
-            for line in digest(db, "--all" in args):
-                sys.stdout.write(line + "\n")
-            sys.stdout.flush()
-        except BrokenPipeError:
-            # `review | head` is a normal way to read this. Point the stream at
-            # nothing so the interpreter's own shutdown flush cannot raise again
-            # where no guard is left to catch it.
-            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        for line in digest(db, "--all" in args):
+            # print_line, not a bare write: the digest is full of · and →, and a
+            # stream that will not take them degrades the glyph rather than
+            # losing the line. It swallows a closed pipe too, which is why the
+            # exit below cannot leave that to interpreter shutdown.
+            print_line(line)
         return 0
     finally:
         db.close()
@@ -2105,8 +2556,24 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    code = 2
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
-    sys.exit(main(sys.argv[1:]))
+        try:
+            from lib.out import utf8_stdout
+
+            utf8_stdout()
+        except Exception:
+            # A checkout missing its own package still records; the doctor is
+            # what says so. Only the digest's glyphs depend on this.
+            pass
+        code = main(sys.argv[1:])
+    finally:
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+        # `review | head` closes the pipe early, and interpreter shutdown
+        # flushes stdout outside every guard above — where that raises, it
+        # replaces the exit code with 120.
+        os._exit(code)

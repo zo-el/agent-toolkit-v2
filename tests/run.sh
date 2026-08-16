@@ -757,6 +757,25 @@ retro() { HOME="$RH" python3 "$ROOT/hooks/retro.py" "$@" </dev/null 2>"$TMP/retr
 dbq()   { HOME="$RH" python3 "$TMP/dbq.py" "$1" 2>/dev/null; }
 eq()    { [ "$2" = "$3" ] && ok "$1" || bad "$1" "expected '$2', got '${3:-<empty>}'"; }
 sql()   { eq "$1" "$2" "$(dbq "$3")"; }
+
+# The two ways a transcript stops being the file its cursor was reading: a head
+# rewrite makes it a different file under the same name, and dropping the last
+# record rewinds it. Both force a rebuild, and which one it is decides whether
+# the open segment can be re-derived.
+cat > "$TMP/edit.py" <<'PY2'
+import sys
+
+path, mode = sys.argv[1], sys.argv[2]
+if mode == "head":
+    lines = open(path).read().splitlines(True)
+    lines[0] = lines[0].replace(sys.argv[3], sys.argv[4])
+    open(path, "w").write("".join(lines))
+else:
+    lines = open(path, "rb").read().splitlines(True)
+    open(path, "wb").write(b"".join(lines[:-1]))
+PY2
+rewrite_head() { python3 "$TMP/edit.py" "$1" head "$2" "$3"; }   # file, old, new
+drop_last()    { python3 "$TMP/edit.py" "$1" tail; }             # file
 # Every row of every table, read from the schema rather than from a list here:
 # what "changes not one row" means, and a table or column added tomorrow is
 # covered the day it lands rather than the day someone remembers.
@@ -891,6 +910,23 @@ retro record >/dev/null
 sql "the completed line is counted exactly once" "1" \
   "SELECT n FROM tool_use WHERE segment_id='s-main#1' AND tool='Glob'"
 
+# One response is written as one record per content block, all carrying the same
+# usage, and the trailing-fragment rule makes a sweep land between two of them.
+# A figure counted twice here is wrong for good: nothing ever re-derives it.
+tokens_before="$(dbq "SELECT tokens_in FROM segment WHERE id='s-main#1'")"
+cat >> "$RP/alpha/s-main.jsonl" <<'JSON'
+{"type":"assistant","uuid":"a14","timestamp":"2026-08-14T10:11:00.000Z","message":{"id":"m14","usage":{"input_tokens":70,"output_tokens":7},"content":[{"type":"text","text":"first block"}]}}
+JSON
+retro record >/dev/null
+cat >> "$RP/alpha/s-main.jsonl" <<'JSON'
+{"type":"assistant","uuid":"a14b","timestamp":"2026-08-14T10:11:00.000Z","message":{"id":"m14","usage":{"input_tokens":70,"output_tokens":7},"content":[{"type":"tool_use","id":"t14","name":"Grep","input":{}}]}}
+JSON
+retro record >/dev/null
+sql "a message split across two sweeps is summed once" "$(( tokens_before + 70 ))" \
+  "SELECT tokens_in FROM segment WHERE id='s-main#1'"
+sql "and its second half still counts its own tool use" "1" \
+  "SELECT n FROM tool_use WHERE segment_id='s-main#1' AND tool='Grep'"
+
 # A line that will not parse costs itself and nothing else.
 cat >> "$RP/alpha/s-main.jsonl" <<'JSON'
 {"type":"assistant","uuid":"a12",
@@ -903,18 +939,11 @@ sql "a malformed line is counted, not fatal" "1|1" \
 # A transcript whose head changed is a different file under the same name: the
 # open segment is rebuilt from scratch, and the closed one is left alone.
 figures > "$TMP/retro.before"
-python3 - "$RP/alpha/s-main.jsonl" <<'PY'
-import sys
-
-path = sys.argv[1]
-lines = open(path).read().splitlines(True)
-lines[0] = lines[0].replace('"go"', '"go on then"')
-open(path, "w").write("".join(lines))
-PY
+rewrite_head "$RP/alpha/s-main.jsonl" '"go"' '"go on then"'
 retro record >/dev/null
 sql "a reparse leaves the closed segment untouched" "compact|1|5|11" \
   "SELECT close_trigger,user_turns,assistant_turns,tokens_in FROM segment WHERE id='s-main#0'"
-sql "a reparse rebuilds the open segment without doubling it" "5|1" \
+sql "a reparse rebuilds the open segment without doubling it" "7|1" \
   "SELECT assistant_turns,(SELECT n FROM tool_use WHERE segment_id='s-main#1' AND tool='Write') FROM segment WHERE id='s-main#1'"
 
 # No backfill, two ways: a transcript whose first record predates the marker,
@@ -1121,6 +1150,10 @@ cat > "$RP/beta/s-agents.jsonl" <<'JSON'
 {"type":"assistant","uuid":"s16","timestamp":"2026-08-14T13:05:09.000Z","message":{"id":"sm16","content":[{"type":"text","text":"Here is what it printed:\n\n    Retro: CANARYQUOTEDLINE, which is pasted output and not mine\n\nRetro: the pasted line above is not the answer"}]}}
 {"type":"assistant","uuid":"s17","timestamp":"2026-08-14T13:05:10.000Z","message":{"id":"sm17","content":[{"type":"tool_use","id":"tu17","name":"Bash","input":{"command":"grep -nE \"alpha|[\\\\\"x\\\\\"]|CANARYDESYNC|beta\" src/app.ts"}}]}}
 {"type":"assistant","uuid":"s18","timestamp":"2026-08-14T13:05:11.000Z","message":{"id":"sm18","content":[{"type":"tool_use","id":"tu18","name":"Bash","input":{"command":"kits=\"2026-01-01-CANARYDATEID other\"; echo done"}}]}}
+{"type":"assistant","uuid":"s19","timestamp":"2026-08-14T13:05:12.000Z","message":{"id":"sm19","content":[{"type":"tool_use","id":"tu19","name":"Bash","input":{"command":"python3 CANARYSCRIPTNAME.py --once"}}]}}
+{"type":"assistant","uuid":"s20","timestamp":"2026-08-14T13:05:13.000Z","message":{"id":"sm20","content":[{"type":"tool_use","id":"tu20","name":"Bash","input":{"command":"make CANARYTARGET"}}]}}
+{"type":"assistant","uuid":"s21","timestamp":"2026-08-14T13:05:14.000Z","message":{"id":"sm21","content":[{"type":"tool_use","id":"tu21","name":"Bash","input":{"command":"node CANARYENTRY.js"}}]}}
+{"type":"assistant","uuid":"s22","timestamp":"2026-08-14T13:05:15.000Z","message":{"id":"sm22","content":[{"type":"tool_use","id":"tu22","name":"Bash","input":{"command":"git CANARYALIAS --flag"}}]}}
 {"type":"system","subtype":"stop_hook_summary","timestamp":"2026-08-14T13:05:04.000Z","hookInfos":[{"command":"please audit /srv/reports/CANARYPROSEPATH.py and report back","durationMs":3}],"hookErrors":[]}
 {"type":"system","subtype":"stop_hook_summary","timestamp":"2026-08-14T13:05:05.000Z","hookInfos":[{"command":"bash /opt/a/first.sh","durationMs":2},{"command":"bash /opt/b/second.sh","durationMs":2}],"hookErrors":["/opt/b/second.sh: not found"]}
 {"type":"user","timestamp":"2026-08-14T13:05:01.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu9","content":"ok"}]}}
@@ -1151,7 +1184,7 @@ sql "and it fences nothing" "0" \
 # Neither may cost the session file it was named in.
 sql "a fence with no readable transcript is counted as lost" "2" \
   "SELECT agent_fences_lost FROM segment WHERE id='s-agents#0'"
-sql "and the session file it was named in still lands" "8" \
+sql "and the session file it was named in still lands" "12" \
   "SELECT n FROM tool_use WHERE segment_id='s-agents#0' AND agent='' AND tool='Bash'"
 sql "and it counts no stop" "0" \
   "SELECT count(*) FROM agent_run WHERE segment_id='s-agents#0' AND agent_type='reviewer'"
@@ -1185,7 +1218,8 @@ leaked=""
 for c in CANARYPROMPT CANARYDESCASYNC CANARYSYNCCONTENT CANARYSUMMARY CANARYRESULT \
          CANARYMETADESC CANARYBASHARG CANARYCOMMITMSG CANARYHOOKPROSE CANARYRETROPROSE \
          CANARYPIPEARG CANARYHEREDOC CANARYPROSEPATH CANARYESCAPED CANARYFLAGVAL \
-         CANARYCASEPAT CANARYQUOTEDLINE CANARYDESYNC CANARYDATEID; do
+         CANARYCASEPAT CANARYQUOTEDLINE CANARYDESYNC CANARYDATEID \
+         CANARYSCRIPTNAME CANARYTARGET CANARYENTRY CANARYALIAS; do
   grep -qa "$c" "$RH"/.claude/retro/retro.db* 2>/dev/null && leaked="$leaked $c"
 done
 [ -z "$leaked" ] && ok "no prompt, brief, report or argument reaches the store" \
@@ -1212,7 +1246,17 @@ sql "a command whose quoting cannot be followed is not guessed at" "2" \
 # the same and is not one.
 sql "a driver's subcommand is kept, by design" "1" \
   "SELECT n FROM bash_verb WHERE segment_id='s-agents#0' AND agent='' AND verb='git commit'"
-sql "a driver flag's value is not a subcommand" "1" \
+# The second word of an interpreter is the user's filename, and of make its
+# target: both are theirs. A subcommand is only kept when it is one the recorder
+# already knows, so what it stores can never be a name the user chose.
+sql "an interpreter's filename is not a subcommand" "1|1" \
+  "SELECT (SELECT n FROM bash_verb WHERE segment_id='s-agents#0' AND verb='python3'),
+          (SELECT n FROM bash_verb WHERE segment_id='s-agents#0' AND verb='node')"
+sql "nor is a make target" "1" \
+  "SELECT n FROM bash_verb WHERE segment_id='s-agents#0' AND verb='make'"
+sql "nor a git subcommand nobody has heard of" "2" \
+  "SELECT n FROM bash_verb WHERE segment_id='s-agents#0' AND agent='' AND verb='git'"
+sql "a driver flag's value is not a subcommand" "2" \
   "SELECT n FROM bash_verb WHERE segment_id='s-agents#0' AND agent='' AND verb='git'"
 # The required line is the last thing an agent writes; a Retro: above it is
 # something it quoted.
@@ -1239,31 +1283,48 @@ grep -qa CANARYSTDIN "$RH"/.claude/retro/retro.db* 2>/dev/null \
 # async: a wait with no bound leaves a process alive after the session. The
 # fifo's writer holds its end open and writes nothing, which is the shape a
 # hand-run recorder meets.
-mkfifo "$TMP/drain.fifo"
-sleep 20 > "$TMP/drain.fifo" &
-drain_writer=$!
-start=$(date +%s)
-timeout 10 env HOME="$RH" python3 "$ROOT/hooks/retro.py" record < "$TMP/drain.fifo" >/dev/null 2>&1
-rc=$?
-took=$(( $(date +%s) - start ))
-kill "$drain_writer" 2>/dev/null
-wait "$drain_writer" 2>/dev/null
-{ [ "$rc" = 0 ] && [ "$took" -lt 5 ]; } \
-  && ok "a stdin that stays open does not hold the recorder" \
-  || bad "a stdin that stays open does not hold the recorder" "exit $rc after ${took}s"
-rm -f "$TMP/drain.fifo"
+finishes_on_open_stdin() {   # name, extra record arguments
+  local name="$1"; shift
+  local fifo="$TMP/drain.$$.fifo"
+  mkfifo "$fifo"
+  sleep 20 > "$fifo" &
+  local writer=$! start took rc
+  start=$(date +%s)
+  timeout 10 env HOME="$RH" python3 "$ROOT/hooks/retro.py" record "$@" < "$fifo" >/dev/null 2>&1
+  rc=$?
+  took=$(( $(date +%s) - start ))
+  kill "$writer" 2>/dev/null
+  wait "$writer" 2>/dev/null
+  rm -f "$fifo"
+  { [ "$rc" = 0 ] && [ "$took" -lt 5 ]; } \
+    && ok "$name" || bad "$name" "exit $rc after ${took}s"
+}
+finishes_on_open_stdin "a stdin that stays open does not hold the recorder"
+
+# The drain exists to spare the writer, so what proves it ran is the writer:
+# a payload past a pipe buffer blocks in write() until something reads it, and
+# a recorder that returns first hands it EPIPE instead. --interval no-ops on
+# nearly every prompt and UserPromptSubmit is the trigger that carries it, so a
+# drain behind that gate is a drain that never runs where it is needed most.
+frees_the_writer() {   # name, extra record arguments
+  local name="$1"; shift
+  local fifo="$TMP/payload.$$.fifo"
+  mkfifo "$fifo"
+  ( python3 -c 'import sys; sys.stdout.write("{\"p\":\"" + "z" * (1 << 20) + "\"}")' \
+      > "$fifo" 2>/dev/null ) &
+  local writer=$! rc
+  timeout 10 env HOME="$RH" python3 "$ROOT/hooks/retro.py" record "$@" < "$fifo" >/dev/null 2>&1
+  wait "$writer"; rc=$?
+  rm -f "$fifo"
+  [ "$rc" = 0 ] && ok "$name" || bad "$name" "the writer exited $rc"
+}
+frees_the_writer "a payload past a pipe buffer is read away"
+frees_the_writer "and an interval that skips the sweep still reads it" --interval 3600
 
 # Rebuilding a segment must re-read every agent it fenced, from where that
 # segment first found it: not doubled, and not lost.
 figures > "$TMP/retro.before"
-python3 - "$RP/beta/s-agents.jsonl" <<'PY'
-import sys
-
-path = sys.argv[1]
-lines = open(path).read().splitlines(True)
-lines[0] = lines[0].replace('"delegate it"', '"delegate all of it"')
-open(path, "w").write("".join(lines))
-PY
+rewrite_head "$RP/beta/s-agents.jsonl" '"delegate it"' '"delegate all of it"'
 retro record >/dev/null
 figures > "$TMP/retro.after"
 cmp -s "$TMP/retro.before" "$TMP/retro.after" \
@@ -1296,13 +1357,7 @@ sql "a fence with no new bytes adds nothing" "2|1" \
 cat >> "$SUB/agent-dev1.jsonl" <<'JSON'
 {"type":"assistant","uuid":"d5","isSidechain":true,"timestamp":"2026-08-14T14:30:00.000Z","message":{"id":"n5","content":[{"type":"tool_use","id":"u5","name":"Glob","input":{}}]}}
 JSON
-python3 - "$RP/beta/s-agents.jsonl" <<'PY'
-import sys
-
-path = sys.argv[1]
-lines = open(path, "rb").read().splitlines(True)
-open(path, "wb").write(b"".join(lines[:-1]))
-PY
+drop_last "$RP/beta/s-agents.jsonl"
 retro record >/dev/null
 sql "a rebuild does not re-count a stop it already has" "2|1" \
   "SELECT n,agents FROM agent_run WHERE segment_id='s-agents#0' AND agent_type='developer'"
@@ -1441,13 +1496,7 @@ sql "and the closed one is left exactly as it was" "1|idle" \
 # boundary in the file produced it — so a rebuild that re-derived it from the
 # bytes would land back on the closed segment and discard everything after it.
 # The rewind drops the last record and leaves the one before it whole.
-python3 - "$RP/alpha/s-idle.jsonl" <<'PY'
-import sys
-
-path = sys.argv[1]
-lines = open(path, "rb").read().splitlines(True)
-open(path, "wb").write(b"".join(lines[:-1]))
-PY
+drop_last "$RP/alpha/s-idle.jsonl"
 retro record >/dev/null
 sql "a rewound transcript rebuilds its reopened segment" "1|1" \
   "SELECT (SELECT n FROM tool_use WHERE segment_id='s-idle#1' AND tool='Write'),
@@ -1462,18 +1511,18 @@ sql "so nothing had to be given up" "0" \
 # A transcript whose head changed is a different file under an old name. Its
 # open segment has no source any more, so what came from the session's own chain
 # goes — and the count is what stops that being silent.
-python3 - "$RP/alpha/s-idle.jsonl" <<'PY'
-import sys
-
-path = sys.argv[1]
-lines = open(path).read().splitlines(True)
-lines[0] = lines[0].replace('"work"', '"work now"')
-open(path, "w").write("".join(lines))
-PY
+rewrite_head "$RP/alpha/s-idle.jsonl" '"work"' '"work now"'
 retro record >/dev/null
 sql "a segment a replaced file cannot rebuild is counted, not hidden" "1" \
   "SELECT value FROM meta WHERE key='segments_dropped'"
-check "and the digest owns it" "store, all time: 1 segments could not be rebuilt" "$(retro review --all)"
+digest_all="$(retro review --all)"
+check "and the digest owns it" "1 segments could not be rebuilt" "$digest_all"
+# Both all-time figures share the line, and it says which store they are from:
+# a transcript that failed last spring is not a fault of the window under
+# review, and the toolkit skill reads this line as the reason a figure is short.
+check "under a heading that scopes them to the store" \
+  "store, all time: 1 transcripts would not sweep, 1 segments could not be rebuilt" \
+  "$digest_all"
 
 # A file replaced by one that predates the marker may not be read at all. Its
 # open segment cannot survive that, and the cursor has to keep the segment id or
@@ -1492,6 +1541,12 @@ sql "a replaced pre-marker file gives up its open segment, and says so" "2" \
   "SELECT value FROM meta WHERE key='segments_dropped'"
 sql "and records nothing of the file it now is" "0" \
   "SELECT count(*) FROM segment WHERE id='s-idle#2'"
+# Every one of these is written with IFNULL, so a rebuild that leaves them
+# standing keeps the replaced file's repo and dates and reports a window that
+# never happened.
+sql "a rebuilt segment describes no file but the one it read" "|||" \
+  "SELECT IFNULL(repo,'')||'|'||IFNULL(started_at,'')||'|'||IFNULL(branch,'')||'|'||IFNULL(cli_version,'')
+   FROM segment WHERE id='s-idle#1'"
 cat >> "$RP/alpha/s-idle.jsonl" <<'JSON'
 {"type":"assistant","uuid":"i9","timestamp":"2026-08-18T09:00:00.000Z","message":{"id":"im9","content":[{"type":"tool_use","id":"i9t","name":"Task","input":{}}]}}
 JSON
@@ -1508,6 +1563,17 @@ JSON
 retro record >/dev/null
 rm -f "$RP/alpha/s-deleted.jsonl"
 retro record >/dev/null
+# Ten agent transcripts exist for every session one, and the 30-day cleanup
+# takes them all. Nothing walks an agent cursor and nothing idle-closes one, so
+# without a prune the table is the only thing in the store that grows forever.
+agent_cursors_before="$(dbq "SELECT count(*) FROM cursor WHERE agent_id IS NOT NULL")"
+rm -f "$SUB/agent-rev2.jsonl"
+retro record >/dev/null
+sql "a cursor whose agent transcript is gone is pruned" "0" \
+  "SELECT count(*) FROM cursor WHERE path LIKE '%agent-rev2.jsonl'"
+eq "and the cursors still pointing at a file stay" "$(( agent_cursors_before - 1 ))" \
+  "$(dbq "SELECT count(*) FROM cursor WHERE agent_id IS NOT NULL")"
+
 sql "a deleted transcript closes its segment as gone" "gone|1" \
   "SELECT close_trigger,assistant_turns FROM segment WHERE id='s-deleted#0'"
 sql "and its cursor goes with it" "0" \
