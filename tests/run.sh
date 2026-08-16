@@ -11,12 +11,19 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-pass=0; fail=0
+pass=0; fail=0; skipped=0
 
 ok()   { pass=$((pass + 1)); printf '  ✓ %s\n' "$1"; }
 bad()  { fail=$((fail + 1)); printf '  ✗ %s\n    %s\n' "$1" "$2"; }
+# A check that could not run says so out loud: counted as neither, never as a pass.
+skip() { skipped=$((skipped + 1)); printf '  ⊘ %s\n    %s\n' "$1" "$2"; }
 check() { # name, expected-substring, actual
   case "$3" in *"$2"*) ok "$1" ;; *) bad "$1" "expected '$2' in: ${3:-<empty>}" ;; esac
+}
+stub_path() { # dir, tools… — a PATH carrying only these
+  local dir="$1" b p
+  mkdir -p "$dir"
+  for b in "${@:2}"; do p="$(command -v "$b")" && ln -sf "$p" "$dir/$b"; done
 }
 
 # ── guard ────────────────────────────────────────────────────────────────────
@@ -67,10 +74,7 @@ expect "non-linear mcp is free"       silent "$(tool_payload 'mcp__context7__que
 
 # Without jq the guard must fail open rather than block every command. env -i so
 # it sees a bare environment, which is what a hook actually gets.
-mkdir -p "$TMP/nojq"
-for b in bash grep sed awk cat printf; do
-  p="$(command -v "$b")" && ln -sf "$p" "$TMP/nojq/$b"
-done
+stub_path "$TMP/nojq" bash grep sed awk cat printf
 printf '%s' "$(bash_payload 'git push')" > "$TMP/p.json"
 out="$(env -i PATH="$TMP/nojq" HOME="$TMP" "$ROOT/hooks/guard.sh" < "$TMP/p.json" 2>/dev/null)"
 [ -z "$out" ] && ok "fails open without jq" || bad "fails open without jq" "emitted a verdict: $out"
@@ -655,11 +659,82 @@ printf '{"pid":%d,"start":"999999","owner":"","owner_start":"","session":"x","cm
 printf '{"hook_event_name":"SessionEnd","session_id":"x"}' | HOME="$FAKE" "$ROOT/hooks/reap.sh"
 [ ! -f "$reg/1.json" ] && ok "recycled pid pruned unsignalled" || bad "recycled pid pruned" "entry remains"
 
+# ── duplication ──────────────────────────────────────────────────────────────
+# Both directions of the gate: the checkout as it stands is clean, and a
+# function pasted into a second file is not.
+echo "duplication.sh"
+
+dup() { "$ROOT/tests/duplication.sh" "$1" > "$TMP/dup.out" 2>&1; }
+verdict() { # name, expected exit, actual exit
+  [ "$3" = "$2" ] && ok "$1" || bad "$1" "expected exit $2, got $3: $(cat "$TMP/dup.out")"
+}
+
+dup "$ROOT"; rc=$?
+case "$rc" in
+  0) ok   "the checkout has no duplicated blocks" ;;
+  2) skip "the checkout has no duplicated blocks" "$(cat "$TMP/dup.out")" ;;
+  *) bad  "the checkout has no duplicated blocks" "$(cat "$TMP/dup.out")" ;;
+esac
+
+# Without jscpd there is nothing to prove, and the skip above already says so.
+if [ "$rc" -ne 2 ]; then
+  # The fixture lives under a .claude path because that is where an agent's
+  # worktree runs this suite from, and an ignore glob that floats rather than
+  # anchoring at the root swallows the whole checkout there.
+  DUP="$TMP/.claude/worktrees/wt"
+  mkdir -p "$DUP/hooks/lib"
+  cp "$ROOT/hooks/lib/tasks.py" "$DUP/hooks/lib/tasks.py"
+  cp "$ROOT/hooks/taskline.py" "$DUP/hooks/taskline.py"
+  awk '/^def load_tasks/,0' "$ROOT/hooks/lib/tasks.py" >> "$DUP/hooks/taskline.py"
+  dup "$DUP"; verdict "a pasted function fails the suite" 1 "$?"
+  cp "$ROOT/hooks/taskline.py" "$DUP/hooks/taskline.py"
+  dup "$DUP"; verdict "removing it passes again" 0 "$?"
+
+  # Shell is half of what ships here, and a clone this size is the floor the
+  # thresholds claim: retuning them past it has to fail a test, not go unnoticed.
+  for f in one two; do
+    cat > "$DUP/hooks/$f.sh" <<'SH'
+#!/usr/bin/env bash
+prune_registry() {
+  local reg="$1" pid
+  for entry in "$reg"/*.json; do
+    [ -f "$entry" ] || continue
+    pid="$(basename "$entry" .json)"
+    kill -0 "$pid" 2>/dev/null || rm -f "$entry"
+  done
+}
+SH
+  done
+  dup "$DUP"; verdict "a pasted shell function fails it too" 1 "$?"
+  rm -f "$DUP/hooks/one.sh" "$DUP/hooks/two.sh"
+
+  # A worktree nested inside the checkout is a whole copy of it, and stays out.
+  mkdir -p "$DUP/.claude/worktrees/inner/hooks/lib"
+  cp "$ROOT/hooks/lib/tasks.py" "$DUP/.claude/worktrees/inner/hooks/lib/tasks.py"
+  cp "$ROOT/hooks/taskline.py" "$DUP/.claude/worktrees/inner/hooks/taskline.py"
+  dup "$DUP"; verdict "a nested worktree copy is ignored" 0 "$?"
+
+  # jscpd exits 0 over a tree it never read — a bad path, an unknown format, an
+  # ignore that swallowed everything. A gate that cannot say it looked is a
+  # failure, not a pass.
+  mkdir -p "$TMP/dup-empty"
+  dup "$TMP/dup-empty"; verdict "a tree it did not read is not a pass" 3 "$?"
+fi
+
+# The skip itself: without jscpd and without npx the gate says so and asks for
+# neither a pass nor a failure.
+stub_path "$TMP/nonpx" bash env mktemp rm python3
+PATH="$TMP/nonpx" "$ROOT/tests/duplication.sh" "$ROOT" > "$TMP/dup.out" 2>&1
+verdict "no jscpd and no npx is a skip, not a verdict" 2 "$?"
+check "the skip names the install" "npm i -g jscpd@" "$(cat "$TMP/dup.out")"
+
 # ── result ───────────────────────────────────────────────────────────────────
 echo
+summary="$pass passed"
+[ "$skipped" -eq 0 ] || summary="$summary, $skipped skipped"
 if [ "$fail" -eq 0 ]; then
-  echo "$pass passed"
+  echo "$summary"
 else
-  echo "$pass passed, $fail failed"
+  echo "$summary, $fail failed"
   exit 1
 fi

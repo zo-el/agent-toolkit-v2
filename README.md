@@ -61,7 +61,7 @@ Sessions on this machine work on different projects and must not reach into each
 
 Everything else is silent. `permissions.defaultMode` is `auto` and `~/.claude`, the scratchpad, and this checkout are approved working directories, so an agent runs unattended instead of stalling on a prompt nobody is watching. `Read` is denied on the credentials and settings files, which carry API tokens.
 
-[`tests/run.sh`](tests/run.sh) is the regression suite for all of it.
+[`tests/run.sh`](tests/run.sh) is the regression suite for all of it. It ends in [`tests/duplication.sh`](tests/duplication.sh), which fails the suite on copy-pasted shell or python and skips itself where `jscpd` cannot be reached.
 
 ## Task line
 

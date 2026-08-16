@@ -23,6 +23,7 @@ Run it until a review round returns nothing worth acting on.
 **Test**
 
 - Run every check the repo has: tests, typecheck, format, lint. Respect repo conventions (a flake means `nix develop -c`).
+- Copy-paste check the whole source tree, not just your files — `npx jscpd@5.0.15 --min-tokens 30 --threshold 0 <src>` — and generalise what it flags in your change; a paste only shows against the code it came from.
 - Match what CI runs. Open `.github/workflows/*` and run every job's checks — a passing test suite is not a passing CI when CI also runs fmt and clippy.
 - Never read `$?` after piping into `tail` or `grep`; you get the pager's status. Capture the command's own exit first.
 - A gate you can't run locally is a problem to solve, not a pass to assume. If it genuinely can't run, say exactly what is unproven.
