@@ -283,11 +283,11 @@ for f in "$ROOT"/hooks/*.sh "$ROOT"/hooks/*.py "$ROOT/install.sh"; do
 done
 
 # The python hooks import their shared modules inside their own guards, and a
-# hook that will not compile is just as quiet: both cost a statusline segment
+# hook that will not compile is just as quiet: both cost the whole status line
 # and the whole task line while still exiting clean. This is what says so out
 # loud, and it carries the interpreter's own last line so the reason is not lost.
 if command -v python3 >/dev/null 2>&1; then
-  if ! err="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import lib.tasks' \
+  if ! err="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import lib.out, lib.tasks' \
               "$ROOT/hooks" 2>&1)"; then
     warn "hooks/lib does not import — $(printf '%s' "$err" | tail -1)"
   fi

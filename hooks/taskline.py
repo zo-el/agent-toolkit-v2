@@ -111,28 +111,18 @@ def main():
 
 if __name__ == "__main__":
     try:
-        try:
-            # A hook inherits whatever environment the session has, and under a
-            # C locale the separators and any em dash in a subject would raise
-            # on write, losing the line entirely.
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
         line = None
         try:
+            from lib.out import print_line, utf8_stdout
+
+            utf8_stdout()
             line = main()
         except Exception:
             # stderr on a zero exit reaches the debug log and never the model's
             # context, so a bug here stays diagnosable without being injected.
             traceback.print_exc(file=sys.stderr)
         if line:
-            try:
-                print(line)
-                sys.stdout.flush()
-            except (OSError, AttributeError):
-                # The reader went away, or stdout was closed before this began.
-                # The line has nowhere to go, and neither case is a bug here.
-                pass
+            print_line(line)
     finally:
         try:
             sys.stderr.flush()

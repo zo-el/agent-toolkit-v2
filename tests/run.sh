@@ -382,6 +382,65 @@ for label in "empty stdin" "malformed stdin" "non-object stdin"; do
   check "$label keeps the placeholders" "$(dim '+0/-0') $sep $(dim '⏱ —')" "$out"
 done
 
+# Every payload field is read for its type before it is used: a workspace or a
+# transcript path of the wrong shape raises where no segment guard reaches, and
+# would cost the whole line instead of the segment that read it.
+check "payload fields of the wrong type cost their segment, not the line" "Opus 5" \
+  "$(printf '%s' '{"cwd":"/","model":{"display_name":"Opus 5"},"workspace":"nope","transcript_path":["nope"]}' \
+    | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
+
+# An ascii output encoding raises on the first separator, and an unguarded write
+# puts the traceback in the bar. PYTHONIOENCODING stands in for the C-locale
+# machine that does the same.
+out="$(printf '%s' '{"cwd":"/","model":{"display_name":"Opus 5"}}' \
+  | HOME="$FAKE" PYTHONIOENCODING=ascii python3 "$ROOT/hooks/statusline.py" 2>&1)"
+case "$out" in
+  *Traceback*) bad "an ascii output encoding never crashes" "$out" ;;
+  *)           ok "an ascii output encoding never crashes" ;;
+esac
+check "an ascii output encoding keeps the separators" "$sep" "$out"
+
+# ...and where stdout cannot be forced to utf-8 at all, the glyph is what
+# degrades, not the line: everything else on it still reads.
+cat > "$TMP/degrade.py" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from lib.out import print_line
+
+print_line("Opus 5 │ main")
+PY
+check "a stream that will not take utf-8 degrades the glyph, not the line" "Opus 5 ? main" \
+  "$(PYTHONIOENCODING=ascii python3 "$TMP/degrade.py" "$ROOT/hooks" 2>&1)"
+
+# Writing the line is the one thing both hooks share, so its own guard is
+# asserted here rather than through a caller that ends in os._exit either way.
+python3 "$TMP/degrade.py" "$ROOT/hooks" >&- 2>"$TMP/degrade.err"
+{ [ $? = 0 ] && [ ! -s "$TMP/degrade.err" ]; } \
+  && ok "printing to a closed stdout is silent, not an error" \
+  || bad "printing to a closed stdout is silent, not an error" "stderr: $(cat "$TMP/degrade.err")"
+
+# The bar's own shutdown: a reader that went away must not turn the interpreter's
+# final flush into a failed hook.
+printf '%s' '{"cwd":"/","model":{"display_name":"Opus 5"}}' > "$TMP/sl.payload"
+HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" < "$TMP/sl.payload" 2>"$TMP/sl.err" | true
+sl_rc=${PIPESTATUS[0]}
+{ [ "$sl_rc" = 0 ] && [ ! -s "$TMP/sl.err" ]; } \
+  && ok "the bar survives a closed pipe" \
+  || bad "the bar survives a closed pipe" "exit $sl_rc, stderr: $(cat "$TMP/sl.err")"
+
+# The other way the bar used to carry a traceback: a working directory deleted
+# under the session, which raises where no segment guard reaches. It costs the
+# segments read from disk and nothing else.
+out="$(mkdir -p "$TMP/gone" && cd "$TMP/gone" && rmdir "$TMP/gone" \
+  && printf '%s' '{"model":{"display_name":"Opus 5"}}' \
+  | HOME="$FAKE" python3 "$ROOT/hooks/statusline.py" 2>&1)"
+case "$out" in
+  *Traceback*) bad "a deleted working directory never crashes" "$out" ;;
+  *)           ok "a deleted working directory never crashes" ;;
+esac
+check "a deleted working directory costs its segment, not the line" "Opus 5" "$out"
+
 # ── taskline ─────────────────────────────────────────────────────────────────
 echo "taskline.py"
 
@@ -624,9 +683,22 @@ quiet "non-object stdin prints nothing" '[1,2]'
 COPY="$TMP/copy"
 mkdir -p "$COPY"
 tar --exclude=.git --exclude=__pycache__ -cf - -C "$ROOT" . | tar -xf - -C "$COPY"
-rm -f "$COPY/hooks/lib/tasks.py"
-check "the doctor flags a broken shared module" "hooks/lib does not import" \
-  "$(HOME="$TMP/home-copy" "$COPY/install.sh" --dry-run 2>&1)"
+printf '%s' "$(prompt tl-open)" > "$TMP/tl.payload"
+for module in tasks out; do
+  tar --exclude=.git --exclude=__pycache__ -cf - -C "$ROOT" . | tar -xf - -C "$COPY"
+  rm -f "$COPY/hooks/lib/$module.py"
+  check "the doctor flags lib/$module.py missing" "hooks/lib does not import" \
+    "$(HOME="$TMP/home-copy" "$COPY/install.sh" --dry-run 2>&1)"
+  # Quietly to the model, loudly to the debug log: no line, and a reason on
+  # stderr, which a zero exit keeps out of the context.
+  HOME="$FAKE" python3 "$COPY/hooks/taskline.py" < "$TMP/tl.payload" \
+    > "$TMP/tl.out" 2>"$TMP/tl.err"
+  tl_rc=$?
+  { [ "$tl_rc" = 0 ] && [ ! -s "$TMP/tl.out" ] && [ -s "$TMP/tl.err" ]; } \
+    && ok "lib/$module.py missing costs the line and says why" \
+    || bad "lib/$module.py missing costs the line and says why" \
+       "exit $tl_rc, stdout: $(cat "$TMP/tl.out"), stderr: $(cat "$TMP/tl.err")"
+done
 tar --exclude=.git --exclude=__pycache__ -cf - -C "$ROOT" . | tar -xf - -C "$COPY"
 printf '\ndef broken(\n' >> "$COPY/hooks/taskline.py"
 check "the doctor flags a hook that will not compile" "does not compile" \
