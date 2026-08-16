@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 import re
+import select
 import shlex
 import stat
 import sys
@@ -48,6 +49,8 @@ SCHEMA_VERSION = 1
 HEAD_BYTES = 4096
 FIRST_TS_BYTES = 64 * 1024
 CHUNK = 1 << 20
+DRAIN_SECONDS = 0.5
+DRAIN_BYTES = 4 << 20
 IDLE_SECONDS = (
     24 * 3600
 )  # long enough that an overnight break does not close a live segment
@@ -1654,13 +1657,32 @@ def touch(path):
 
 
 def drain_stdin():
-    """A large hook payload must not block the writer, and nothing in it is
-    read: the transcripts are the source."""
+    """Read the hook payload away so a writer sending more than a pipe buffer
+    holds is not left blocked on us. Nothing in it is read: the transcripts are
+    the source.
+
+    Bounded by a deadline and a byte cap, because reading to EOF never ends on a
+    stdin nobody closes — and this hook is wired async, so that would leave a
+    process alive after the session that started it. Closing the descriptor
+    instead would end it just as surely, but by handing the writer the EPIPE
+    this exists to spare it. The deadline is short because a hook payload is
+    written in one go by a parent that already holds it, and SessionEnd hooks
+    share a 1.5 s budget.
+    """
     try:
         if sys.stdin is None or sys.stdin.isatty():
             return
-        while sys.stdin.buffer.read(CHUNK):
-            pass
+        fd = sys.stdin.fileno()
+        deadline = time.monotonic() + DRAIN_SECONDS
+        left = DRAIN_BYTES
+        while left > 0:
+            waiting = deadline - time.monotonic()
+            if waiting <= 0 or not select.select([fd], [], [], waiting)[0]:
+                return
+            chunk = os.read(fd, min(CHUNK, left))
+            if not chunk:
+                return
+            left -= len(chunk)
     except Exception:
         pass
 
@@ -1932,7 +1954,9 @@ def digest(db, everything):
     except OSError:
         # Saying nothing here reads as "every installed skill fired", which is
         # the opposite of what is known.
-        out.append("    never fired: %s would not list" % SKILLS)
+        out.append(
+            "    never fired: not known — the installed skills could not be read"
+        )
         installed = []
     unused = [n for n in installed if n not in seen]
     if unused:

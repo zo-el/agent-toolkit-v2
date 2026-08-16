@@ -1159,6 +1159,24 @@ grep -qa CANARYSTDIN "$RH"/.claude/retro/retro.db* 2>/dev/null \
   && bad "a hook payload never reaches the store" "CANARYSTDIN found" \
   || ok "a hook payload never reaches the store"
 
+# Draining to EOF never ends on a stdin nobody closes, and the hook is wired
+# async: a wait with no bound leaves a process alive after the session. The
+# fifo's writer holds its end open and writes nothing, which is the shape a
+# hand-run recorder meets.
+mkfifo "$TMP/drain.fifo"
+sleep 20 > "$TMP/drain.fifo" &
+drain_writer=$!
+start=$(date +%s)
+timeout 10 env HOME="$RH" python3 "$ROOT/hooks/retro.py" record < "$TMP/drain.fifo" >/dev/null 2>&1
+rc=$?
+took=$(( $(date +%s) - start ))
+kill "$drain_writer" 2>/dev/null
+wait "$drain_writer" 2>/dev/null
+{ [ "$rc" = 0 ] && [ "$took" -lt 5 ]; } \
+  && ok "a stdin that stays open does not hold the recorder" \
+  || bad "a stdin that stays open does not hold the recorder" "exit $rc after ${took}s"
+rm -f "$TMP/drain.fifo"
+
 # Rebuilding a segment must re-read every agent it fenced, from where that
 # segment first found it: not doubled, and not lost.
 figures > "$TMP/retro.before"
@@ -1254,6 +1272,15 @@ check "delegation separates the session"   "alpha session" "$flat"
 check "delegation separates the agents"    "beta agents"   "$flat"
 check "nesting above depth 1 is called out" "nested: pr-review-toolkit:code-reviewer at depth 2" "$digest"
 check "an installed skill that never fired is named" "never fired: never-fired" "$digest"
+# A skills directory that will not read is not one holding nothing: saying
+# nothing there reads as "every skill fired", which is the opposite of what is
+# known. Root reads it regardless, so the assertion is skipped there.
+if [ "$(id -u)" -ne 0 ]; then
+  chmod 000 "$RH/.claude/skills"
+  check "a skills list that will not read says so, in the digest's voice" \
+    "never fired: not known — the installed skills could not be read" "$(retro review)"
+  chmod 755 "$RH/.claude/skills"
+fi
 check "permission friction is grouped"     "user-rejected" "$digest"
 check "compaction is split auto from manual" "manual" "$digest"
 check "retro lines are listed with author and date" "main beta 2026-08-14 the brief left the interval open" "$flat"
