@@ -305,7 +305,7 @@ for f in "$ROOT"/hooks/*.sh "$ROOT"/hooks/*.py "$ROOT/install.sh"; do
 done
 
 # The python hooks import their shared modules inside their own guards, and a
-# hook that will not compile is just as quiet: both cost the whole status line
+# hook that will not compile is just as quiet: both cost a statusline segment
 # and the whole task line while still exiting clean. This is what says so out
 # loud, and it carries the interpreter's own last line so the reason is not lost.
 if command -v python3 >/dev/null 2>&1; then
@@ -324,45 +324,34 @@ if command -v python3 >/dev/null 2>&1; then
   # The recorder degrades to silence by design, so silence is not evidence that
   # it is working. This is what tells the difference: a marker it can read, and
   # a store it can open at a schema it knows.
-  retro_state="$(python3 - "$CLAUDE_DIR" "$ROOT/hooks/retro.py" <<'PY' 2>/dev/null || true
-import os, sys
+  retro_state="$(python3 - "$ROOT/hooks" <<'PY' 2>/dev/null || true
+import os
+import sys
 
-store = os.path.join(sys.argv[1], "retro")
-marker = os.path.join(store, "since")
+# retro.py's own answers, not a second copy of them: it owns where the store
+# lives, what a marker has to look like and which schema it reads, and a doctor
+# that re-derived any of those would drift from it in silence.
+sys.path.insert(0, sys.argv[1])
+source = open(os.path.join(sys.argv[1], "retro.py")).read()
+recorder = {}
+exec(compile(source.replace('if __name__ == "__main__":', "if False:"), "retro", "exec"), recorder)
+
 try:
-    with open(marker) as f:
+    with open(recorder["SINCE_PATH"]) as f:
         raw = f.read(64).strip()
 except OSError:
     raw = None
 if raw is None:
     print("retro/since is missing — nothing will be recorded until it is stamped")
-else:
-    from datetime import datetime
+elif recorder["parse_iso"](raw) is None:
+    print("retro/since is not a timestamp (%r) — nothing is being recorded" % raw[:32])
 
-    try:
-        datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        print("retro/since is not a timestamp (%r) — nothing is being recorded" % raw[:32])
-db = os.path.join(store, "retro.db")
-if os.path.exists(db):
-    try:
-        import re
-        import sqlite3
-
-        # The version the recorder itself declares, so this cannot drift from it.
-        wanted = int(
-            re.search(r"^SCHEMA_VERSION = (\d+)", open(sys.argv[2]).read(), re.M).group(1)
-        )
-        conn = sqlite3.connect(db)
-        version = conn.execute("PRAGMA user_version").fetchone()[0]
-        conn.close()
-        if version != wanted:
-            print(
-                "retro.db is schema version %d; this toolkit reads version %d"
-                % (version, wanted)
-            )
-    except Exception as failure:
-        print("retro.db will not open — %s" % failure)
+if os.path.exists(recorder["DB_PATH"]):
+    problem = recorder["store_problem"]()
+    # store_problem answers for a store that will not open at all; one that
+    # opens and reads clean has nothing to say.
+    if recorder["open_store"](create=False) is None:
+        print(problem)
 PY
 )"
   # One line each: the block can report a marker and a store in the same breath,

@@ -34,7 +34,7 @@ import stat
 import sys
 import time
 from collections import namedtuple
-from datetime import datetime
+from datetime import datetime, timezone
 
 HOME = os.path.expanduser("~")
 CLAUDE = os.path.join(HOME, ".claude")
@@ -442,7 +442,42 @@ SUBCOMMANDS["sudo"] = frozenset(SUBCOMMANDS) | frozenset(
         "sysctl",
     )
 )
-DRIVERS = frozenset(SUBCOMMANDS)
+
+# Every bare command this file will name, and with SUBCOMMANDS the whole of what
+# `bash_verb.verb` can ever hold. The store may name a command it already
+# contains and nothing else: a first word that is not here is a path or a name
+# the user chose — `./deploy_prod_secrets.sh`, `migrate_acme_payroll.py` — and
+# its basename is still their filename. An unusual command losing its name costs
+# resolution, which is a figure that reads low; keeping it costs the boundary
+# the whole store sits inside.
+COMMANDS = frozenset(
+    """
+    alias at awk base64 basename bats break brew bundle bzip2 cargo cat cd chgrp
+    chmod chown clang clear cmake cmp code comm command composer continue convert
+    cp crontab curl cut date dd declare deno df diff dig dirname dnf docker
+    docker-compose dotnet dpkg du echo egrep emacs env eval exec exit export
+    false ffmpeg fgrep file find flake8 flatpak g++ gcc gem getent gh git gofmt
+    go gpg gradle grep gunzip gzip head helm host hostname hyperfine iconv id
+    ifconfig import install ip java jest jobs join journalctl jq julia k6 keychain
+    kill kotlin launchctl less ln local locale lsof ls ltrace lua make man mkdir
+    mktemp mocha mongo more mount mv mvn mypy mysql nano netstat nice ninja nix
+    nix-build nix-env nix-shell node nohup npm npx nslookup nvim od open openssl
+    osascript paste patch php ping pip pip3 pgrep pkill playwright pnpm poetry
+    printenv printf ps psql pwd pytest python python3 R rails read readlink
+    realpath redis-cli rg rm rmdir rsync ruby ruff rustc rustfmt rustup sbt scala
+    scp screen sed seq service set sftp sha1sum sha256sum shellcheck shfmt shift
+    sleep snap sort source split ss ssh stat strace strings swift sync systemctl
+    tail tar tee tempfile terraform test timeout tmux top touch tput tr trap true
+    tsc type ulimit umask umount uname uniq unset unzip uv vagrant vim vitest wait
+    watch wc wget whereis which whoami wmctrl xargs xdg-open xdotool xz yarn yes
+    yq yum zip
+    """.split()
+) | frozenset(SUBCOMMANDS)  # a driver is a command before it is a driver
+# A command that runs a file, where the file is not named. The two placeholders
+# are what an unknown shape becomes, and both carry no name at all.
+SCRIPT = "script"
+OTHER = "other"
+SCRIPT_LIKE = re.compile(r"\.[A-Za-z0-9]{1,10}$")
 
 SEPARATORS = frozenset(("&&", "||", ";", ";;", "|", "|&", "&"))
 # A keyword is not the command; the command is the word after it.
@@ -470,7 +505,6 @@ KEYWORDS = frozenset(
 # These introduce a variable or a pattern rather than a command, so nothing in
 # the rest of that part is a verb — and a case pattern is often a filename.
 NOT_COMMANDS = frozenset(("for", "select", "case", "in"))
-VERB_OK = re.compile(r"^[A-Za-z0-9._+-]{1,32}$")
 HOOK_LABEL = re.compile(
     r"^[A-Za-z0-9._+-]{1,64}\.(sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl)$"
 )
@@ -508,12 +542,29 @@ def now_iso():
 
 
 def parse_iso(ts):
+    """The moment an ISO-8601 stamp names, as a UTC epoch.
+
+    A stamp with no zone is read as UTC rather than as local time. Transcripts
+    are written in UTC and the marker is stamped in UTC, so a naive stamp is one
+    whose Z was lost — and reading it locally moves the marker by up to a day in
+    the direction of recording things it must never record.
+    """
     if not isinstance(ts, str) or not ts:
         return None
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+        at = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
         return None
+    return (at if at.tzinfo else at.replace(tzinfo=timezone.utc)).timestamp()
+
+
+KNOWN_VERBS = (
+    COMMANDS
+    | frozenset(
+        "%s %s" % (driver, sub) for driver, subs in SUBCOMMANDS.items() for sub in subs
+    )
+    | frozenset((SCRIPT, OTHER))
+)
 
 
 def command_parts(command):
@@ -580,7 +631,7 @@ def bash_verbs(command):
     except ValueError:
         # An unbalanced quote: nothing about this line can be tokenised, so
         # nothing about it can be normalised safely either.
-        return ["other"]
+        return [OTHER]
     verbs = []
     for tokens in parts:
         while tokens and (ASSIGNMENT.match(tokens[0]) or tokens[0] in KEYWORDS):
@@ -592,11 +643,11 @@ def bash_verbs(command):
             continue
         first = unquote(tokens[0])
         head = os.path.basename(first.rstrip("/")) or first
-        # A command name does not begin with a digit. A word in that position
-        # that does is a value the lexer took for a command — a date, an id, a
-        # numbered filename — and values are not recorded.
-        if not VERB_OK.match(head) or head[0].isdigit():
-            verbs.append("other")
+        if head not in COMMANDS:
+            # Whatever this is, its name is the user's. Saying which of the two
+            # it looked like is all that is kept: a file they ran, or a shape
+            # this file does not recognise.
+            verbs.append(SCRIPT if "/" in first or SCRIPT_LIKE.search(head) else OTHER)
             continue
         verb = head
         if head in SUBCOMMANDS and len(tokens) > 1:
@@ -786,11 +837,12 @@ def meta_set(db, key, value):
 
 # The segment's own counters, once: the accumulator, the write and the clearing
 # a rebuild does all read this list.
-# What the segment says about itself rather than counts: every one of these is
-# written with IFNULL, so a rebuild has to blank them or the old file's answer
-# outlives the file.
+# What a segment says about itself rather than counts. Every one is written with
+# IFNULL, so a rebuild blanks them or the replaced file's answer outlives it.
 SEGMENT_DERIVED = ("repo", "started_at", "ended_at", "cli_version", "branch")
 
+# What a segment counts. A sweep adds to these, so a rebuild zeroes them; a new
+# counter belongs here and a new description belongs above.
 SEGMENT_SCALARS = (
     "user_turns",
     "wake_turns",
@@ -1323,6 +1375,25 @@ def unchanged(st, cur):
     return cur is not None and cur.inode == st.st_ino and cur.offset == st.st_size
 
 
+def same_file(f, st, cur):
+    """Whether this is still the transcript the cursor was reading.
+
+    The inode, and the head as far as it can speak. A head of no bytes hashes
+    the same for every file there has ever been, so a cursor first taken of an
+    empty transcript says nothing about the one at that path now; and a file
+    shorter than the stored head has nothing to compare against, which under one
+    inode is the rewind a rebuild exists for.
+    """
+    if cur.inode != st.st_ino:
+        return False
+    stored = cur.head_len or 0
+    if stored == 0:
+        return st.st_size == 0
+    if st.st_size < stored:
+        return True
+    return sha_head(f, stored) == cur.head_sha
+
+
 def head_of(f, size):
     length = min(HEAD_BYTES, size)
     return length, sha_head(f, length)
@@ -1337,12 +1408,16 @@ def plan(f, st, cur, since_epoch):
     """
     size = st.st_size
     if cur is not None:
-        same = (
-            cur.inode == st.st_ino
-            and sha_head(f, min(cur.head_len or 0, size)) == cur.head_sha
+        same = same_file(f, st, cur)
+        # A stored head that is not the length this file would give now was
+        # taken when the file was another size — smaller, or longer before a
+        # rewind. Either way the next sweep has nothing it can compare, so it is
+        # restated here while the file is in hand.
+        fresh = (
+            head_of(f, size) if (cur.head_len or 0) != min(HEAD_BYTES, size) else None
         )
         if same and size > cur.offset:
-            return "resume", cur.offset, cur.ordinal or 0, cur.base_offset, None
+            return "resume", cur.offset, cur.ordinal or 0, cur.base_offset, fresh
         if same and cur.base_offset is not None and size >= cur.base_offset:
             # Rewound or truncated, but the same file: the open segment starts
             # where it always did, so only it is rebuilt. Closed segments are
@@ -1353,7 +1428,7 @@ def plan(f, st, cur, since_epoch):
                 cur.base_offset,
                 cur.ordinal or 0,
                 cur.base_offset,
-                None,
+                fresh,
             )
     head = head_of(f, size)
     # An ordinal already reached is kept even when nothing here may be read: it
@@ -1455,13 +1530,10 @@ def clear_open(db, segment_ids):
     What an agent's own transcript contributed is kept: it was read from a
     different file, which has not changed, and the fences that produced it find
     no new bytes on the rebuild — so re-deriving it is impossible and deleting
-    it would simply lose the delegation figures. The scalars go back to zero
-    because the rebuild adds to them.
+    it would simply lose the delegation figures. Everything else the segment
+    holds goes back to what it was before it read anything, counters and
+    description alike — SEGMENT_SCALARS and SEGMENT_DERIVED say which is which.
     """
-    # The counters go back to zero because the rebuild adds to them, and the
-    # descriptive columns go back to NULL because the rebuild uses IFNULL to
-    # keep what is already there — which would keep the replaced file's repo,
-    # branch and dates, describing a window that never happened.
     blanked = ", ".join(
         ["%s=0" % c for c in SEGMENT_SCALARS] + ["%s=NULL" % c for c in SEGMENT_DERIVED]
     )
@@ -1567,7 +1639,7 @@ def fold_fence(db, session_path, segment_id, bucket, agent_id, status, rebuild):
     depth = depth if isinstance(depth, int) and not isinstance(depth, bool) else None
 
     cur = get_cursor(db, path)
-    start, head = 0, None
+    start = 0
     # An agent counts once per segment that fenced it, however many times that
     # segment stops it.
     first_seen = cur is None or cur.segment_id != segment_id
@@ -1578,21 +1650,15 @@ def fold_fence(db, session_path, segment_id, bucket, agent_id, status, rebuild):
         # been fenced yet — counting them here would read as a lane that went
         # round twice.
         return
-    if cur is not None:
-        with open(path, "rb") as f:
-            same = (
-                cur.inode == st.st_ino
-                and sha_head(f, min(cur.head_len or 0, st.st_size)) == cur.head_sha
-            )
-        if same and st.st_size >= cur.offset:
-            head = (cur.head_len, cur.head_sha)
-            start = cur.offset
-    if head is None:
-        with open(path, "rb") as f:
-            head = head_of(f, st.st_size)
-
-    span = resumed_span(cur, start > 0)
     with open(path, "rb") as f:
+        # One open for the three questions a fence asks of the file: whether it
+        # is still the transcript the cursor read, what its head is now, and
+        # what it has gained.
+        if cur is not None and same_file(f, st, cur) and st.st_size >= cur.offset:
+            start = cur.offset
+        head = head_of(f, st.st_size)
+
+        span = resumed_span(cur, start > 0)
         reader = Reader(f, start, lambda: span)
         for rec in reader.records():
             # A nested agent's fence reaches the root session transcript, not
@@ -1893,9 +1959,14 @@ def close_stale(db, now):
                     # The records that follow belong to a new segment. Its start
                     # is unknown until one arrives, so the cursor's own offset
                     # stands in: nothing before it can belong to the new one.
+                    # last_skill goes with it: a skill still running when the
+                    # session fell idle belongs to the segment that ended, and
+                    # carrying it into the next one means the skill is never
+                    # counted there — which puts it on the digest's "never
+                    # fired" list while it was firing.
                     db.execute(
-                        'UPDATE cursor SET ordinal=?, segment_id=?, base_offset="offset" '
-                        "WHERE path=?",
+                        "UPDATE cursor SET ordinal=?, segment_id=?, "
+                        'base_offset="offset", last_skill=NULL WHERE path=?',
                         (
                             (ordinal or 0) + 1,
                             "%s#%d"
@@ -1966,6 +2037,10 @@ def alive(pid):
     Linux, and reading a lock as unheld there would let two sweeps run at once.
     A pid this process does not own answers EPERM, which is still alive."""
     try:
+        # Not a pid: 0 signals this process's own group and would read as held
+        # for as long as the lock is young, and a negative one is a group too.
+        if int(pid) <= 0:
+            return False
         os.kill(int(pid), 0)
     except ProcessLookupError:
         return False
@@ -2167,7 +2242,7 @@ def record(args):
 # ── review ───────────────────────────────────────────────────────────────────
 
 
-def table(out, title, headers, rows):
+def table(out, title, headers, rows, dropped=0):
     if title:
         out.append(title)
     if not rows:
@@ -2194,10 +2269,25 @@ def table(out, title, headers, rows):
     out.append(line(headers))
     for row in body:
         out.append(line(row))
+    if dropped:
+        # The Window section is careful to say when a figure is short; a ranked
+        # table that quietly stops at twelve rows reads as the whole list.
+        out.append("    … and %d more, not shown" % dropped)
 
 
-def grouped(db, sql, params=()):
-    return db.execute(sql, params).fetchall()
+def grouped(db, sql):
+    return db.execute(sql).fetchall()
+
+
+def ranked(db, sql):
+    """The top rows of a ranked query, and how many it left behind.
+
+    The limit is applied here rather than in the SQL so the count of what was
+    dropped comes from the same query as the rows: a second COUNT could answer
+    for a different window.
+    """
+    rows = db.execute(sql).fetchall()
+    return rows[:TOP_ROWS], max(0, len(rows) - TOP_ROWS)
 
 
 def short(project, keep=30):
@@ -2268,7 +2358,7 @@ def digest(db, everything):
         """
         SELECT w.project,
                CASE WHEN t.agent='' THEN 'session' ELSE 'agents' END AS scope,
-               SUM(t.n), COUNT(DISTINCT t.segment_id), COUNT(DISTINCT w.project),
+               SUM(t.n), COUNT(DISTINCT t.segment_id),
                SUM(CASE WHEN t.tool='Edit' THEN t.n ELSE 0 END),
                SUM(CASE WHEN t.tool='Write' THEN t.n ELSE 0 END),
                SUM(CASE WHEN t.tool='Bash' THEN t.n ELSE 0 END)
@@ -2279,7 +2369,9 @@ def digest(db, everything):
     table(
         out,
         None,
-        ["project", "scope", "n", "segments", "projects", "Edit", "Write", "Bash"],
+        # No projects column: these rows are grouped by project, so it would
+        # read 1 on every line and say nothing.
+        ["project", "scope", "n", "segments", "Edit", "Write", "Bash"],
         with_short(rows),
     )
     edited = grouped(
@@ -2335,46 +2427,54 @@ def digest(db, everything):
         )
 
     out.append("")
-    rows = grouped(
+    rows, dropped = ranked(
         db,
         """
         SELECT d.kind, d.signature,
                CASE WHEN d.agent='' THEN 'session' ELSE 'agent' END,
                SUM(d.n), COUNT(DISTINCT d.segment_id), COUNT(DISTINCT w.project)
         FROM denial d JOIN win w ON w.id=d.segment_id
-        GROUP BY d.kind, d.signature, 3 ORDER BY 6 DESC, 4 DESC LIMIT %d"""
-        % TOP_ROWS,
+        GROUP BY d.kind, d.signature, 3 ORDER BY 6 DESC, 4 DESC""",
     )
     table(
         out,
         "Permission friction",
         ["kind", "signature", "who", "n", "segments", "projects"],
         rows,
+        dropped,
     )
 
     out.append("")
-    rows = grouped(
+    rows, dropped = ranked(
         db,
         """
         SELECT t.tool, CASE WHEN t.agent='' THEN 'session' ELSE 'agents' END,
                SUM(t.n), COUNT(DISTINCT t.segment_id), COUNT(DISTINCT w.project), SUM(t.errors)
         FROM tool_use t JOIN win w ON w.id=t.segment_id
-        GROUP BY t.tool, 2 ORDER BY 3 DESC LIMIT %d"""
-        % TOP_ROWS,
+        GROUP BY t.tool, 2 ORDER BY 3 DESC""",
     )
-    table(out, "Tools", ["tool", "who", "n", "segments", "projects", "errors"], rows)
-    rows = grouped(
+    table(
+        out,
+        "Tools",
+        ["tool", "who", "n", "segments", "projects", "errors"],
+        rows,
+        dropped,
+    )
+    rows, dropped = ranked(
         db,
         """
         SELECT b.verb, CASE WHEN b.agent='' THEN 'session' ELSE 'agents' END,
                SUM(b.n), COUNT(DISTINCT b.segment_id), COUNT(DISTINCT w.project), SUM(b.errors)
         FROM bash_verb b JOIN win w ON w.id=b.segment_id
-        GROUP BY b.verb, 2 ORDER BY 3 DESC LIMIT %d"""
-        % TOP_ROWS,
+        GROUP BY b.verb, 2 ORDER BY 3 DESC""",
     )
     out.append("")
     table(
-        out, "Bash verbs", ["verb", "who", "n", "segments", "projects", "errors"], rows
+        out,
+        "Bash verbs",
+        ["verb", "who", "n", "segments", "projects", "errors"],
+        rows,
+        dropped,
     )
 
     out.append("")
@@ -2417,16 +2517,21 @@ def digest(db, everything):
     )
 
     out.append("")
-    rows = grouped(
+    rows, dropped = ranked(
         db,
         """
         SELECT h.hook, SUM(h.n), COUNT(DISTINCT h.segment_id), COUNT(DISTINCT w.project),
                SUM(h.errors), MAX(h.ms_max)
         FROM hook_run h JOIN win w ON w.id=h.segment_id
-        GROUP BY h.hook ORDER BY 2 DESC LIMIT %d"""
-        % TOP_ROWS,
+        GROUP BY h.hook ORDER BY 2 DESC""",
     )
-    table(out, "Hooks", ["hook", "n", "segments", "projects", "errors", "ms max"], rows)
+    table(
+        out,
+        "Hooks",
+        ["hook", "n", "segments", "projects", "errors", "ms max"],
+        rows,
+        dropped,
+    )
 
     out.append("")
     rows = grouped(

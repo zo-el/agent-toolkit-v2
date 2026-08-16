@@ -726,6 +726,13 @@ for module in tasks out; do
     && ok "lib/$module.py missing costs the line and says why" \
     || bad "lib/$module.py missing costs the line and says why" \
        "exit $tl_rc, stdout: $(cat "$TMP/tl.out"), stderr: $(cat "$TMP/tl.err")"
+  # The task line has nothing to say without its list, so losing it is the whole
+  # feature. The bar is different: every segment but the glyphs still has an
+  # answer, so a checkout missing a shared module costs the polish and not the
+  # line the user reads all day.
+  out="$(printf '%s' '{"model":{"display_name":"Opus 5"},"cwd":"/"}' \
+    | HOME="$FAKE" python3 "$COPY/hooks/statusline.py" 2>/dev/null)"
+  check "lib/$module.py missing still renders the bar" "Opus 5" "$out"
 done
 tar --exclude=.git --exclude=__pycache__ -cf - -C "$ROOT" . | tar -xf - -C "$COPY"
 printf '\ndef broken(\n' >> "$COPY/hooks/taskline.py"
@@ -753,6 +760,15 @@ for row in db.execute(sys.argv[1]):
     print("|".join("" if v is None else str(v) for v in row))
 PY
 
+cat > "$TMP/tz.py" <<'PY2'
+import sys
+
+source = open(sys.argv[1] + "/retro.py").read()
+ns = {}
+exec(compile(source.replace('if __name__ == "__main__":', "if False:"), "retro", "exec"), ns)
+naive, zulu = "2026-08-14T12:00:00", "2026-08-14T12:00:00Z"
+print("same" if ns["parse_iso"](naive) == ns["parse_iso"](zulu) else "moved")
+PY2
 retro() { HOME="$RH" python3 "$ROOT/hooks/retro.py" "$@" </dev/null 2>"$TMP/retro.err"; }
 dbq()   { HOME="$RH" python3 "$TMP/dbq.py" "$1" 2>/dev/null; }
 eq()    { [ "$2" = "$3" ] && ok "$1" || bad "$1" "expected '$2', got '${3:-<empty>}'"; }
@@ -946,6 +962,39 @@ sql "a reparse leaves the closed segment untouched" "compact|1|5|11" \
 sql "a reparse rebuilds the open segment without doubling it" "7|1" \
   "SELECT assistant_turns,(SELECT n FROM tool_use WHERE segment_id='s-main#1' AND tool='Write') FROM segment WHERE id='s-main#1'"
 
+# A transcript is created before it holds anything, so first contact often finds
+# it empty — and a head of no bytes hashes the same for every file there has
+# ever been. What is written at that path next is a new file, and reading it as
+# a continuation would splice two transcripts into one segment.
+: > "$RP/alpha/s-empty.jsonl"
+retro record >/dev/null
+sql "an empty transcript stores no head worth the name" "0" \
+  "SELECT head_len FROM cursor WHERE path LIKE '%s-empty.jsonl'"
+cat > "$RP/alpha/s-empty.jsonl" <<'JSON'
+{"type":"user","origin":{"kind":"human"},"timestamp":"2026-08-14T20:00:00.000Z","cwd":"/repo/alpha","message":{"role":"user","content":"first"}}
+{"type":"assistant","uuid":"e1","timestamp":"2026-08-14T20:00:01.000Z","message":{"id":"em1","content":[{"type":"tool_use","id":"e1t","name":"Read","input":{}}]}}
+JSON
+retro record >/dev/null
+sql "and what arrives after it is read whole" "1|1" \
+  "SELECT user_turns,(SELECT n FROM tool_use WHERE segment_id='s-empty#0' AND tool='Read')
+   FROM segment WHERE id='s-empty#0'"
+sql "with a head that fingerprints something" "1" \
+  "SELECT CASE WHEN head_len > 0 THEN 1 ELSE 0 END FROM cursor WHERE path LIKE '%s-empty.jsonl'"
+
+# The head is what says a file was replaced rather than appended to, so it has
+# to keep pace with the file: one taken when the transcript was shorter can be
+# matched by a replacement that only has to agree with the little that was
+# stored.
+head_before="$(dbq "SELECT head_len FROM cursor WHERE path LIKE '%s-empty.jsonl'")"
+cat >> "$RP/alpha/s-empty.jsonl" <<'JSON'
+{"type":"assistant","uuid":"e2","timestamp":"2026-08-14T20:00:02.000Z","message":{"id":"em2","content":[{"type":"tool_use","id":"e2t","name":"Glob","input":{}}]}}
+JSON
+retro record >/dev/null
+head_after="$(dbq "SELECT head_len FROM cursor WHERE path LIKE '%s-empty.jsonl'")"
+[ "${head_after:-0}" -gt "${head_before:-0}" ] \
+  && ok "a head grows with the file it fingerprints" \
+  || bad "a head grows with the file it fingerprints" "stayed at $head_before"
+
 # No backfill, two ways: a transcript whose first record predates the marker,
 # and one whose mtime does. Neither may contribute a single row.
 cat > "$RP/alpha/s-ancient.jsonl" <<'JSON'
@@ -1032,6 +1081,16 @@ JSON
 retro record >/dev/null
 sql "a lock naming a dead process is stolen" "1" \
   "SELECT n FROM tool_use WHERE segment_id='s-main#1' AND tool='Monitor'"
+# Zero is not a process: signal 0 sent to it goes to this process's own group,
+# so a lock holding it reads as held by something alive and every sweep no-ops
+# until the lock is old enough to steal.
+printf '0' > "$RH/.claude/retro/sweep.lock"
+cat >> "$RP/alpha/s-main.jsonl" <<'JSON'
+{"type":"assistant","uuid":"a23","timestamp":"2026-08-14T10:23:00.000Z","message":{"id":"m23","content":[{"type":"tool_use","id":"t23","name":"NotebookEdit","input":{}}]}}
+JSON
+retro record >/dev/null
+sql "a lock naming no process at all is stolen" "1" \
+  "SELECT n FROM tool_use WHERE segment_id='s-main#1' AND tool='NotebookEdit'"
 rm -f "$RH/.claude/retro/sweep.lock"
 
 # --interval is the whole scheduling mechanism, so it has to actually gate.
@@ -1225,6 +1284,64 @@ done
 [ -z "$leaked" ] && ok "no prompt, brief, report or argument reaches the store" \
                  || bad "no prompt, brief, report or argument reaches the store" "found:$leaked"
 
+# ── the verb column is a closed set ───────────────────────────────────────────
+# Twice a leak shipped because the canary tested the cases its author thought
+# of, and twice it passed while the store held a filename. This asserts the
+# property instead: every verb the recorder writes is drawn from a set spelled
+# out in its own source, so no input can put a name there the source does not
+# already contain. The corpus below is hostile rather than representative — the
+# invariant, not the list, is what does the work — and the same check runs over
+# every row the suite's own fixtures produced, which covers the inputs nobody
+# thought to write a case for.
+cat > "$TMP/closed.py" <<'PY2'
+import json
+import os
+import sqlite3
+import sys
+
+hooks = sys.argv[1]
+source = open(os.path.join(hooks, "retro.py")).read()
+ns = {}
+exec(compile(source.replace('if __name__ == "__main__":', "if False:"), "retro", "exec"), ns)
+bash_verbs, known = ns["bash_verbs"], ns["KNOWN_VERBS"]
+
+SECRET = "acmepayroll"
+HOSTILE = [
+    "./deploy_%s.sh --force", "time ./migrate_%s.py", "/opt/bin/rotate-%s-keys.sh",
+    "../%s.py", "~/bin/%s", "VAR=1 ./%s.sh", "env FOO=1 ./%s.sh", "nice -n 5 ./%s.sh",
+    "nohup ./%s.sh &", "`./%s.sh`", "$(./%s.sh)", "cat x | ./%s.sh", "true && ./%s.sh",
+    "true || ./%s.sh", "cd /tmp; ./%s.sh", "for f in *; do ./%s.sh; done",
+    "if true; then ./%s.sh; fi", "case $x in a) ./%s.sh ;; esac",
+    "grep -F '|' /home/%s.csv", "grep -F \\| /home/%s.csv", "python3 %s.py",
+    "node %s.js", "make %s", "git -C %s status", "kubectl -n %s get pods",
+    "sudo ./%s.sh", "docker run %s", "cat > f << 'EOF'\n./%s.sh\nEOF", "%s",
+    "%s --flag", "'%s'", '"%s" arg', "2026-01-01-%s", "./%s", "x=1 y=2 ./%s.sh",
+    "eval ./%s.sh", "echo 'unbalanced ./%s.sh",
+]
+verdict = {"unknown": [], "leaked": [], "stored": []}
+for shape in HOSTILE:
+    command = shape % SECRET if "%s" in shape else shape
+    for verb in bash_verbs(command):
+        if verb not in known:
+            verdict["unknown"].append([command, verb])
+        if SECRET in verb:
+            verdict["leaked"].append([command, verb])
+
+db = sqlite3.connect(os.path.join(os.path.expanduser("~"), ".claude", "retro", "retro.db"))
+# A denial signature is the verb for a Bash command and the tool's own name
+# otherwise, and a tool name is the platform's word rather than the user's.
+tools = {row[0] for row in db.execute("SELECT DISTINCT tool FROM tool_use")}
+allowed = known | tools | {"unknown"}
+verdict["stored"] = sorted(
+    {row[0] for row in db.execute("SELECT DISTINCT verb FROM bash_verb")} - known
+) + sorted({row[0] for row in db.execute("SELECT DISTINCT signature FROM denial")} - allowed)
+print(json.dumps(verdict))
+PY2
+closed="$(HOME="$RH" python3 "$TMP/closed.py" "$ROOT/hooks")"
+check "every verb a hostile corpus produces is one the source names" '"unknown": []' "$closed"
+check "and none of them carries a name from the input" '"leaked": []' "$closed"
+check "and every verb the store already holds is one too" '"stored": []' "$closed"
+
 # A separator that is itself the argument — quoted or escaped — must not split
 # the line, or the filename after it becomes a command of its own. A heredoc
 # body is a file being written, and a case pattern is a filename, not a command.
@@ -1403,6 +1520,15 @@ check "delegation separates the session"   "alpha session" "$flat"
 check "delegation separates the agents"    "beta agents"   "$flat"
 check "nesting above depth 1 is called out" "nested: pr-review-toolkit:code-reviewer at depth 2" "$digest"
 check "an installed skill that never fired is named" "never fired: never-fired" "$digest"
+# A ranked table stops at twelve rows. The Window section is careful to say when
+# a figure is short, and a table that quietly truncates reads as the whole list
+# — which is the one thing a reviewer ranking by recurrence must not believe.
+verbs_in_window="$(dbq "SELECT COUNT(*) FROM (SELECT b.verb, b.agent='' FROM bash_verb b
+  JOIN segment w ON w.id=b.segment_id WHERE w.closed_seq IS NOT NULL GROUP BY 1,2)")"
+[ "${verbs_in_window:-0}" -gt 12 ] \
+  && check "a table that shows only its top says so" \
+       "and $(( verbs_in_window - 12 )) more, not shown" "$digest" \
+  || bad "the verb table is long enough to truncate" "only $verbs_in_window rows"
 # A skills directory that will not read is not one holding nothing: saying
 # nothing there reads as "every skill fired", which is the opposite of what is
 # known. Root reads it regardless, so the assertion is skipped there.
@@ -1592,6 +1718,13 @@ retro record >/dev/null; rc=$?
   || bad "a missing since marker is recreated" "exit $rc"
 sql "and that run records nothing" "0" \
   "SELECT count(*) FROM segment WHERE session_id='s-nomarker'"
+# The marker is the one value that must never move, and a stamp that lost its Z
+# read as local time moves it by up to a day — in the direction of recording
+# what it exists to exclude. Read under a zone that is not UTC, or the two
+# readings would agree whatever the code did.
+naive="$(TZ=America/New_York python3 "$TMP/tz.py" "$ROOT/hooks")"
+eq "a marker that lost its zone is still read as UTC" "same" "$naive"
+
 # A marker that is there but will not parse is a different condition from one
 # that is absent: it is the one value in the store that must never move, so it
 # is left exactly as it is and nothing is recorded until someone looks.

@@ -388,11 +388,34 @@ def segment_toolkit():
     return f"{DIM}⬡ {label}{RESET}{marker}"
 
 
-def main():
-    # Imported here rather than at module level: an import that fails above
-    # __main__'s guard would put a traceback in the bar.
-    from lib.out import print_line, utf8_stdout
+def shared_out():
+    """(print_line, utf8_stdout), or builtins that do the same job less well.
 
+    Imported here rather than at module level: an import that fails above
+    __main__'s guard would put a traceback in the bar. Guarded as well as
+    deferred, because a checkout missing this module should cost the glyphs of
+    one segment, not the whole line — the doctor is what says it is missing.
+    """
+    try:
+        from lib.out import print_line, utf8_stdout
+
+        return print_line, utf8_stdout
+    except Exception:
+
+        def plain(text):
+            # Flushed, because the exit below is os._exit: it takes no buffer
+            # with it, and an unflushed line is the same as no line at all.
+            try:
+                print(text)
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+        return plain, lambda: None
+
+
+def main():
+    print_line, utf8_stdout = shared_out()
     utf8_stdout()
     try:
         data = json.load(sys.stdin)
