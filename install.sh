@@ -324,7 +324,7 @@ if command -v python3 >/dev/null 2>&1; then
   # The recorder degrades to silence by design, so silence is not evidence that
   # it is working. This is what tells the difference: a marker it can read, and
   # a store it can open at a schema it knows.
-  retro_state="$(python3 - "$CLAUDE_DIR" <<'PY' 2>/dev/null || true
+  retro_state="$(python3 - "$CLAUDE_DIR" "$ROOT/hooks/retro.py" <<'PY' 2>/dev/null || true
 import os, sys
 
 store = os.path.join(sys.argv[1], "retro")
@@ -346,13 +346,21 @@ else:
 db = os.path.join(store, "retro.db")
 if os.path.exists(db):
     try:
+        import re
         import sqlite3
 
+        # The version the recorder itself declares, so this cannot drift from it.
+        wanted = int(
+            re.search(r"^SCHEMA_VERSION = (\d+)", open(sys.argv[2]).read(), re.M).group(1)
+        )
         conn = sqlite3.connect(db)
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
-        if version != 1:
-            print("retro.db is schema version %d; this toolkit reads version 1" % version)
+        if version != wanted:
+            print(
+                "retro.db is schema version %d; this toolkit reads version %d"
+                % (version, wanted)
+            )
     except Exception as failure:
         print("retro.db will not open — %s" % failure)
 PY

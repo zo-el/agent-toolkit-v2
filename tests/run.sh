@@ -860,6 +860,30 @@ cat >> "$RP/alpha/s-ancient.jsonl" <<'JSON'
 {"type":"assistant","uuid":"o2","timestamp":"2026-08-14T11:00:00.000Z","message":{"id":"mo2","content":[{"type":"tool_use","id":"o2t","name":"Bash","input":{"command":"cargo test"}}]}}
 JSON
 retro record >/dev/null
+# A live pre-marker transcript can be caught mid-write with a record longer than
+# the window a cursor is parked by. Answering "no complete line here" would park
+# it at the start of the file, and the next sweep would read the whole thing —
+# the backfill the marker exists to prevent.
+cat > "$RP/alpha/s-bigtail.jsonl" <<'JSON'
+{"type":"user","origin":{"kind":"human"},"timestamp":"2025-07-01T10:00:00.000Z","cwd":"/repo/alpha","message":{"role":"user","content":"old work"}}
+{"type":"assistant","uuid":"bt1","timestamp":"2025-07-01T10:00:01.000Z","message":{"id":"btm1","content":[{"type":"tool_use","id":"bt1t","name":"Bash","input":{"command":"terraform destroy"}}]}}
+JSON
+python3 - "$RP/alpha/s-bigtail.jsonl" <<'PY'
+import sys
+
+# A partial record larger than the chunk the parking search reads.
+with open(sys.argv[1], "a") as f:
+    f.write('{"type":"assistant","uuid":"bt2","text":"' + "x" * (1 << 21) + '"')
+PY
+retro record >/dev/null
+# The parked cursor is only proved by what the sweep after it reads: parking at
+# the start looks identical until the next sweep resumes from there.
+retro record >/dev/null
+sql "a huge unfinished record never parks a cursor at the start" "0" \
+  "SELECT count(*) FROM segment WHERE session_id='s-bigtail'"
+sql "and nothing of it is recorded" "0" \
+  "SELECT count(*) FROM bash_verb WHERE verb='terraform destroy'"
+
 sql "an old transcript contributes only what it gains after first contact" "1" \
   "SELECT n FROM bash_verb WHERE segment_id='s-ancient#0' AND verb='cargo test'"
 sql "and nothing it held before it" "0" \
@@ -1013,9 +1037,15 @@ cat > "$RP/beta/s-agents.jsonl" <<'JSON'
 {"type":"queue-operation","operation":"enqueue","timestamp":"2026-08-14T13:03:10.000Z","content":"<task-notification>\n<task-id>nometa</task-id>\n<status>completed</status>\n</task-notification>"}
 {"type":"user","timestamp":"2026-08-14T13:04:10.000Z","toolUseResult":{"agentId":"sync3","status":"completed","agentType":"researcher","totalTokens":99,"content":"CANARYSYNCCONTENT"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu5","content":"done"}]}}
 {"type":"assistant","uuid":"s9","timestamp":"2026-08-14T13:05:00.000Z","message":{"id":"sm9","content":[{"type":"tool_use","id":"tu9","name":"Bash","input":{"command":"git commit -m CANARYCOMMITMSG"}}]}}
-{"type":"assistant","uuid":"s11","timestamp":"2026-08-14T13:05:02.000Z","message":{"id":"sm11","content":[{"type":"tool_use","id":"tu11","name":"Bash","input":{"command":"grep -rn 'alpha|CANARYPIPEARG|beta' src/"}}]}}
+{"type":"assistant","uuid":"s11","timestamp":"2026-08-14T13:05:02.000Z","message":{"id":"sm11","content":[{"type":"tool_use","id":"tu11","name":"Bash","input":{"command":"grep -F '|' /home/x/CANARYPIPEARG.csv"}}]}}
 {"type":"assistant","uuid":"s12","timestamp":"2026-08-14T13:05:03.000Z","message":{"id":"sm12","content":[{"type":"tool_use","id":"tu12","name":"Bash","input":{"command":"cat > cfg.rs << 'EOF'\n  let key = CANARYHEREDOC;\n  run(); other();\nEOF"}}]}}
-{"type":"system","subtype":"stop_hook_summary","timestamp":"2026-08-14T13:05:04.000Z","hookInfos":[{"command":"please audit /srv/reports/CANARYPROSEPATH and report back","durationMs":3}],"hookErrors":[]}
+{"type":"assistant","uuid":"s13","timestamp":"2026-08-14T13:05:06.000Z","message":{"id":"sm13","content":[{"type":"tool_use","id":"tu13","name":"Bash","input":{"command":"find . -name x -exec rm {} \\; CANARYESCAPED.txt"}}]}}
+{"type":"assistant","uuid":"s14","timestamp":"2026-08-14T13:05:07.000Z","message":{"id":"sm14","content":[{"type":"tool_use","id":"tu14","name":"Bash","input":{"command":"git -C CANARYFLAGVAL status"}}]}}
+{"type":"assistant","uuid":"s15","timestamp":"2026-08-14T13:05:08.000Z","message":{"id":"sm15","content":[{"type":"tool_use","id":"tu15","name":"Bash","input":{"command":"case \"$f\" in ;; CANARYCASEPAT.png) cp a b ;; esac"}}]}}
+{"type":"assistant","uuid":"s16","timestamp":"2026-08-14T13:05:09.000Z","message":{"id":"sm16","content":[{"type":"text","text":"Here is what it printed:\n\n    Retro: CANARYQUOTEDLINE, which is pasted output and not mine\n\nRetro: the pasted line above is not the answer"}]}}
+{"type":"assistant","uuid":"s17","timestamp":"2026-08-14T13:05:10.000Z","message":{"id":"sm17","content":[{"type":"tool_use","id":"tu17","name":"Bash","input":{"command":"grep -nE \"alpha|[\\\\\"x\\\\\"]|CANARYDESYNC|beta\" src/app.ts"}}]}}
+{"type":"assistant","uuid":"s18","timestamp":"2026-08-14T13:05:11.000Z","message":{"id":"sm18","content":[{"type":"tool_use","id":"tu18","name":"Bash","input":{"command":"kits=\"2026-01-01-CANARYDATEID other\"; echo done"}}]}}
+{"type":"system","subtype":"stop_hook_summary","timestamp":"2026-08-14T13:05:04.000Z","hookInfos":[{"command":"please audit /srv/reports/CANARYPROSEPATH.py and report back","durationMs":3}],"hookErrors":[]}
 {"type":"system","subtype":"stop_hook_summary","timestamp":"2026-08-14T13:05:05.000Z","hookInfos":[{"command":"bash /opt/a/first.sh","durationMs":2},{"command":"bash /opt/b/second.sh","durationMs":2}],"hookErrors":["/opt/b/second.sh: not found"]}
 {"type":"user","timestamp":"2026-08-14T13:05:01.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu9","content":"ok"}]}}
 JSON
@@ -1045,7 +1075,7 @@ sql "and it fences nothing" "0" \
 # Neither may cost the session file it was named in.
 sql "a fence with no readable transcript is counted as lost" "2" \
   "SELECT agent_fences_lost FROM segment WHERE id='s-agents#0'"
-sql "and the session file it was named in still lands" "3" \
+sql "and the session file it was named in still lands" "8" \
   "SELECT n FROM tool_use WHERE segment_id='s-agents#0' AND agent='' AND tool='Bash'"
 sql "and it counts no stop" "0" \
   "SELECT count(*) FROM agent_run WHERE segment_id='s-agents#0' AND agent_type='reviewer'"
@@ -1078,22 +1108,40 @@ sql "a long retro line is cut to the cap" "500" \
 leaked=""
 for c in CANARYPROMPT CANARYDESCASYNC CANARYSYNCCONTENT CANARYSUMMARY CANARYRESULT \
          CANARYMETADESC CANARYBASHARG CANARYCOMMITMSG CANARYHOOKPROSE CANARYRETROPROSE \
-         CANARYPIPEARG CANARYHEREDOC CANARYPROSEPATH; do
+         CANARYPIPEARG CANARYHEREDOC CANARYPROSEPATH CANARYESCAPED CANARYFLAGVAL \
+         CANARYCASEPAT CANARYQUOTEDLINE CANARYDESYNC CANARYDATEID; do
   grep -qa "$c" "$RH"/.claude/retro/retro.db* 2>/dev/null && leaked="$leaked $c"
 done
 [ -z "$leaked" ] && ok "no prompt, brief, report or argument reaches the store" \
                  || bad "no prompt, brief, report or argument reaches the store" "found:$leaked"
 
-# A quoted argument is one token however many separators it holds, and a heredoc
-# body is a file being written rather than commands being run.
-sql "a separator inside a quoted argument is not a command" "1" \
+# A separator that is itself the argument — quoted or escaped — must not split
+# the line, or the filename after it becomes a command of its own. A heredoc
+# body is a file being written, and a case pattern is a filename, not a command.
+sql "a quoted separator is an argument, not a split" "1" \
   "SELECT n FROM bash_verb WHERE segment_id='s-agents#0' AND agent='' AND verb='grep'"
-sql "a heredoc body is not a command either" "1" \
+sql "an escaped separator is too" "1" \
+  "SELECT n FROM bash_verb WHERE segment_id='s-agents#0' AND agent='' AND verb='find'"
+sql "a heredoc body is not a command" "1" \
   "SELECT n FROM bash_verb WHERE segment_id='s-agents#0' AND agent='' AND verb='cat'"
-# The one argument the store does keep, stated rather than assumed: a driver's
-# subcommand, which is what tells a read from a publish.
+sql "a case pattern is not a command" "0" \
+  "SELECT count(*) FROM bash_verb WHERE segment_id='s-agents#0' AND verb LIKE '%CANARY%'"
+# A quote escaped inside a quoted string is past what a lexer without a shell's
+# grammar can follow, so the command is not normalised at all rather than
+# normalised into the fragments of its own argument.
+sql "a command whose quoting cannot be followed is not guessed at" "2" \
+  "SELECT n FROM bash_verb WHERE segment_id='s-agents#0' AND agent='' AND verb='other'"
+# The one argument the store keeps, stated rather than assumed: a driver's
+# subcommand, which is what tells a read from a publish. A flag's value looks
+# the same and is not one.
 sql "a driver's subcommand is kept, by design" "1" \
   "SELECT n FROM bash_verb WHERE segment_id='s-agents#0' AND agent='' AND verb='git commit'"
+sql "a driver flag's value is not a subcommand" "1" \
+  "SELECT n FROM bash_verb WHERE segment_id='s-agents#0' AND agent='' AND verb='git'"
+# The required line is the last thing an agent writes; a Retro: above it is
+# something it quoted.
+sql "a quoted retro line loses to the agent's own" "the pasted line above is not the answer" \
+  "SELECT text FROM retro_line WHERE source_uuid='s16'"
 # hookInfos sometimes holds the user's prompt. A path inside prose is still
 # prompt text, so only a script name is ever a label.
 sql "a path inside prompt prose is not a hook label" "0" \
@@ -1146,6 +1194,26 @@ JSON
 retro record >/dev/null
 sql "a fence with no new bytes adds nothing" "2|1" \
   "SELECT n,agents FROM agent_run WHERE segment_id='s-agents#0' AND agent_type='developer'"
+
+# A rebuild re-delivers fences this segment already counted. An agent that has
+# run on since — resumed, still going, not yet fenced again — has bytes that
+# belong to a stop nobody has seen. Counting them at the old fence would read as
+# a lane that went round again.
+cat >> "$SUB/agent-dev1.jsonl" <<'JSON'
+{"type":"assistant","uuid":"d5","isSidechain":true,"timestamp":"2026-08-14T14:30:00.000Z","message":{"id":"n5","content":[{"type":"tool_use","id":"u5","name":"Glob","input":{}}]}}
+JSON
+python3 - "$RP/beta/s-agents.jsonl" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, "rb").read().splitlines(True)
+open(path, "wb").write(b"".join(lines[:-1]))
+PY
+retro record >/dev/null
+sql "a rebuild does not re-count a stop it already has" "2|1" \
+  "SELECT n,agents FROM agent_run WHERE segment_id='s-agents#0' AND agent_type='developer'"
+sql "and the still-running agent's work waits for its own fence" "0" \
+  "SELECT count(*) FROM tool_use WHERE segment_id='s-agents#0' AND agent='developer' AND tool='Glob'"
 
 # Only the session transcripts are walked, one level deep. A subagent transcript
 # is opened by name at a fence and never by the walk, or the whole subagent tree
@@ -1302,7 +1370,31 @@ PY
 retro record >/dev/null
 sql "a segment a replaced file cannot rebuild is counted, not hidden" "1" \
   "SELECT value FROM meta WHERE key='segments_dropped'"
-check "and the digest owns it" "1 segments could not be rebuilt" "$(retro review --all)"
+check "and the digest owns it" "store, all time: 1 segments could not be rebuilt" "$(retro review --all)"
+
+# A file replaced by one that predates the marker may not be read at all. Its
+# open segment cannot survive that, and the cursor has to keep the segment id or
+# the next append lands in a closed segment and is discarded in silence.
+python3 - "$RP/alpha/s-idle.jsonl" <<'PY'
+import sys
+
+path = sys.argv[1]
+open(path, "w").write(
+    '{"type":"user","origin":{"kind":"human"},"timestamp":"2025-05-05T10:00:00.000Z",'
+    '"cwd":"/repo/alpha","message":{"role":"user","content":"someone else\'s old file"}}\n'
+)
+PY
+retro record >/dev/null
+sql "a replaced pre-marker file gives up its open segment, and says so" "2" \
+  "SELECT value FROM meta WHERE key='segments_dropped'"
+sql "and records nothing of the file it now is" "0" \
+  "SELECT count(*) FROM segment WHERE id='s-idle#2'"
+cat >> "$RP/alpha/s-idle.jsonl" <<'JSON'
+{"type":"assistant","uuid":"i9","timestamp":"2026-08-18T09:00:00.000Z","message":{"id":"im9","content":[{"type":"tool_use","id":"i9t","name":"Task","input":{}}]}}
+JSON
+retro record >/dev/null
+sql "what it gains after that is still recorded" "1" \
+  "SELECT n FROM tool_use WHERE segment_id='s-idle#1' AND tool='Task'"
 
 # The 30-day cleanup deletes transcripts. The digest is the only record left, so
 # it stays; the cursor pointing at a file that is gone does not.

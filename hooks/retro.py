@@ -17,7 +17,11 @@ Counts and shapes only — never prompt text, file contents, command arguments, 
 agent's brief or its report. The two deliberate exceptions are the normalised
 command verb and the agent's own `Retro:` line, both of which the spec names.
 
-Contract: documentation/specs/retro.md.
+Contract: documentation/specs/retro.md. Three mechanisms here differ from the
+one it describes, each because the spec's own acceptance criteria could not hold
+otherwise, and each named at the code that does it: a session cursor's
+`base_offset` rather than an agent's, a rebuild that keeps an agent's rows
+instead of rewinding to re-read them, and a verb split that respects quoting.
 """
 
 import hashlib
@@ -166,11 +170,41 @@ DRIVERS = {
     "sudo",
     "nix",
 }
+SEPARATORS = frozenset(("&&", "||", ";", ";;", "|", "|&", "&"))
+# A keyword is not the command; the command is the word after it.
+KEYWORDS = frozenset(
+    (
+        "do",
+        "done",
+        "then",
+        "else",
+        "elif",
+        "fi",
+        "esac",
+        "while",
+        "until",
+        "if",
+        "function",
+        "time",
+        "{",
+        "}",
+        "!",
+        "[[",
+        "]]",
+    )
+)
+# These introduce a variable or a pattern rather than a command, so nothing in
+# the rest of that part is a verb — and a case pattern is often a filename.
+NOT_COMMANDS = frozenset(("for", "select", "case", "in"))
 VERB_OK = re.compile(r"^[A-Za-z0-9._+-]{1,32}$")
 HOOK_LABEL = re.compile(
     r"^[A-Za-z0-9._+-]{1,64}\.(sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl)$"
 )
+INTERPRETERS = frozenset(
+    ("sh", "bash", "zsh", "dash", "env", "python", "python3", "node", "ruby", "perl")
+)
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+ESCAPED_QUOTE = re.compile(r"\\+[\"']")
 # The colon is required. Without it "Retroactive correction: …" and a bold
 # "**Retro** ← …" both match, and the line after them is arbitrary assistant
 # prose — which is the one thing a retro line may not be. Verified against the
@@ -211,39 +245,60 @@ def parse_iso(ts):
 def command_parts(command):
     """The command split into the commands it runs, quoting respected.
 
-    Splitting the raw string on `&&`, `||`, `;` and `|` would promote the
-    contents of every quoted argument that contains one — a grep alternation, a
-    commit message — to a command of its own. Everything from a heredoc operator
-    on is dropped outright: that is a file being written, not a command line.
+    Lexed with quotes left on the token, so a separator that is an argument —
+    `grep -F '|' payroll.csv`, `find . -exec rm {} \\;` — cannot split the line
+    and promote the filename after it to a command. Everything from a heredoc
+    operator on is dropped outright: that is a file being written, not a command
+    line, and its contents are not ours to read.
+
+    A newline is not a separator here, so only the first command of a multi-line
+    script is recorded. Splitting on one would take every line of a multi-line
+    quoted argument for a command of its own, which puts source code in the
+    store — and an undercounted verb costs less than that.
     """
     cut = command.find("<<")
     if cut >= 0:
         command = command[:cut]
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    if ESCAPED_QUOTE.search(command):
+        # A quote escaped inside a quoted string — `grep -nE "a|[\\"x\\"]|b"` —
+        # is one thing a lexer without a shell's grammar cannot follow: it takes
+        # the escaped quote for a real one and every fragment after it for a
+        # word of its own. Those fragments are argument text, so a command
+        # holding one is not normalised at all.
+        raise ValueError("escaped quote")
+    lexer = shlex.shlex(command, posix=False, punctuation_chars=True)
     lexer.whitespace_split = True
-    parts, current = [], []
+    parts, current, escaped, pattern = [], [], False, False
     for token in lexer:
-        if token in ("&&", "||", ";", "|", "&", ";;", "|&"):
+        if pattern:
+            # A `case` arm: what follows `;;` is a pattern to match, not a
+            # command, and a pattern is often a filename.
+            pattern = token != ")"
+            continue
+        if token == "\\":
+            escaped = True
+            continue
+        if token in SEPARATORS and not escaped:
             parts.append(current)
             current = []
+            pattern = token == ";;"
             if len(parts) >= VERB_PARTS:
                 return parts[:VERB_PARTS]
-        else:
-            current.append(token)
+            continue
+        escaped = False
+        current.append(token)
     parts.append(current)
     return parts[:VERB_PARTS]
+
+
+def unquote(token):
+    return token.strip("'\"")
 
 
 def bash_verbs(command):
     """Every verb a Bash command runs, normalised. `git push`, `npm install`,
     `cargo test` — a driver keeps its subcommand, because the driver alone
-    cannot tell a read from a publish.
-
-    A driver's subcommand is the one argument this records, which is the spec's
-    deliberate exception: `git commit`, `make deploy`. Everything after it is
-    dropped, and a subcommand that does not look like a bare word — a path, a
-    quoted string, anything over 32 characters — leaves the driver alone.
-    """
+    cannot tell a read from a publish."""
     if not isinstance(command, str) or not command.strip():
         return []
     try:
@@ -254,41 +309,66 @@ def bash_verbs(command):
         return ["other"]
     verbs = []
     for tokens in parts:
-        while tokens and ASSIGNMENT.match(tokens[0]):
+        while tokens and (ASSIGNMENT.match(tokens[0]) or tokens[0] in KEYWORDS):
             tokens.pop(0)
-        if not tokens:
+        if not tokens or tokens[0] in NOT_COMMANDS:
             continue
-        head = os.path.basename(tokens[0].rstrip("/")) or tokens[0]
-        if not VERB_OK.match(head):
+        if tokens[1:2] == ["()"] or tokens[1:3] == ["(", ")"]:
+            # A function being defined, not a command being run.
+            continue
+        first = unquote(tokens[0])
+        head = os.path.basename(first.rstrip("/")) or first
+        # A command name does not begin with a digit. A word in that position
+        # that does is a value the lexer took for a command — a date, an id, a
+        # numbered filename — and values are not recorded.
+        if not VERB_OK.match(head) or head[0].isdigit():
             verbs.append("other")
             continue
         verb = head
-        if head in DRIVERS:
-            for token in tokens[1:]:
-                if token.startswith("-"):
-                    continue
-                if VERB_OK.match(token):
-                    verb = head + " " + token
-                break
+        if head in DRIVERS and len(tokens) > 1:
+            # The subcommand is the very next word or there is none. A bare word
+            # further along is a flag's value — `git -C <repo>`, `kubectl -n
+            # <namespace>`, `aws --profile <account>` — and a value is an
+            # argument, which is the one thing a verb may never carry.
+            second = unquote(tokens[1])
+            if (
+                not second.startswith("-")
+                and not second.isdigit()
+                and VERB_OK.match(second)
+            ):
+                verb = head + " " + second
         verbs.append(verb)
     return verbs
 
 
+def script_name(token):
+    """The script a token names, or None when it does not name one."""
+    label = token.rstrip("/").rsplit("/", 1)[-1].strip("\"'`,;:()[]")
+    return label if "/" in token and HOOK_LABEL.match(label) else None
+
+
 def hook_label(command):
-    """A label for a hook, not a command line: the file a path-like token names,
-    and only when that file is a script.
+    """A label for a hook, from the only place a command names its script: the
+    word it starts with, or the word after the interpreter that runs it.
 
     `hookInfos[].command` is not always a command — in this store it sometimes
-    carries the user's prompt — so any rule that accepts a plain word accepts
-    prompt text, and any rule that accepts a plain path accepts a path out of a
-    prompt. Requiring a script extension costs a hook invoked as a bare
-    executable, which reads as `unknown`, and that is the cheaper mistake.
+    carries the user's prompt — and any rule that searches the whole string will
+    find the script a prompt happens to mention. A prompt does not begin with a
+    script path; a hook command always does. The cost is a hook invoked as a
+    bare executable, which reads as `unknown`.
     """
-    for token in sorted(str(command or "").split(), key=len, reverse=True):
-        if "/" not in token:
-            continue
-        label = token.rstrip("/").rsplit("/", 1)[-1].strip("\"'`,;:()[]")
-        if HOOK_LABEL.match(label):
+    tokens = str(command or "").split()
+    if tokens and unquote(tokens[0]).rsplit("/", 1)[-1] in INTERPRETERS:
+        tokens = tokens[1:]
+    return (script_name(tokens[0]) if tokens else None) or "unknown"
+
+
+def hook_error_label(message):
+    """The hook a runner's error message names. Unlike a command this is
+    machine-written, so the path can be anywhere in it."""
+    for token in sorted(str(message or "").split(), key=len, reverse=True):
+        label = script_name(token)
+        if label:
             return label
     return "unknown"
 
@@ -326,11 +406,22 @@ def read_lines(f, start):
 def last_newline(f, size):
     """The offset just past the last complete line at or before `size`. A cursor
     always sits on a newline, so parking one mid-record would make the next
-    sweep read the tail of that record as a line of its own."""
-    window = min(size, CHUNK)
-    f.seek(size - window)
-    cut = f.read(window).rfind(b"\n")
-    return size - window + cut + 1 if cut >= 0 else 0
+    sweep read the tail of that record as a line of its own.
+
+    Searches backwards a chunk at a time, and gives up at `size` rather than at
+    0: this parks a cursor that must never be rewound, and answering 0 for a
+    file whose last record is simply longer than one chunk would read the whole
+    thing from the start — the backfill the marker exists to prevent.
+    """
+    at = size
+    while at > 0:
+        window = min(at, CHUNK)
+        f.seek(at - window)
+        cut = f.read(window).rfind(b"\n")
+        if cut >= 0:
+            return at - window + cut + 1
+        at -= window
+    return 0 if size == 0 else size
 
 
 def read_json(path):
@@ -602,7 +693,7 @@ def feed_hooks(span, rec):
         # hookErrors is a list of messages, not of hooks. With one hook in the
         # record the attribution is certain; otherwise the message's own path is
         # the only thing that names which hook failed.
-        label = labels[0] if len(labels) == 1 else hook_label(error)
+        label = labels[0] if len(labels) == 1 else hook_error_label(error)
         bump(span.hooks, label, (0, 1, 0, 0), maxes=1)
 
 
@@ -742,13 +833,18 @@ def signature(span, use_id):
 
 def harvest_retro(span, rec, text):
     """The agent's own statement about the toolkit, keyed on the record's uuid so
-    re-deriving cannot duplicate it."""
+    re-deriving cannot duplicate it.
+
+    Read from the end: the required line is the last thing an agent writes, and
+    a `Retro:` earlier in the same block is something it quoted — a code fence,
+    a pasted digest — rather than something it said.
+    """
     if not isinstance(text, str) or "Retro" not in text:
         return
     uuid = rec.get("uuid")
     if not isinstance(uuid, str) or not uuid:
         return
-    for line in text.splitlines():
+    for line in reversed(text.splitlines()):
         hit = RETRO_LINE.match(line)
         if not hit:
             continue
@@ -813,10 +909,6 @@ class Bucket:
         for attr in ("tools", "verbs", "denials", "skills", "mcps"):
             for key, values in getattr(span, attr).items():
                 bump(getattr(self, attr), (agent,) + as_key(key), values)
-        for label, values in span.hooks.items():
-            # hook_run has no agent column: a hook fires for the session whoever
-            # was running, so an agent transcript's hook records merge in.
-            bump(self.hooks, (label,), values, maxes=1)
         for uuid, text, at in span.retro:
             self.retro.append((uuid, author, text, at))
         # A malformed line has nowhere else to be counted, whichever transcript
@@ -831,7 +923,13 @@ class Bucket:
 
     def absorb_main(self, span):
         """The session's own chain also carries the segment's scalars and the
-        hook records — an agent transcript has neither."""
+        hook records.
+
+        Hook records are the session's alone deliberately. `hook_run` has no
+        agent column, so a rebuild clears it whole and re-derives it from the
+        session file — and an agent transcript is never re-read on a rebuild, so
+        anything of its own in that table could never come back.
+        """
         self.absorb(span, "", "main")
         self.scalars["user_turns"] += span.user_turns
         self.scalars["wake_turns"] += span.wake_turns
@@ -843,6 +941,8 @@ class Bucket:
             ("tokens_in", "tokens_out", "cache_read", "cache_create")
         ):
             self.scalars[name] += span.tokens[i]
+        for label, values in span.hooks.items():
+            bump(self.hooks, (label,), values, maxes=1)
         self.version = span.version or self.version
         self.branch = span.branch or self.branch
         self.repo = self.repo or span.repo
@@ -915,17 +1015,28 @@ def plan(f, st, cur, since_epoch):
             # not just by convention.
             return "reparse", base, ordinal or 0, base, None
     head = head_of(f, size)
+    # An ordinal already reached is kept even when nothing here may be read: it
+    # is what the records this file gains next belong to, and starting again
+    # from 0 would put them in a segment that has already been closed.
+    reached = (cur[6] or 0) if cur is not None else 0
     if cur is None and st.st_mtime < since_epoch:
         # A transcript untouched since before the marker cannot hold a record
         # after it, so first contact stays cheap over an existing corpus.
-        return "preexisting", last_newline(f, size), 0, None, head
+        return "preexisting", last_newline(f, size), reached, None, head
     first = first_timestamp(f)
     if first is None or first < since_epoch:
         # Everything this file holds predates the marker. That is true whether
         # this is first contact or a replaced file being reparsed: reading it
         # from the start would be the backfill the marker exists to prevent.
-        return "preexisting", last_newline(f, size), 0, None, head
+        return "preexisting", last_newline(f, size), reached, None, head
     return "parse", 0, 0, 0, head
+
+
+def rebuilding(mode, cur):
+    """A rebuild is any pass that re-reads bytes an open segment already
+    counted, or replaces a file it counted from. Both have to clear what that
+    segment holds first, or the second pass doubles the first."""
+    return mode == "reparse" or (mode in ("parse", "preexisting") and cur is not None)
 
 
 def first_timestamp(f):
@@ -974,6 +1085,16 @@ def close_segment(db, segment_id, trigger, compact=None):
         ]
     values.append(segment_id)
     db.execute("UPDATE segment SET " + fields + " WHERE id=?", values)
+
+
+def drop_segments(db, segment_ids):
+    """Count segments whose own counts are gone for good. A segment cleared for
+    a rebuild that never reached it was derived from bytes no file holds any
+    more; the delegation rows survive, and this is what says the rest did not."""
+    if segment_ids:
+        meta_set(
+            db, "segments_dropped", meta_get(db, "segments_dropped") + len(segment_ids)
+        )
 
 
 def open_segments(db, session):
@@ -1075,7 +1196,7 @@ def write_bucket(db, segment_id, bucket, session, project, ordinal, compact=None
     return True
 
 
-def fold_fence(db, session_path, segment_id, bucket, agent_id, status):
+def fold_fence(db, session_path, segment_id, bucket, agent_id, status, rebuild):
     """One fence opens exactly one file, by name. Nothing is globbed, so an agent
     still running is never opened — nothing points at it until it stops."""
     if not AGENT_ID.match(agent_id):
@@ -1103,6 +1224,13 @@ def fold_fence(db, session_path, segment_id, bucket, agent_id, status):
     # An agent counts once per segment that fenced it, however many times that
     # segment stops it.
     first_seen = cur is None or cur[7] != segment_id
+    if rebuild and not first_seen:
+        # A rebuild re-delivers fences this segment already counted, and its
+        # agent_run row was kept precisely because it cannot be re-derived. If
+        # the agent has run on since, those bytes belong to a stop that has not
+        # been fenced yet — counting them here would read as a lane that went
+        # round twice.
+        return
     if cur is not None:
         _, inode, head_len, head_sha, offset, _, _, _, _ = cur
         with open(path, "rb") as f:
@@ -1176,15 +1304,11 @@ def sweep_transcript(db, path, project, since_epoch):
             # offset and consume the same span twice, which is the one error
             # that puts a wrong number in the store rather than no number.
             cur = get_cursor(db, path)
+            # The size every decision below rests on, read from the handle the
+            # scan itself reads: a stat taken before the transaction can
+            # describe a file another sweep has already moved past.
+            st = os.fstat(f.fileno())
             mode, start, ordinal, base, head = plan(f, st, cur, since_epoch)
-            if mode == "preexisting":
-                put_cursor(
-                    db,
-                    path,
-                    (None, st.st_ino, head[0], head[1], start, start, 0, None, None),
-                )
-                db.execute("COMMIT")
-                return
             closed = {
                 row[0]
                 for row in db.execute(
@@ -1193,24 +1317,47 @@ def sweep_transcript(db, path, project, since_epoch):
                 )
             }
             cleared = []
-            if mode == "reparse" or (mode == "parse" and cur is not None):
-                # Only a rebuild clears: whatever the open segment held came
-                # from a span about to be read again, or from a file that no
-                # longer holds it. A resume adds to what is there.
+            if rebuilding(mode, cur):
+                # Whatever the open segment held came from a span about to be
+                # read again, or from a file that no longer holds it. A resume
+                # adds to what is there, so it never clears.
                 cleared = open_segments(db, session)
                 clear_open(db, cleared)
-            consumed, last_ts, ordinal, base, segment_id, seen = scan_session(
-                db, f, path, session, project, start, ordinal, base, closed
-            )
-            lost = [s for s in cleared if s not in seen]
-            if lost:
-                # A segment whose ordinal came from an idle close cannot be
-                # re-derived from a file that was replaced, so its own counts
-                # are gone. The delegation rows survive; the count is what says
-                # the rest did not.
-                meta_set(
-                    db, "segments_dropped", meta_get(db, "segments_dropped") + len(lost)
+            if mode == "preexisting":
+                # Nothing here may be read, so the open segment keeps only what
+                # an agent gave it. Its id stays on the cursor: parking a null
+                # one would send the next append into a closed segment.
+                drop_segments(db, cleared)
+                put_cursor(
+                    db,
+                    path,
+                    (
+                        None,
+                        st.st_ino,
+                        head[0],
+                        head[1],
+                        start,
+                        start,
+                        ordinal,
+                        cur[7] if cur is not None else None,
+                        None,
+                    ),
                 )
+                db.execute("COMMIT")
+                return
+            consumed, last_ts, ordinal, base, segment_id, seen = scan_session(
+                db,
+                f,
+                path,
+                session,
+                project,
+                start,
+                ordinal,
+                base,
+                closed,
+                bool(cleared),
+            )
+            drop_segments(db, [s for s in cleared if s not in seen])
             put_cursor(
                 db,
                 path,
@@ -1238,7 +1385,7 @@ def sweep_transcript(db, path, project, since_epoch):
             raise
 
 
-def scan_session(db, f, path, session, project, start, ordinal, base, closed):
+def scan_session(db, f, path, session, project, start, ordinal, base, closed, rebuild):
     """Consume a span of a session transcript. Returns (offset, last timestamp,
     ordinal, the offset the open segment began at, its id, and the ids written)."""
     consumed = start
@@ -1273,7 +1420,7 @@ def scan_session(db, f, path, session, project, start, ordinal, base, closed):
             span, bucket = Span(), Bucket()
         elif active:
             try:
-                fold_fence(db, path, segment_id, bucket, event[1], event[2])
+                fold_fence(db, path, segment_id, bucket, event[1], event[2], rebuild)
             except (OSError, ValueError):
                 # One agent transcript that will not read costs its own fence,
                 # not the session file it was named in. Nothing is written for
@@ -1416,8 +1563,11 @@ def take_lock():
     """
     mine = "%s.%d" % (LOCK_PATH, os.getpid())
     try:
-        with open(mine, "w") as f:
-            f.write(str(os.getpid()))
+        fd = os.open(mine, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, str(os.getpid()).encode())
+        finally:
+            os.close(fd)
     except OSError:
         return False
     try:
@@ -1433,13 +1583,30 @@ def take_lock():
                 except OSError:
                     return False
             except OSError:
-                return False
+                # No hardlinks on this filesystem. The window this closes is a
+                # lock file that momentarily reads as empty; a store that cannot
+                # link at all would otherwise never sweep again, which is worse.
+                return take_lock_direct()
         return False
     finally:
         try:
             os.unlink(mine)
         except OSError:
             pass
+
+
+def take_lock_direct():
+    try:
+        fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    except OSError:
+        return False
+    try:
+        os.write(fd, str(os.getpid()).encode())
+    finally:
+        os.close(fd)
+    return True
 
 
 def release_lock():
@@ -1618,15 +1785,21 @@ def digest(db, everything):
         parts.append("%d lines would not parse" % short_of[0])
     if short_of and short_of[1]:
         parts.append("%d agent stops had no readable transcript" % short_of[1])
+    if parts:
+        out.append("    incomplete: " + ", ".join(parts))
+    # These belong to the store, not to the window: neither is scoped to a
+    # segment, and saying so stops a drop from last spring reading as one from
+    # the fortnight under review.
+    ever = []
     for key, phrase in (
-        ("transcripts_failed", "%d transcripts could not be swept"),
+        ("transcripts_failed", "%d transcripts would not sweep"),
         ("segments_dropped", "%d segments could not be rebuilt"),
     ):
         count = meta_get(db, key)
         if count:
-            parts.append(phrase % count)
-    if parts:
-        out.append("    incomplete: " + ", ".join(parts))
+            ever.append(phrase % count)
+    if ever:
+        out.append("    store, all time: " + ", ".join(ever))
 
     out.append("")
     out.append("Delegation")
