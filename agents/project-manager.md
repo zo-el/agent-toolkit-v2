@@ -57,4 +57,4 @@ Self-contained — nobody sees your transcript:
 - The change table (pre-update), or what landed (post-approval).
 - Anything where the board and reality disagree, and which one you believe.
 - Work that merged with no issue behind it.
-- `Retro:` one line, only if there is a real toolkit learning.
+- `Retro:` one line, or `Retro: none`. Never left off — it is recorded, not transcribed.
