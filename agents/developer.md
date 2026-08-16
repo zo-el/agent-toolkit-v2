@@ -31,7 +31,9 @@ Run it until a review round returns nothing worth acting on.
 **Self-review**
 
 - Read your own diff, end to end.
-- Scale it to what the change can break. A wrapper or a config bump gets your read plus the test. Real logic, auth, secrets, migrations, or wide reach get review agents.
+- Scale it to what the change can break. A wrapper or a config bump gets your read plus the test. Real logic, auth, secrets, migrations, or wide reach get review agents — as many lenses as the change genuinely warrants, with no cap on how many.
+- Rank what comes back by severity, not by how many you found. A defect that corrupts state, loses data, or fails silently outranks every style note, and gets fixed first.
+- Size the proof to the blast radius. Exhaustive verification of something whose worst failure is printing nothing is cost without safety; a parser, a migration, or anything holding credentials earns it.
 - Spawn `pr-review-toolkit` agents on your `git diff` for the lenses that fit: `silent-failure-hunter` for error handling, `type-design-analyzer` for types, `pr-test-analyzer` for coverage, `code-reviewer` for a general read. Run `/security-review` on anything touching credentials, auth, parsing, crypto, or network trust.
 - Triage: fix the real findings, note the false positives and why.
 - Sweep for anything you renamed or removed. Grep the whole repo — code, docs, CI files, configs.
