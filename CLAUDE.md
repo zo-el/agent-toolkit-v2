@@ -149,7 +149,7 @@ Say so and ask which wins, before acting on either reading. Quote the line and s
 
 - Structure files and folders so the shape of the codebase is obvious from the tree.
 - The code is the documentation. Never comment what the code already says.
-- Comment the **why** when it isn't obvious — short, and complete on the why.
+- Comment the **why** when it isn't obvious — short, and complete on the why. The why is the constraint that holds now, never how it was found: no "X was tried and dropped", no count of the bugs that shipped here, no mutation-testing or review archaeology. A decision that must outlive you names the condition that would flip it, not the story behind it.
 - Comment what you skipped on purpose: security cases, edge cases, code left unoptimized.
 - No repeated functions. Generalise what gets reused.
 - Readable and maintainable first. Optimise where it pays, not where it costs clarity.
