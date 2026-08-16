@@ -176,6 +176,10 @@ SPLIT_PARTS = re.compile(r"&&|\|\||;|\|")
 RETRO_LINE = re.compile(r"^\s*\*{0,2}Retro\*{0,2}\s*:\s*(.*)$")
 TASK_ID = re.compile(r"<task-id>([^<]*)</task-id>")
 TASK_STATUS = re.compile(r"<status>([^<]*)</status>")
+# An agent id is read out of transcript text and then spells a filename, so it
+# is checked before it is one. Real ids are hex; anything with a separator in it
+# is not an id, and a fence naming one is not a fence.
+AGENT_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 # ── small shared helpers ─────────────────────────────────────────────────────
@@ -961,6 +965,8 @@ def write_bucket(db, segment_id, bucket, session, project, ordinal, compact=None
 def fold_fence(db, session_path, segment_id, bucket, agent_id, status):
     """One fence opens exactly one file, by name. Nothing is globbed, so an agent
     still running is never opened — nothing points at it until it stops."""
+    if not AGENT_ID.match(agent_id):
+        return
     base = os.path.join(os.path.splitext(session_path)[0], "subagents")
     meta = read_json(os.path.join(base, "agent-%s.meta.json" % agent_id))
     path = os.path.join(base, "agent-%s.jsonl" % agent_id)

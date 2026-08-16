@@ -920,6 +920,15 @@ mkdir -p "$SUB/agent-broken.jsonl"
 cat > "$SUB/agent-broken.meta.json" <<'JSON'
 {"agentType":"project-manager","description":"its transcript will not open","toolUseId":"tu7","spawnDepth":1}
 JSON
+# The whole path an id could traverse, laid out and readable: a real agent-x
+# directory to climb out of, and a transcript and meta file at the far end,
+# outside anything the sweep walks. Only the check on the id itself is between
+# the notification below and this file.
+mkdir -p "$SUB/agent-x"
+cat > "$RP/escaped.jsonl" <<'JSON'
+{"type":"assistant","uuid":"esc","isSidechain":true,"timestamp":"2026-08-14T13:02:55.000Z","message":{"id":"escm","content":[{"type":"tool_use","id":"esct","name":"Bash","input":{"command":"whoami"}}]}}
+JSON
+printf '{"agentType":"escaped","spawnDepth":1}\n' > "$RP/escaped.meta.json"
 cat > "$SUB/agent-running.jsonl" <<'JSON'
 {"type":"assistant","uuid":"z1","isSidechain":true,"timestamp":"2026-08-14T13:05:00.000Z","message":{"id":"z1m","content":[{"type":"tool_use","id":"zz","name":"Read","input":{}}]}}
 JSON
@@ -935,6 +944,7 @@ cat > "$RP/beta/s-agents.jsonl" <<'JSON'
 {"type":"queue-operation","operation":"enqueue","timestamp":"2026-08-14T13:02:20.000Z","content":"<task-notification>\n<task-id>bgcmd</task-id>\n<status>completed</status>\n</task-notification>"}
 {"type":"user","origin":{"kind":"task-notification"},"timestamp":"2026-08-14T13:02:30.000Z","message":{"role":"user","content":"<task-notification>\n<task-id>lost</task-id>\n<status>failed</status>\n</task-notification>"}}
 {"type":"user","origin":{"kind":"task-notification"},"timestamp":"2026-08-14T13:02:40.000Z","message":{"role":"user","content":"<task-notification>\n<task-id>broken</task-id>\n<status>completed</status>\n</task-notification>"}}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-08-14T13:02:50.000Z","content":"<task-notification>\n<task-id>x/../../../../escaped</task-id>\n<status>completed</status>\n</task-notification>"}
 {"type":"queue-operation","operation":"enqueue","timestamp":"2026-08-14T13:03:10.000Z","content":"<task-notification>\n<task-id>nometa</task-id>\n<status>completed</status>\n</task-notification>"}
 {"type":"user","timestamp":"2026-08-14T13:04:10.000Z","toolUseResult":{"agentId":"sync3","status":"completed","agentType":"researcher","totalTokens":99,"content":"CANARYSYNCCONTENT"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu5","content":"done"}]}}
 {"type":"assistant","uuid":"s9","timestamp":"2026-08-14T13:05:00.000Z","message":{"id":"sm9","content":[{"type":"tool_use","id":"tu9","name":"Bash","input":{"command":"git commit -m CANARYCOMMITMSG"}}]}}
@@ -958,6 +968,10 @@ sql "a synchronous result is a fence like any other" "1|1" \
   "SELECT n,tool_uses FROM agent_run WHERE segment_id='s-agents#0' AND agent_type='researcher'"
 sql "a task with no meta file and no transcript is a background command" "0" \
   "SELECT count(*) FROM cursor WHERE path LIKE '%bgcmd%'"
+sql "an agent id that is a path is not an id" "0" \
+  "SELECT count(*) FROM cursor WHERE path LIKE '%escaped%'"
+sql "and it fences nothing" "0" \
+  "SELECT count(*) FROM agent_run WHERE agent_type='escaped'"
 # One fence whose transcript is missing, one whose transcript will not open.
 # Neither may cost the session file it was named in.
 sql "a fence with no readable transcript is counted as lost" "2" \
