@@ -681,17 +681,29 @@ retro() { HOME="$RH" python3 "$ROOT/hooks/retro.py" "$@" </dev/null 2>"$TMP/retr
 dbq()   { HOME="$RH" python3 "$TMP/dbq.py" "$1" 2>/dev/null; }
 eq()    { [ "$2" = "$3" ] && ok "$1" || bad "$1" "expected '$2', got '${3:-<empty>}'"; }
 sql()   { eq "$1" "$2" "$(dbq "$3")"; }
-# Everything a sweep may write, in one string: what "changes not one row" means.
-state() {
-  dbq "SELECT id,started_at,ended_at,closed_seq,close_trigger,compact_trigger,dropped_tokens,
-              user_turns,wake_turns,assistant_turns,tokens_in,tool_errors,malformed_lines,
-              agent_fences_lost FROM segment ORDER BY id"
-  dbq "SELECT segment_id,agent,tool,n,errors FROM tool_use ORDER BY 1,2,3"
-  dbq "SELECT segment_id,agent,verb,n,errors FROM bash_verb ORDER BY 1,2,3"
-  dbq "SELECT segment_id,agent_type,status,spawn_depth,n,agents,tokens_in,tool_uses FROM agent_run ORDER BY 1,2,4"
-  dbq "SELECT segment_id,agent,skill,n FROM skill_use ORDER BY 1,2,3"
-  dbq "SELECT source_uuid,segment_id,author,text FROM retro_line ORDER BY 1"
-}
+# Every row of every table, read from the schema rather than from a list here:
+# what "changes not one row" means, and a table or column added tomorrow is
+# covered the day it lands rather than the day someone remembers.
+cat > "$TMP/dbstate.py" <<'PY'
+import os, sqlite3, sys
+
+skip = set(sys.argv[1:])
+db = sqlite3.connect(os.path.join(os.path.expanduser("~"), ".claude", "retro", "retro.db"))
+tables = [r[0] for r in db.execute(
+    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+for table in tables:
+    if table in skip:
+        continue
+    cols = [c[1] for c in db.execute("PRAGMA table_info(%s)" % table)]
+    cols = [c for c in cols if c != "inode"]   # changes with every fixture rewrite
+    rows = db.execute("SELECT %s FROM %s ORDER BY %s" % (",".join(cols), table, ",".join(cols)))
+    for row in rows:
+        print(table, "|".join("" if v is None else str(v) for v in row))
+PY
+state()   { HOME="$RH" python3 "$TMP/dbstate.py" 2>/dev/null; }
+# Everything but the cursor, for the cases where the transcript itself was
+# rewritten and the cursor is supposed to move.
+figures() { HOME="$RH" python3 "$TMP/dbstate.py" cursor 2>/dev/null; }
 
 # A session that does its own work: two Bash verbs in one command, a failed Edit
 # a denial refers back to, an MCP call, a hook summary, a boundary, and a retro
@@ -704,6 +716,9 @@ cat > "$RP/alpha/s-main.jsonl" <<'JSON'
 {"type":"user","timestamp":"2026-08-14T10:00:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"boom"}]}}
 {"type":"assistant","uuid":"a2","timestamp":"2026-08-14T10:00:03.000Z","message":{"id":"m2","usage":{"input_tokens":1,"output_tokens":2},"content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"/repo/alpha/x.py"}}]}}
 {"type":"user","timestamp":"2026-08-14T10:00:04.000Z","toolDenialKind":"user-rejected","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","is_error":true,"content":"denied"}]}}
+{"type":"assistant","uuid":"a2b","isSidechain":true,"timestamp":"2026-08-14T10:00:04.500Z","message":{"id":"m2b","usage":{"input_tokens":999,"output_tokens":999},"content":[{"type":"tool_use","id":"t2b","name":"Bash","input":{"command":"echo sidechain"}}]}}
+{"type":"assistant","uuid":"a2c","timestamp":"2026-08-14T10:00:04.600Z","message":{"id":"m2c","content":[{"type":"tool_use","id":"t2c","name":"Bash","input":{"command":"git push origin main"}}]}}
+{"type":"user","timestamp":"2026-08-14T10:00:04.700Z","toolDenialKind":"permission-rule","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2c","is_error":true,"content":"blocked"}]}}
 {"type":"assistant","uuid":"a3","timestamp":"2026-08-14T10:00:05.000Z","message":{"id":"m3","content":[{"type":"tool_use","id":"t3","name":"mcp__linear__save_issue","input":{}}]}}
 {"type":"user","timestamp":"2026-08-14T10:00:06.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t3","content":"ok"}]}}
 {"type":"system","subtype":"turn_duration","durationMs":1200,"timestamp":"2026-08-14T10:00:07.000Z"}
@@ -726,13 +741,13 @@ sql "records after the boundary open the next segment" "s-main#1|1" \
   "SELECT id,ordinal FROM segment WHERE session_id='s-main' AND closed_seq IS NULL"
 sql "the segment carries where and when it ran" "alpha|main|2.1.232|2026-08-14T10:00:00.000Z" \
   "SELECT repo,branch,cli_version,started_at FROM segment WHERE id='s-main#0'"
-sql "turns are split by who took them" "1|0|4|1200|1200" \
+sql "turns are split by who took them" "1|0|5|1200|1200" \
   "SELECT user_turns,wake_turns,assistant_turns,turn_ms_total,turn_ms_max FROM segment WHERE id='s-main#0'"
 # One response is written as one record per content block, all with the same
 # message id and the same usage: summing per record would double every figure.
 sql "usage is summed once per message, not per record" "11|22|30|40" \
   "SELECT tokens_in,tokens_out,cache_read,cache_create FROM segment WHERE id='s-main#0'"
-sql "failed results are counted" "2" "SELECT tool_errors FROM segment WHERE id='s-main#0'"
+sql "failed results are counted" "3" "SELECT tool_errors FROM segment WHERE id='s-main#0'"
 sql "a tool use carries its own errors" "1|1" \
   "SELECT n,errors FROM tool_use WHERE segment_id='s-main#0' AND agent='' AND tool='Edit'"
 sql "a driver keeps its subcommand" "1|1" \
@@ -741,6 +756,17 @@ sql "a compound command counts every part" "1|1" \
   "SELECT n,errors FROM bash_verb WHERE segment_id='s-main#0' AND agent='' AND verb='npm install'"
 sql "a denial names the tool it was for" "1" \
   "SELECT n FROM denial WHERE segment_id='s-main#0' AND kind='user-rejected' AND signature='Edit'"
+# "Which permission prompt keeps firing" is a question about commands, so a
+# denied Bash is signed with its verb rather than with the word Bash.
+sql "a denied command is signed with its verb" "1" \
+  "SELECT n FROM denial WHERE segment_id='s-main#0' AND kind='permission-rule' AND signature='git push'"
+# A sidechain record in a session transcript is an agent's own work, counted in
+# the agent's transcript. Counting it here too would read as delegation that
+# never happened — and its tokens are deliberately absurd so a leak is obvious.
+sql "a sidechain record in a session transcript is skipped" "0" \
+  "SELECT count(*) FROM bash_verb WHERE segment_id='s-main#0' AND verb='echo'"
+sql "and its tokens stay out of the segment" "11" \
+  "SELECT tokens_in FROM segment WHERE id='s-main#0'"
 sql "an mcp call names its server" "1" \
   "SELECT n FROM mcp_use WHERE segment_id='s-main#0' AND server='linear'"
 sql "a hook is labelled, not quoted" "1|30|30" \
@@ -800,7 +826,7 @@ sql "a malformed line is counted, not fatal" "1|1" \
 
 # A transcript whose head changed is a different file under the same name: the
 # open segment is rebuilt from scratch, and the closed one is left alone.
-state > "$TMP/retro.before"
+figures > "$TMP/retro.before"
 python3 - "$RP/alpha/s-main.jsonl" <<'PY'
 import sys
 
@@ -810,7 +836,7 @@ lines[0] = lines[0].replace('"go"', '"go on then"')
 open(path, "w").write("".join(lines))
 PY
 retro record >/dev/null
-sql "a reparse leaves the closed segment untouched" "compact|1|4|11" \
+sql "a reparse leaves the closed segment untouched" "compact|1|5|11" \
   "SELECT close_trigger,user_turns,assistant_turns,tokens_in FROM segment WHERE id='s-main#0'"
 sql "a reparse rebuilds the open segment without doubling it" "5|1" \
   "SELECT assistant_turns,(SELECT n FROM tool_use WHERE segment_id='s-main#1' AND tool='Write') FROM segment WHERE id='s-main#1'"
@@ -838,6 +864,15 @@ sql "an old transcript contributes only what it gains after first contact" "1" \
   "SELECT n FROM bash_verb WHERE segment_id='s-ancient#0' AND verb='cargo test'"
 sql "and nothing it held before it" "0" \
   "SELECT count(*) FROM bash_verb WHERE segment_id='s-ancient#0' AND verb='ls'"
+# The mtime shortcut parks a cursor without reading a byte, so the proof that it
+# parked at the end rather than the start is what the next sweep does.
+cat >> "$RP/alpha/s-untouched.jsonl" <<'JSON'
+{"type":"assistant","uuid":"u2","timestamp":"2026-08-14T11:30:00.000Z","message":{"id":"mu2","content":[{"type":"tool_use","id":"u2t","name":"Bash","input":{"command":"terraform apply"}}]}}
+JSON
+retro record >/dev/null
+sql "a transcript parked by its mtime gains only what comes after" "1|0" \
+  "SELECT (SELECT n FROM bash_verb WHERE segment_id='s-untouched#0' AND verb='terraform apply'),
+          (SELECT count(*) FROM segment WHERE id='s-untouched#0' AND user_turns > 0)"
 
 # A second sweep, while one is running, is the same work: it must not do it
 # twice. $$ is this shell, which is alive, so the lock is not stale.
@@ -851,9 +886,30 @@ state > "$TMP/retro.after"
 { [ "$rc" = 0 ] && cmp -s "$TMP/retro.before" "$TMP/retro.after"; } \
   && ok "a second concurrent sweep exits 0 and writes nothing" \
   || bad "a second concurrent sweep exits 0 and writes nothing" "exit $rc"
+# A sweep that was killed leaves its lock behind, and nothing else ever removes
+# it: without both steals the recorder goes silent for good, exit 0, no output.
+printf '%s' "$$" > "$RH/.claude/retro/sweep.lock"
+touch -d '30 minutes ago' "$RH/.claude/retro/sweep.lock"
+retro record >/dev/null
+sql "a lock older than ten minutes is stolen" "1" \
+  "SELECT n FROM tool_use WHERE segment_id='s-main#1' AND tool='Task'"
+[ ! -e "$RH/.claude/retro/sweep.lock" ] && ok "and the sweep that stole it cleans up" \
+  || bad "and the sweep that stole it cleans up" "the lock is still there"
+# A pid that no longer exists is the same condition, whatever the mtime says.
+printf '4294967295' > "$RH/.claude/retro/sweep.lock"
+cat >> "$RP/alpha/s-main.jsonl" <<'JSON'
+{"type":"assistant","uuid":"a21","timestamp":"2026-08-14T10:21:00.000Z","message":{"id":"m21","content":[{"type":"tool_use","id":"t21","name":"Monitor","input":{}}]}}
+JSON
+retro record >/dev/null
+sql "a lock naming a dead process is stolen" "1" \
+  "SELECT n FROM tool_use WHERE segment_id='s-main#1' AND tool='Monitor'"
 rm -f "$RH/.claude/retro/sweep.lock"
 
 # --interval is the whole scheduling mechanism, so it has to actually gate.
+cat >> "$RP/alpha/s-main.jsonl" <<'JSON'
+{"type":"assistant","uuid":"a22","timestamp":"2026-08-14T10:22:00.000Z","message":{"id":"m22","content":[{"type":"tool_use","id":"t22","name":"WebSearch","input":{}}]}}
+JSON
+state > "$TMP/retro.before"
 retro record --interval 3600 >/dev/null
 state > "$TMP/retro.after"
 cmp -s "$TMP/retro.before" "$TMP/retro.after" \
@@ -861,7 +917,7 @@ cmp -s "$TMP/retro.before" "$TMP/retro.after" \
   || bad "--interval does no work twice inside its window" "it swept anyway"
 retro record >/dev/null
 sql "and the next sweep past the window catches up" "1" \
-  "SELECT n FROM tool_use WHERE segment_id='s-main#1' AND tool='Task'"
+  "SELECT n FROM tool_use WHERE segment_id='s-main#1' AND tool='WebSearch'"
 
 # One transcript that will not open must not cost the rest of the sweep. Root
 # reads a chmod 000 file regardless, so the assertion is skipped there.
@@ -888,10 +944,19 @@ SUB="$RP/beta/s-agents/subagents"
 cat > "$SUB/agent-dev1.meta.json" <<'JSON'
 {"agentType":"developer","description":"CANARYMETADESC","toolUseId":"tu1","spawnDepth":1}
 JSON
-cat > "$SUB/agent-dev1.jsonl" <<'JSON'
-{"type":"assistant","uuid":"d1","isSidechain":true,"timestamp":"2026-08-14T13:00:00.000Z","message":{"id":"n1","usage":{"input_tokens":100,"output_tokens":200},"content":[{"type":"tool_use","id":"u1","name":"Edit","input":{}}]}}
+# A skill's run is several records long and not every one of them is
+# attributed, so an activation is counted where the run starts and nowhere
+# else. The retro line is longer than the cap it is stored under.
+cat > "$SUB/agent-dev1.jsonl" <<JSON
+{"type":"assistant","uuid":"d1","isSidechain":true,"attributionSkill":"ui-review","timestamp":"2026-08-14T13:00:00.000Z","message":{"id":"n1","usage":{"input_tokens":100,"output_tokens":200},"content":[{"type":"tool_use","id":"u1","name":"Edit","input":{}}]}}
+{"type":"assistant","uuid":"d1b","isSidechain":true,"attributionSkill":"ui-review","timestamp":"2026-08-14T13:00:10.000Z","message":{"id":"n1b","content":[{"type":"text","text":"still in the skill"}]}}
+{"type":"assistant","uuid":"d1c","isSidechain":true,"timestamp":"2026-08-14T13:00:20.000Z","message":{"id":"n1c","content":[{"type":"text","text":"a turn the skill did not attribute"}]}}
+{"type":"assistant","uuid":"d1d","isSidechain":true,"attributionSkill":"ui-review","timestamp":"2026-08-14T13:00:25.000Z","message":{"id":"n1d","content":[{"type":"text","text":"and back inside it"}]}}
 {"type":"assistant","uuid":"d2","isSidechain":true,"timestamp":"2026-08-14T13:00:30.000Z","message":{"id":"n2","content":[{"type":"tool_use","id":"u2","name":"Bash","input":{"command":"cargo test --all CANARYBASHARG"}}]}}
-{"type":"assistant","uuid":"d3","isSidechain":true,"attributionSkill":"ui-review","timestamp":"2026-08-14T13:01:00.000Z","message":{"id":"n3","content":[{"type":"text","text":"Retro: none"}]}}
+{"type":"assistant","uuid":"d2b","isSidechain":true,"attributionSkill":"backlog","timestamp":"2026-08-14T13:00:40.000Z","message":{"id":"n2b","content":[{"type":"text","text":"a different skill"}]}}
+{"type":"assistant","uuid":"d2c","isSidechain":true,"attributionSkill":"ui-review","timestamp":"2026-08-14T13:00:50.000Z","message":{"id":"n2c","content":[{"type":"text","text":"and the first one again"}]}}
+{"type":"assistant","uuid":"d4","isSidechain":true,"timestamp":"2026-08-14T13:00:55.000Z","message":{"id":"n4","content":[{"type":"text","text":"Retro: $(printf 'w%.0s' $(seq 600))"}]}}
+{"type":"assistant","uuid":"d3","isSidechain":true,"timestamp":"2026-08-14T13:01:00.000Z","message":{"id":"n3","content":[{"type":"text","text":"Retro: none"}]}}
 JSON
 cat > "$SUB/agent-rev2.meta.json" <<'JSON'
 {"agentType":"pr-review-toolkit:code-reviewer","description":"nested","toolUseId":"tu2","parentAgentId":"dev1","spawnDepth":2}
@@ -948,6 +1013,10 @@ cat > "$RP/beta/s-agents.jsonl" <<'JSON'
 {"type":"queue-operation","operation":"enqueue","timestamp":"2026-08-14T13:03:10.000Z","content":"<task-notification>\n<task-id>nometa</task-id>\n<status>completed</status>\n</task-notification>"}
 {"type":"user","timestamp":"2026-08-14T13:04:10.000Z","toolUseResult":{"agentId":"sync3","status":"completed","agentType":"researcher","totalTokens":99,"content":"CANARYSYNCCONTENT"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu5","content":"done"}]}}
 {"type":"assistant","uuid":"s9","timestamp":"2026-08-14T13:05:00.000Z","message":{"id":"sm9","content":[{"type":"tool_use","id":"tu9","name":"Bash","input":{"command":"git commit -m CANARYCOMMITMSG"}}]}}
+{"type":"assistant","uuid":"s11","timestamp":"2026-08-14T13:05:02.000Z","message":{"id":"sm11","content":[{"type":"tool_use","id":"tu11","name":"Bash","input":{"command":"grep -rn 'alpha|CANARYPIPEARG|beta' src/"}}]}}
+{"type":"assistant","uuid":"s12","timestamp":"2026-08-14T13:05:03.000Z","message":{"id":"sm12","content":[{"type":"tool_use","id":"tu12","name":"Bash","input":{"command":"cat > cfg.rs << 'EOF'\n  let key = CANARYHEREDOC;\n  run(); other();\nEOF"}}]}}
+{"type":"system","subtype":"stop_hook_summary","timestamp":"2026-08-14T13:05:04.000Z","hookInfos":[{"command":"please audit /srv/reports/CANARYPROSEPATH and report back","durationMs":3}],"hookErrors":[]}
+{"type":"system","subtype":"stop_hook_summary","timestamp":"2026-08-14T13:05:05.000Z","hookInfos":[{"command":"bash /opt/a/first.sh","durationMs":2},{"command":"bash /opt/b/second.sh","durationMs":2}],"hookErrors":["/opt/b/second.sh: not found"]}
 {"type":"user","timestamp":"2026-08-14T13:05:01.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu9","content":"ok"}]}}
 JSON
 retro record >/dev/null
@@ -976,7 +1045,7 @@ sql "and it fences nothing" "0" \
 # Neither may cost the session file it was named in.
 sql "a fence with no readable transcript is counted as lost" "2" \
   "SELECT agent_fences_lost FROM segment WHERE id='s-agents#0'"
-sql "and the session file it was named in still lands" "1" \
+sql "and the session file it was named in still lands" "3" \
   "SELECT n FROM tool_use WHERE segment_id='s-agents#0' AND agent='' AND tool='Bash'"
 sql "and it counts no stop" "0" \
   "SELECT count(*) FROM agent_run WHERE segment_id='s-agents#0' AND agent_type='reviewer'"
@@ -990,19 +1059,50 @@ sql "an agent's edits are attributed to it" "developer|1" \
   "SELECT agent,n FROM tool_use WHERE segment_id='s-agents#0' AND tool='Edit'"
 sql "an agent's retro line carries its type as author" "developer|" \
   "SELECT author,IFNULL(text,'') FROM retro_line WHERE source_uuid='d3'"
-sql "a skill an agent loaded is recorded against it" "1" \
+# Two activations, not four: the run survives a turn it did not attribute, and
+# starts again only when another skill has been in between.
+sql "a skill an agent loaded is recorded against it" "2" \
   "SELECT n FROM skill_use WHERE segment_id='s-agents#0' AND agent='developer' AND skill='ui-review'"
+sql "and the skill that interrupted it is its own" "1" \
+  "SELECT n FROM skill_use WHERE segment_id='s-agents#0' AND agent='developer' AND skill='backlog'"
+# A retro line is a line, not a report: the cap is what keeps it one.
+sql "a long retro line is cut to the cap" "500" \
+  "SELECT length(text) FROM retro_line WHERE source_uuid='d4'"
 
 # The privacy boundary. Every field named in the spec's "read past but never
 # stored" table is planted with a canary; a driver's subcommand is captured by
 # design, so the bash canary sits where an argument sits.
+# Every canary sits where a real leak was found or would hide: a separator
+# inside a quoted argument, a heredoc body, a path inside prompt prose, and
+# every field of the spec's "read past but never stored" table.
 leaked=""
 for c in CANARYPROMPT CANARYDESCASYNC CANARYSYNCCONTENT CANARYSUMMARY CANARYRESULT \
-         CANARYMETADESC CANARYBASHARG CANARYCOMMITMSG CANARYHOOKPROSE CANARYRETROPROSE; do
+         CANARYMETADESC CANARYBASHARG CANARYCOMMITMSG CANARYHOOKPROSE CANARYRETROPROSE \
+         CANARYPIPEARG CANARYHEREDOC CANARYPROSEPATH; do
   grep -qa "$c" "$RH"/.claude/retro/retro.db* 2>/dev/null && leaked="$leaked $c"
 done
 [ -z "$leaked" ] && ok "no prompt, brief, report or argument reaches the store" \
                  || bad "no prompt, brief, report or argument reaches the store" "found:$leaked"
+
+# A quoted argument is one token however many separators it holds, and a heredoc
+# body is a file being written rather than commands being run.
+sql "a separator inside a quoted argument is not a command" "1" \
+  "SELECT n FROM bash_verb WHERE segment_id='s-agents#0' AND agent='' AND verb='grep'"
+sql "a heredoc body is not a command either" "1" \
+  "SELECT n FROM bash_verb WHERE segment_id='s-agents#0' AND agent='' AND verb='cat'"
+# The one argument the store does keep, stated rather than assumed: a driver's
+# subcommand, which is what tells a read from a publish.
+sql "a driver's subcommand is kept, by design" "1" \
+  "SELECT n FROM bash_verb WHERE segment_id='s-agents#0' AND agent='' AND verb='git commit'"
+# hookInfos sometimes holds the user's prompt. A path inside prose is still
+# prompt text, so only a script name is ever a label.
+sql "a path inside prompt prose is not a hook label" "0" \
+  "SELECT count(*) FROM hook_run WHERE segment_id='s-agents#0' AND hook LIKE '%CANARY%'"
+# With one hook in the record the attribution is certain; with two, only the
+# error message names which failed.
+sql "an error among several hooks lands on the one it names" "0|1" \
+  "SELECT (SELECT errors FROM hook_run WHERE segment_id='s-agents#0' AND hook='first.sh'),
+          (SELECT errors FROM hook_run WHERE segment_id='s-agents#0' AND hook='second.sh')"
 
 # A stdin payload is drained and discarded, never read.
 printf '{"session_id":"x","prompt_text":"CANARYSTDIN"}' > "$TMP/retro.payload"
@@ -1013,7 +1113,7 @@ grep -qa CANARYSTDIN "$RH"/.claude/retro/retro.db* 2>/dev/null \
 
 # Rebuilding a segment must re-read every agent it fenced, from where that
 # segment first found it: not doubled, and not lost.
-state > "$TMP/retro.before"
+figures > "$TMP/retro.before"
 python3 - "$RP/beta/s-agents.jsonl" <<'PY'
 import sys
 
@@ -1023,7 +1123,7 @@ lines[0] = lines[0].replace('"delegate it"', '"delegate all of it"')
 open(path, "w").write("".join(lines))
 PY
 retro record >/dev/null
-state > "$TMP/retro.after"
+figures > "$TMP/retro.after"
 cmp -s "$TMP/retro.before" "$TMP/retro.after" \
   && ok "a reparse reproduces the identical delegation figures" \
   || bad "a reparse reproduces the identical delegation figures" \
@@ -1093,11 +1193,15 @@ check "the count of none answers is beside them" "answered none: 1" "$digest"
 # A figure that is short because something would not read has to say so, or the
 # digest reads as complete when it is not.
 check "the digest owns up to what it could not read" \
-  "incomplete: 2 agent stops had no transcript" "$digest"
-case "$digest" in
-  *"only closed segments"*|*"s-main#1"*) bad "the window holds closed segments only" "an open segment is in it" ;;
-  *) ok "the window holds closed segments only" ;;
-esac
+  "incomplete: 2 agent stops had no readable transcript" "$digest"
+# Only closed segments are reviewable, and the store has open ones: the count
+# the digest names has to be the closed count and not the total.
+eq "the window holds closed segments only" \
+  "$(dbq "SELECT count(*) FROM segment WHERE closed_seq IS NOT NULL")" \
+  "$(printf '%s' "$digest" | sed -n 's/.*segments \([0-9]*\) · projects.*/\1/p')"
+[ "$(dbq "SELECT count(*) FROM segment WHERE closed_seq IS NULL")" -gt 0 ] \
+  && ok "with open segments in the store to leave out" \
+  || bad "with open segments in the store to leave out" "every segment is closed, so this proves nothing"
 
 # Reading the digest through a pager closes the pipe early, and the flush the
 # interpreter does after every guard has gone out of scope must not raise.
@@ -1107,8 +1211,19 @@ HOME="$RH" python3 "$ROOT/hooks/retro.py" review </dev/null 2>"$TMP/retro.err" |
   || bad "a digest read through a pager is a clean exit" \
          "exit ${PIPESTATUS[0]}, stderr: $(cat "$TMP/retro.err")"
 
+# Accepting is what hides a window, permanently and with no undo, so a value
+# nobody could have reviewed is refused rather than taken.
 seq="$(dbq "SELECT MAX(closed_seq) FROM segment")"
-retro review --accept "$seq" >/dev/null
+out="$(retro review --accept 999999 2>&1)"; rc=$?
+{ [ "$rc" != 0 ] && [ "$(dbq "SELECT count(*) FROM meta WHERE key='reviewed_through'")" = 0 ]; } \
+  && ok "a sequence past the last closed segment is refused" \
+  || bad "a sequence past the last closed segment is refused" "exit $rc, marker moved"
+out="$(retro review --accept "$seq")"
+check "accepting says how much it hid" "accepted 2 segments · reviewed_through 0 → $seq" "$out"
+out="$(retro review --accept "$seq" 2>&1)"; rc=$?
+[ "$rc" != 0 ] && ok "accepting the same window twice is refused" \
+              || bad "accepting the same window twice is refused" "exit $rc"
+retro review --accept "$seq" >/dev/null 2>&1
 check "an accepted window comes back empty" "no closed segments to review" "$(retro review)"
 check "--all still digests everything"      "segments 2" "$(retro review --all)"
 sql "accepting moves the marker and nothing else" "$seq" \
@@ -1143,12 +1258,51 @@ sql "a transcript left alone for a day closes its segment" "idle" \
 # one rather than adding to a segment that may already have been reviewed.
 cat >> "$RP/alpha/s-idle.jsonl" <<'JSON'
 {"type":"assistant","uuid":"i2","timestamp":"2026-08-17T09:00:00.000Z","message":{"id":"im2","content":[{"type":"tool_use","id":"i2t","name":"Write","input":{}}]}}
+{"type":"assistant","uuid":"i3","timestamp":"2026-08-17T09:01:00.000Z","message":{"id":"im3","content":[{"type":"tool_use","id":"i3t","name":"Glob","input":{}}]}}
 JSON
 retro record >/dev/null
 sql "a resumed transcript opens the next segment instead" "1" \
   "SELECT n FROM tool_use WHERE segment_id='s-idle#1' AND tool='Write'"
 sql "and the closed one is left exactly as it was" "1|idle" \
   "SELECT assistant_turns,close_trigger FROM segment WHERE id='s-idle#0'"
+
+# An ordinal that came from an idle close exists only in the cursor — no
+# boundary in the file produced it — so a rebuild that re-derived it from the
+# bytes would land back on the closed segment and discard everything after it.
+# The rewind drops the last record and leaves the one before it whole.
+python3 - "$RP/alpha/s-idle.jsonl" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path, "rb").read().splitlines(True)
+open(path, "wb").write(b"".join(lines[:-1]))
+PY
+retro record >/dev/null
+sql "a rewound transcript rebuilds its reopened segment" "1|1" \
+  "SELECT (SELECT n FROM tool_use WHERE segment_id='s-idle#1' AND tool='Write'),
+          (SELECT assistant_turns FROM segment WHERE id='s-idle#1')"
+sql "without the record the rewind took" "0" \
+  "SELECT count(*) FROM tool_use WHERE segment_id='s-idle#1' AND tool='Glob'"
+sql "and the closed segment is still untouched" "1|idle" \
+  "SELECT assistant_turns,close_trigger FROM segment WHERE id='s-idle#0'"
+sql "so nothing had to be given up" "0" \
+  "SELECT IFNULL((SELECT value FROM meta WHERE key='segments_dropped'),'0')"
+
+# A transcript whose head changed is a different file under an old name. Its
+# open segment has no source any more, so what came from the session's own chain
+# goes — and the count is what stops that being silent.
+python3 - "$RP/alpha/s-idle.jsonl" <<'PY'
+import sys
+
+path = sys.argv[1]
+lines = open(path).read().splitlines(True)
+lines[0] = lines[0].replace('"work"', '"work now"')
+open(path, "w").write("".join(lines))
+PY
+retro record >/dev/null
+sql "a segment a replaced file cannot rebuild is counted, not hidden" "1" \
+  "SELECT value FROM meta WHERE key='segments_dropped'"
+check "and the digest owns it" "1 segments could not be rebuilt" "$(retro review --all)"
 
 # The 30-day cleanup deletes transcripts. The digest is the only record left, so
 # it stays; the cursor pointing at a file that is gone does not.
@@ -1177,9 +1331,54 @@ retro record >/dev/null; rc=$?
   || bad "a missing since marker is recreated" "exit $rc"
 sql "and that run records nothing" "0" \
   "SELECT count(*) FROM segment WHERE session_id='s-nomarker'"
+# A marker that is there but will not parse is a different condition from one
+# that is absent: it is the one value in the store that must never move, so it
+# is left exactly as it is and nothing is recorded until someone looks.
+printf 'not a timestamp' > "$RH/.claude/retro/since"
+retro record >/dev/null; rc=$?
+{ [ "$rc" = 0 ] && [ "$(cat "$RH/.claude/retro/since")" = "not a timestamp" ]; } \
+  && ok "an unreadable marker is left exactly as it is" \
+  || bad "an unreadable marker is left exactly as it is" "exit $rc, now: $(cat "$RH/.claude/retro/since")"
+check "and the doctor is what says so" "retro/since is not a timestamp" \
+  "$(HOME="$RH" "$ROOT/install.sh" --sync 2>&1)"
+
 # Put the fixtures back inside the window; the marker it wrote is now, which
 # would make every one of them older than the store.
 printf '2026-01-01T00:00:00Z\n' > "$RH/.claude/retro/since"
+
+# A store another toolkit wrote is left alone rather than adopted or destroyed.
+HOME="$RH" python3 -c "
+import os, sqlite3
+db = sqlite3.connect(os.path.expanduser('~/.claude/retro/retro.db'))
+db.execute('PRAGMA user_version=99')
+db.close()"
+segments="$(dbq "SELECT count(*) FROM segment")"
+retro record >/dev/null; rc=$?
+{ [ "$rc" = 0 ] && [ "$(dbq "SELECT count(*) FROM segment")" = "$segments" ]; } \
+  && ok "a store from a newer toolkit is not touched" \
+  || bad "a store from a newer toolkit is not touched" "exit $rc"
+retro review >/dev/null
+check "and the review says which version it is" "schema version 99" "$(cat "$TMP/retro.err")"
+ls "$RH"/.claude/retro/retro.db.corrupt.* >/dev/null 2>&1 \
+  && bad "a newer schema is not treated as corruption" "it was moved aside" \
+  || ok "a newer schema is not treated as corruption"
+HOME="$RH" python3 -c "
+import os, sqlite3
+db = sqlite3.connect(os.path.expanduser('~/.claude/retro/retro.db'))
+db.execute('PRAGMA user_version=1')
+db.close()"
+
+# A store that will not open is a store behind a problem, not a broken one:
+# moving it aside would throw away the record that outlives every transcript.
+if [ "$(id -u)" -ne 0 ]; then
+  chmod 000 "$RH/.claude/retro/retro.db"
+  retro record >/dev/null; rc=$?
+  chmod 644 "$RH/.claude/retro/retro.db"
+  { [ "$rc" = 0 ] && ! ls "$RH"/.claude/retro/retro.db.corrupt.* >/dev/null 2>&1; } \
+    && ok "a store that will not open is left where it is" \
+    || bad "a store that will not open is left where it is" "exit $rc, it was quarantined"
+  sql "and everything in it survives" "$segments" "SELECT count(*) FROM segment"
+fi
 
 # A corrupt store is moved aside and rebuilt. This is last, because a rebuild
 # re-derives every live transcript from scratch.

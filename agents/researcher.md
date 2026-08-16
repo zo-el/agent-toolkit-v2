@@ -47,4 +47,4 @@ Self-contained — nobody sees your transcript:
 - What's uncertain or contested.
 - For a recommendation: the options you rejected and why, and what the winner costs us.
 - Flaws in our current approach that the research exposed, worst first.
-- `Retro:` one line, or `Retro: none`. Never left off — it is recorded, not transcribed.
+- `Retro:` one line, or `Retro: none`. It is recorded, not transcribed.

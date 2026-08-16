@@ -84,12 +84,12 @@ Two separate things stand between a session and its task list, and `install.sh` 
 
 The unit is the **compaction segment**, not the session: sessions here run for weeks across dozens of compactions, and a per-session row would average all of it into one number. A segment is reviewable once it is closed, and each one is reviewed exactly once.
 
-It answers toolkit questions, not cost questions: is the session doing the work instead of delegating it, is a lane going round more times than it should, which permission prompt keeps firing, which skill never fires, is a hook slow, and what agents themselves said was inefficient — every agent's `Retro:` line is harvested straight from its transcript.
+It answers toolkit questions, not cost questions — every agent's `Retro:` line is harvested straight from its transcript, so the answer exists whether or not anyone remembered to write it down.
 
-- **Counts and shapes only.** Never prompt text, file contents, command arguments, an agent's brief or its report. The two exceptions are deliberate: the normalised command verb (`git push`, `npm install`), because a recurring permission prompt cannot be recognised without it, and the agent's own `Retro:` line.
+- **Counts and shapes only.** Never prompt text, file contents, command arguments, an agent's brief or its report. Two exceptions are deliberate: the normalised command verb (`git push`, `npm install`, and a driver's subcommand), because a recurring permission prompt cannot be recognised without it, and the agent's own `Retro:` line.
 - **No backfill.** A `since` marker is stamped at install and everything written before it is invisible, permanently.
 - **Four triggers, all async** — session start, compaction, session end, and a prompt at most every 15 minutes. None is load-bearing; whichever fires first catches up what the others missed, which is what keeps it off cron and out of a daemon.
-- Every path degrades to silence and exits 0, and it writes nothing to stdout — a hook's stdout on some events is injected into the conversation.
+- Every path degrades to silence and exits 0, and it writes nothing to stdout. Silence is therefore not evidence that it works, so the session-start doctor checks the marker and the store instead.
 
 ## Statusline
 

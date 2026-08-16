@@ -25,7 +25,7 @@ One home. Never state the same rule in two places.
 
 ## Running a retro
 
-`hooks/retro.py review` prints a digest of every compaction segment closed since the last accepted retro: delegation per project, agent stops by type and spawn depth, permission friction, tools and bash verbs, skills that fired and skills that never did, compaction pressure, hook health, and the `Retro:` lines agents wrote themselves. It reads a machine-local store and writes nothing. `--all` digests everything ever recorded.
+`hooks/retro.py review` prints a digest of every compaction segment closed since the last accepted retro. It reads a machine-local store, writes nothing, and `--all` digests everything ever recorded. The recorder behind it rides hooks and never needs running by hand.
 
 An empty digest ends the review. A retro with no data is not a brainstorm.
 
@@ -36,7 +36,7 @@ An empty digest ends the review. A retro with no data is not a brainstorm.
 5. Present the candidates to the user as a checklist. Only ticked ones land.
 6. Then, and only then, `hooks/retro.py review --accept <seq>` with the sequence the digest named, so the same segments do not come back. Delete the `RETRO.md` lines you acted on.
 
-The recorder behind it runs from hooks on session start, compaction, session end, and at most every 15 minutes on a prompt. It never needs running by hand.
+An `incomplete:` line in the window means the recorder could not read something, so a figure below it is short by an unknown amount. Say so when you rank, rather than reading it as a low number.
 
 ## Verifying a change
 

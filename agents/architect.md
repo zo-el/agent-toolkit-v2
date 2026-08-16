@@ -53,4 +53,4 @@ Self-contained — nobody sees your transcript:
 - The build units: title, outcome, acceptance criteria, order.
 - The coverage argument: every promise → a unit.
 - Decisions made, decisions deliberately left to the developer, and anything the user has to settle.
-- `Retro:` one line, or `Retro: none`. Never left off — it is recorded, not transcribed.
+- `Retro:` one line, or `Retro: none`. It is recorded, not transcribed.

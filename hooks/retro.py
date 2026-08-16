@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import stat
 import sys
 import time
@@ -166,9 +167,10 @@ DRIVERS = {
     "nix",
 }
 VERB_OK = re.compile(r"^[A-Za-z0-9._+-]{1,32}$")
-LABEL_OK = re.compile(r"^[A-Za-z0-9._+-]{1,64}$")
+HOOK_LABEL = re.compile(
+    r"^[A-Za-z0-9._+-]{1,64}\.(sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl)$"
+)
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-SPLIT_PARTS = re.compile(r"&&|\|\||;|\|")
 # The colon is required. Without it "Retroactive correction: …" and a bold
 # "**Retro** ← …" both match, and the line after them is arbitrary assistant
 # prose — which is the one thing a retro line may not be. Verified against the
@@ -206,15 +208,52 @@ def parse_iso(ts):
         return None
 
 
+def command_parts(command):
+    """The command split into the commands it runs, quoting respected.
+
+    Splitting the raw string on `&&`, `||`, `;` and `|` would promote the
+    contents of every quoted argument that contains one — a grep alternation, a
+    commit message — to a command of its own. Everything from a heredoc operator
+    on is dropped outright: that is a file being written, not a command line.
+    """
+    cut = command.find("<<")
+    if cut >= 0:
+        command = command[:cut]
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    parts, current = [], []
+    for token in lexer:
+        if token in ("&&", "||", ";", "|", "&", ";;", "|&"):
+            parts.append(current)
+            current = []
+            if len(parts) >= VERB_PARTS:
+                return parts[:VERB_PARTS]
+        else:
+            current.append(token)
+    parts.append(current)
+    return parts[:VERB_PARTS]
+
+
 def bash_verbs(command):
     """Every verb a Bash command runs, normalised. `git push`, `npm install`,
     `cargo test` — a driver keeps its subcommand, because the driver alone
-    cannot tell a read from a publish."""
+    cannot tell a read from a publish.
+
+    A driver's subcommand is the one argument this records, which is the spec's
+    deliberate exception: `git commit`, `make deploy`. Everything after it is
+    dropped, and a subcommand that does not look like a bare word — a path, a
+    quoted string, anything over 32 characters — leaves the driver alone.
+    """
     if not isinstance(command, str) or not command.strip():
         return []
+    try:
+        parts = command_parts(command)
+    except ValueError:
+        # An unbalanced quote: nothing about this line can be tokenised, so
+        # nothing about it can be normalised safely either.
+        return ["other"]
     verbs = []
-    for part in SPLIT_PARTS.split(command)[:VERB_PARTS]:
-        tokens = part.split()
+    for tokens in parts:
         while tokens and ASSIGNMENT.match(tokens[0]):
             tokens.pop(0)
         if not tokens:
@@ -228,8 +267,6 @@ def bash_verbs(command):
             for token in tokens[1:]:
                 if token.startswith("-"):
                     continue
-                # A subcommand is a bare word; a path or a quoted string is an
-                # argument, and arguments are never recorded.
                 if VERB_OK.match(token):
                     verb = head + " " + token
                 break
@@ -238,19 +275,22 @@ def bash_verbs(command):
 
 
 def hook_label(command):
-    """A label for a hook, not a command line: the last component of the longest
-    path-like token.
+    """A label for a hook, not a command line: the file a path-like token names,
+    and only when that file is a script.
 
-    A command with no path in it at all is `unknown` rather than its first word.
     `hookInfos[].command` is not always a command — in this store it sometimes
-    carries the user's prompt instead — and a first word taken from prose is
-    prompt text, which nothing here may store.
+    carries the user's prompt — so any rule that accepts a plain word accepts
+    prompt text, and any rule that accepts a plain path accepts a path out of a
+    prompt. Requiring a script extension costs a hook invoked as a bare
+    executable, which reads as `unknown`, and that is the cheaper mistake.
     """
-    paths = [t for t in str(command or "").split() if "/" in t]
-    if not paths:
-        return "unknown"
-    label = max(paths, key=len).rstrip("/").rsplit("/", 1)[-1].strip("\"'`,;:()[]")
-    return label if LABEL_OK.match(label) else "unknown"
+    for token in sorted(str(command or "").split(), key=len, reverse=True):
+        if "/" not in token:
+            continue
+        label = token.rstrip("/").rsplit("/", 1)[-1].strip("\"'`,;:()[]")
+        if HOOK_LABEL.match(label):
+            return label
+    return "unknown"
 
 
 def sha_head(f, length):
@@ -270,13 +310,27 @@ def read_lines(f, start):
         if not chunk:
             return
         buf += chunk
+        # An index rather than a re-slice per line: a transcript is tens of
+        # thousands of lines and re-slicing the buffer for each is quadratic.
+        at = 0
         while True:
-            cut = buf.find(b"\n")
+            cut = buf.find(b"\n", at)
             if cut < 0:
                 break
-            line, buf = buf[:cut], buf[cut + 1 :]
-            consumed += cut + 1
-            yield line, consumed
+            consumed += cut + 1 - at
+            yield buf[at:cut], consumed
+            at = cut + 1
+        buf = buf[at:]
+
+
+def last_newline(f, size):
+    """The offset just past the last complete line at or before `size`. A cursor
+    always sits on a newline, so parking one mid-record would make the next
+    sweep read the tail of that record as a line of its own."""
+    window = min(size, CHUNK)
+    f.seek(size - window)
+    cut = f.read(window).rfind(b"\n")
+    return size - window + cut + 1 if cut >= 0 else 0
 
 
 def read_json(path):
@@ -331,13 +385,21 @@ def open_store(create=True):
                 return None
             db.execute("SELECT count(*) FROM segment").fetchone()
             return db
-        except Exception:
+        except Exception as failure:
             if db is not None:
                 try:
                     db.close()
                 except Exception:
                     pass
-            if attempt or not create:
+            # Only a file that is not a database is moved aside. A store that
+            # cannot be opened — no permission, no space, a filesystem that will
+            # not do WAL — is a healthy store behind a temporary problem, and
+            # quarantining it would throw away the record that outlives every
+            # transcript.
+            corrupt = isinstance(failure, sqlite3.DatabaseError) and not isinstance(
+                failure, sqlite3.OperationalError
+            )
+            if attempt or not create or not corrupt:
                 return None
             quarantine()
     return None
@@ -358,6 +420,23 @@ def meta_set(db, key, value):
         (key, str(value)),
     )
 
+
+# The segment's own counters, once: the accumulator, the write and the clearing
+# a rebuild does all read this list.
+SEGMENT_SCALARS = (
+    "user_turns",
+    "wake_turns",
+    "assistant_turns",
+    "turn_ms_total",
+    "turn_ms_max",
+    "tokens_in",
+    "tokens_out",
+    "cache_read",
+    "cache_create",
+    "tool_errors",
+    "malformed_lines",
+    "agent_fences_lost",
+)
 
 # Every child table, once: its key columns after segment_id, the columns a
 # second sweep adds to, the columns it takes the larger of, and the conflict
@@ -532,7 +611,16 @@ def feed_assistant(span, rec):
     msg = rec.get("message")
     msg = msg if isinstance(msg, dict) else {}
     usage = msg.get("usage")
-    message_id = msg.get("id") or rec.get("requestId") or rec.get("uuid")
+    # A transcript field is whatever the writer put there, and this one is a
+    # set key: anything unhashable in it would take the whole file down.
+    message_id = next(
+        (
+            v
+            for v in (msg.get("id"), rec.get("requestId"), rec.get("uuid"))
+            if isinstance(v, str) and v
+        ),
+        None,
+    )
     if isinstance(usage, dict) and message_id not in span.messages:
         # One API response is written as one record per content block, every one
         # carrying the same message id and the same usage block: summing per
@@ -561,7 +649,11 @@ def feed_assistant(span, rec):
     )
     if current and current != span.skill_now:
         bump(span.skills, current, (1,))
-    span.skill_now = current
+    # A record with no attribution does not end the run: a skill's own turns are
+    # not all attributed, and treating a gap as the end counts one activation
+    # several times over.
+    if current:
+        span.skill_now = current
     return None
 
 
@@ -705,23 +797,7 @@ class Bucket:
         for attr, _, _, _, _, _ in CHILD_TABLES:
             setattr(self, attr, {})
         self.retro = []  # (uuid, author, text, at)
-        self.scalars = dict.fromkeys(
-            (
-                "user_turns",
-                "wake_turns",
-                "assistant_turns",
-                "turn_ms_total",
-                "turn_ms_max",
-                "tokens_in",
-                "tokens_out",
-                "cache_read",
-                "cache_create",
-                "tool_errors",
-                "malformed_lines",
-                "agent_fences_lost",
-            ),
-            0,
-        )
+        self.scalars = dict.fromkeys(SEGMENT_SCALARS, 0)
         self.started_at = None
         self.ended_at = None
         self.version = None
@@ -737,6 +813,10 @@ class Bucket:
         for attr in ("tools", "verbs", "denials", "skills", "mcps"):
             for key, values in getattr(span, attr).items():
                 bump(getattr(self, attr), (agent,) + as_key(key), values)
+        for label, values in span.hooks.items():
+            # hook_run has no agent column: a hook fires for the session whoever
+            # was running, so an agent transcript's hook records merge in.
+            bump(self.hooks, (label,), values, maxes=1)
         for uuid, text, at in span.retro:
             self.retro.append((uuid, author, text, at))
         # A malformed line has nowhere else to be counted, whichever transcript
@@ -763,8 +843,6 @@ class Bucket:
             ("tokens_in", "tokens_out", "cache_read", "cache_create")
         ):
             self.scalars[name] += span.tokens[i]
-        for label, values in span.hooks.items():
-            bump(self.hooks, (label,), values, maxes=1)
         self.version = span.version or self.version
         self.branch = span.branch or self.branch
         self.repo = self.repo or span.repo
@@ -812,25 +890,42 @@ def unchanged(st, cur):
     return cur is not None and cur[1] == st.st_ino and cur[4] == st.st_size
 
 
+def head_of(f, size):
+    length = min(HEAD_BYTES, size)
+    return length, sha_head(f, length)
+
+
 def plan(f, st, cur, since_epoch):
-    """(mode, start offset, head) for a transcript. head is (length, sha) when
-    the cursor's head has to be written, None when it stands."""
+    """What to do with a transcript, as (mode, start, ordinal, base, head).
+
+    `base` is the offset the open segment began at, which is what a reparse
+    rewinds to. `head` is (length, sha) when the cursor's head has to be
+    written, None when the stored one stands.
+    """
     size = st.st_size
     if cur is not None:
-        _, inode, head_len, head_sha, offset, _, _, _, _ = cur
-        if inode == st.st_ino and size > offset:
-            if sha_head(f, min(head_len or 0, size)) == head_sha:
-                return "resume", offset, None
-        return "reparse", 0, (min(HEAD_BYTES, size), sha_head(f, min(HEAD_BYTES, size)))
-    head = (min(HEAD_BYTES, size), sha_head(f, min(HEAD_BYTES, size)))
-    if st.st_mtime < since_epoch:
+        _, inode, head_len, head_sha, offset, base, ordinal, _, _ = cur
+        same = inode == st.st_ino and sha_head(f, min(head_len or 0, size)) == head_sha
+        if same and size > offset:
+            return "resume", offset, ordinal or 0, base, None
+        if same and base is not None and size >= base:
+            # Rewound or truncated, but the same file: the open segment starts
+            # where it always did, so only it is rebuilt. Closed segments are
+            # never re-derived, which is what makes them immutable in fact and
+            # not just by convention.
+            return "reparse", base, ordinal or 0, base, None
+    head = head_of(f, size)
+    if cur is None and st.st_mtime < since_epoch:
         # A transcript untouched since before the marker cannot hold a record
         # after it, so first contact stays cheap over an existing corpus.
-        return "preexisting", size, head
+        return "preexisting", last_newline(f, size), 0, None, head
     first = first_timestamp(f)
     if first is None or first < since_epoch:
-        return "preexisting", size, head
-    return "parse", 0, head
+        # Everything this file holds predates the marker. That is true whether
+        # this is first contact or a replaced file being reparsed: reading it
+        # from the start would be the backfill the marker exists to prevent.
+        return "preexisting", last_newline(f, size), 0, None, head
+    return "parse", 0, 0, 0, head
 
 
 def first_timestamp(f):
@@ -881,30 +976,47 @@ def close_segment(db, segment_id, trigger, compact=None):
     db.execute("UPDATE segment SET " + fields + " WHERE id=?", values)
 
 
-def purge(db, segment_ids):
-    """Everything a segment owns, so a rebuild starts from nothing."""
-    tables = [table for _, table, _, _, _, _ in CHILD_TABLES] + ["retro_line"]
-    for segment_id in segment_ids:
-        for table in tables:
-            db.execute("DELETE FROM %s WHERE segment_id=?" % table, (segment_id,))
-        db.execute("DELETE FROM segment WHERE id=?", (segment_id,))
-
-
-def rewind_agents(db, segment_ids):
-    """An agent cursor records the segment that last fenced it and the offset at
-    which that segment first found it, so rebuilding the segment reads the same
-    spans again exactly once. Agents fenced by a closed segment stay put."""
-    for segment_id in segment_ids:
-        db.execute(
-            'UPDATE cursor SET "offset"=base_offset WHERE agent_id IS NOT NULL '
-            "AND segment_id=? AND base_offset IS NOT NULL",
-            (segment_id,),
+def open_segments(db, session):
+    return [
+        row[0]
+        for row in db.execute(
+            "SELECT id FROM segment WHERE session_id=? AND closed_seq IS NULL",
+            (session,),
         )
+    ]
+
+
+def clear_open(db, segment_ids):
+    """Everything an open segment derived from the session transcript, so a
+    rebuild starts from nothing.
+
+    What an agent's own transcript contributed is kept: it was read from a
+    different file, which has not changed, and the fences that produced it find
+    no new bytes on the rebuild — so re-deriving it is impossible and deleting
+    it would simply lose the delegation figures. The scalars go back to zero
+    because the rebuild adds to them.
+    """
+    scalars = ", ".join("%s=0" % c for c in SEGMENT_SCALARS)
+    for segment_id in segment_ids:
+        for _, table, keys, _, _, _ in CHILD_TABLES:
+            if "agent" in keys:
+                db.execute(
+                    "DELETE FROM %s WHERE segment_id=? AND agent=''" % table,
+                    (segment_id,),
+                )
+            elif table != "agent_run":
+                db.execute("DELETE FROM %s WHERE segment_id=?" % table, (segment_id,))
+        db.execute(
+            "DELETE FROM retro_line WHERE segment_id=? AND author='main'", (segment_id,)
+        )
+        db.execute("UPDATE segment SET " + scalars + " WHERE id=?", (segment_id,))
 
 
 def write_bucket(db, segment_id, bucket, session, project, ordinal, compact=None):
+    """True when the segment gained a row, which is what says a rebuild reached
+    it."""
     if not bucket.touched and compact is None:
-        return
+        return False
     scalars = bucket.scalars
     columns = [
         "id",
@@ -960,6 +1072,7 @@ def write_bucket(db, segment_id, bucket, session, project, ordinal, compact=None
         )
     if compact is not None:
         close_segment(db, segment_id, "compact", compact)
+    return True
 
 
 def fold_fence(db, session_path, segment_id, bucket, agent_id, status):
@@ -968,27 +1081,30 @@ def fold_fence(db, session_path, segment_id, bucket, agent_id, status):
     if not AGENT_ID.match(agent_id):
         return
     base = os.path.join(os.path.splitext(session_path)[0], "subagents")
-    meta = read_json(os.path.join(base, "agent-%s.meta.json" % agent_id))
+    meta_path = os.path.join(base, "agent-%s.meta.json" % agent_id)
     path = os.path.join(base, "agent-%s.jsonl" % agent_id)
     try:
         st = os.stat(path)
     except OSError:
-        # No transcript and no meta file is a background command, not an agent.
-        if meta is not None:
+        # A task with no transcript and no meta file is a background command,
+        # not an agent. isfile rather than a parsed file, so a meta file that
+        # will not read still says an agent was there.
+        if os.path.isfile(meta_path):
             bucket.scalars["agent_fences_lost"] += 1
         return
+    meta = read_json(meta_path)
     agent_type = meta.get("agentType") if meta else None
     agent_type = agent_type if isinstance(agent_type, str) and agent_type else "unknown"
     depth = meta.get("spawnDepth") if meta else None
-    depth = (
-        num(depth) if isinstance(depth, int) and not isinstance(depth, bool) else None
-    )
+    depth = depth if isinstance(depth, int) and not isinstance(depth, bool) else None
 
     cur = get_cursor(db, path)
-    start, base_offset, head = 0, 0, None
-    first_seen = True
+    start, head = 0, None
+    # An agent counts once per segment that fenced it, however many times that
+    # segment stops it.
+    first_seen = cur is None or cur[7] != segment_id
     if cur is not None:
-        _, inode, head_len, head_sha, offset, cur_base, _, cur_segment, _ = cur
+        _, inode, head_len, head_sha, offset, _, _, _, _ = cur
         with open(path, "rb") as f:
             same = (
                 inode == st.st_ino
@@ -997,19 +1113,9 @@ def fold_fence(db, session_path, segment_id, bucket, agent_id, status):
         if same and st.st_size >= offset:
             head = (head_len, head_sha)
             start = offset
-            # base_offset is the offset at which this segment first found this
-            # agent, so rebuilding the segment reads the same span again.
-            if cur_segment == segment_id:
-                base_offset = cur_base if cur_base is not None else offset
-                first_seen = offset == base_offset
-            else:
-                base_offset = offset
     if head is None:
         with open(path, "rb") as f:
-            head = (
-                min(HEAD_BYTES, st.st_size),
-                sha_head(f, min(HEAD_BYTES, st.st_size)),
-            )
+            head = head_of(f, st.st_size)
 
     span = Span()
     consumed = start
@@ -1034,7 +1140,7 @@ def fold_fence(db, session_path, segment_id, bucket, agent_id, status):
             head[0],
             head[1],
             consumed,
-            base_offset,
+            None,
             None,
             segment_id,
             span.last_ts,
@@ -1059,30 +1165,23 @@ def sweep_transcript(db, path, project, since_epoch):
     st = os.stat(path)
     if not stat.S_ISREG(st.st_mode):
         return
-    cur = get_cursor(db, path)
-    if unchanged(st, cur):
+    if unchanged(st, get_cursor(db, path)):
         return
     session = os.path.splitext(os.path.basename(path))[0]
     with open(path, "rb") as f:
-        mode, start, head = plan(f, st, cur, since_epoch)
         db.execute("BEGIN IMMEDIATE")
         try:
-            ordinal = (cur[6] or 0) if cur is not None and mode == "resume" else 0
+            # The cursor is read again inside the transaction, and every decision
+            # taken from it. Deciding outside it lets two sweeps read the same
+            # offset and consume the same span twice, which is the one error
+            # that puts a wrong number in the store rather than no number.
+            cur = get_cursor(db, path)
+            mode, start, ordinal, base, head = plan(f, st, cur, since_epoch)
             if mode == "preexisting":
                 put_cursor(
                     db,
                     path,
-                    (
-                        None,
-                        st.st_ino,
-                        head[0],
-                        head[1],
-                        st.st_size,
-                        None,
-                        0,
-                        None,
-                        None,
-                    ),
+                    (None, st.st_ino, head[0], head[1], start, start, 0, None, None),
                 )
                 db.execute("COMMIT")
                 return
@@ -1093,20 +1192,25 @@ def sweep_transcript(db, path, project, since_epoch):
                     (session,),
                 )
             }
-            if mode == "reparse":
-                open_ids = [
-                    row[0]
-                    for row in db.execute(
-                        "SELECT id FROM segment WHERE session_id=? AND closed_seq IS NULL",
-                        (session,),
-                    )
-                ]
-                purge(db, open_ids)
-                rewind_agents(db, open_ids)
-            consumed = scan_session(
-                db, f, path, session, project, start, ordinal, closed
+            cleared = []
+            if mode == "reparse" or (mode == "parse" and cur is not None):
+                # Only a rebuild clears: whatever the open segment held came
+                # from a span about to be read again, or from a file that no
+                # longer holds it. A resume adds to what is there.
+                cleared = open_segments(db, session)
+                clear_open(db, cleared)
+            consumed, last_ts, ordinal, base, segment_id, seen = scan_session(
+                db, f, path, session, project, start, ordinal, base, closed
             )
-            last_ts, ordinal, segment_id = consumed[1:]
+            lost = [s for s in cleared if s not in seen]
+            if lost:
+                # A segment whose ordinal came from an idle close cannot be
+                # re-derived from a file that was replaced, so its own counts
+                # are gone. The delegation rows survive; the count is what says
+                # the rest did not.
+                meta_set(
+                    db, "segments_dropped", meta_get(db, "segments_dropped") + len(lost)
+                )
             put_cursor(
                 db,
                 path,
@@ -1115,8 +1219,8 @@ def sweep_transcript(db, path, project, since_epoch):
                     st.st_ino,
                     head[0] if head else cur[2],
                     head[1] if head else cur[3],
-                    consumed[0],
-                    None,
+                    consumed,
+                    base,
                     ordinal,
                     segment_id,
                     last_ts or (cur[8] if cur is not None else None),
@@ -1124,15 +1228,22 @@ def sweep_transcript(db, path, project, since_epoch):
             )
             db.execute("COMMIT")
         except Exception:
-            db.execute("ROLLBACK")
+            try:
+                db.execute("ROLLBACK")
+            except Exception:
+                # SQLite aborts the transaction itself on some errors, and
+                # rolling back what is already gone would replace the real
+                # failure with a meaningless one.
+                pass
             raise
 
 
-def scan_session(db, f, path, session, project, start, ordinal, closed):
+def scan_session(db, f, path, session, project, start, ordinal, base, closed):
     """Consume a span of a session transcript. Returns (offset, last timestamp,
-    ordinal, open segment id)."""
+    ordinal, the offset the open segment began at, its id, and the ids written)."""
     consumed = start
     last_ts = None
+    seen = set()
     segment_id = "%s#%d" % (session, ordinal)
     active = segment_id not in closed
     span, bucket = Span(), Bucket()
@@ -1154,27 +1265,36 @@ def scan_session(db, f, path, session, project, start, ordinal, closed):
                 write_bucket(
                     db, segment_id, bucket, session, project, ordinal, event[1]
                 )
+                seen.add(segment_id)
             ordinal += 1
+            base = consumed
             segment_id = "%s#%d" % (session, ordinal)
             active = segment_id not in closed
             span, bucket = Span(), Bucket()
         elif active:
             try:
                 fold_fence(db, path, segment_id, bucket, event[1], event[2])
-            except Exception:
+            except (OSError, ValueError):
                 # One agent transcript that will not read costs its own fence,
                 # not the session file it was named in. Nothing is written for
                 # it, so the count is what says the figure is short.
+                #
+                # Only what a bad file throws is caught here. A database error
+                # has already killed the transaction this scan is inside, and
+                # swallowing it would let the rest of the file write in
+                # autocommit — cursor at the end, counts nowhere.
                 bucket.scalars["agent_fences_lost"] += 1
     if active:
         bucket.absorb_main(span)
-        write_bucket(db, segment_id, bucket, session, project, ordinal)
+        if write_bucket(db, segment_id, bucket, session, project, ordinal):
+            seen.add(segment_id)
     # A segment closed by idle leaves its id behind: the records that follow it
     # belong to a new one, or a reviewed segment would gain rows after the fact.
     while segment_id in closed:
         ordinal += 1
+        base = consumed
         segment_id = "%s#%d" % (session, ordinal)
-    return consumed, last_ts, ordinal, segment_id
+    return consumed, last_ts, ordinal, base, segment_id, seen
 
 
 def close_stale(db, now):
@@ -1185,38 +1305,51 @@ def close_stale(db, now):
         try:
             mtime = os.path.getmtime(path)
         except OSError:
+            mtime = None
+        if mtime is not None and (not segment_id or now - mtime < IDLE_SECONDS):
+            continue
+        try:
             db.execute("BEGIN IMMEDIATE")
-            try:
+        except Exception:
+            # The store is busy or gone. Every close here is re-derivable on the
+            # next sweep, so there is nothing to do but leave it.
+            return
+        try:
+            if mtime is None:
+                # The 30-day cleanup took the transcript. The digest is the only
+                # record left, so it stays; the cursor pointing at nothing goes.
                 if segment_id:
                     close_segment(db, segment_id, "gone")
                 db.execute("DELETE FROM cursor WHERE path=?", (path,))
-                db.execute("COMMIT")
-            except Exception:
-                db.execute("ROLLBACK")
-            continue
-        if not segment_id or now - mtime < IDLE_SECONDS:
-            continue
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            row = db.execute(
-                "SELECT closed_seq FROM segment WHERE id=?", (segment_id,)
-            ).fetchone()
-            if row is not None and row[0] is None:
-                close_segment(db, segment_id, "idle")
-                db.execute(
-                    "UPDATE cursor SET ordinal=?, segment_id=? WHERE path=?",
-                    (
-                        (ordinal or 0) + 1,
-                        "%s#%d" % (segment_id.rsplit("#", 1)[0], (ordinal or 0) + 1),
-                        path,
-                    ),
-                )
+            else:
+                row = db.execute(
+                    "SELECT closed_seq FROM segment WHERE id=?", (segment_id,)
+                ).fetchone()
+                if row is not None and row[0] is None:
+                    close_segment(db, segment_id, "idle")
+                    # The records that follow belong to a new segment. Its start
+                    # is unknown until one arrives, so the cursor's own offset
+                    # stands in: nothing before it can belong to the new one.
+                    db.execute(
+                        'UPDATE cursor SET ordinal=?, segment_id=?, base_offset="offset" '
+                        "WHERE path=?",
+                        (
+                            (ordinal or 0) + 1,
+                            "%s#%d"
+                            % (segment_id.rsplit("#", 1)[0], (ordinal or 0) + 1),
+                            path,
+                        ),
+                    )
             db.execute("COMMIT")
         except Exception:
-            db.execute("ROLLBACK")
+            try:
+                db.execute("ROLLBACK")
+            except Exception:
+                pass
 
 
 def sweep(db, since_epoch):
+    failed = 0
     try:
         projects = sorted(os.listdir(PROJECTS))
     except OSError:
@@ -1237,11 +1370,28 @@ def sweep(db, since_epoch):
                     db, os.path.join(directory, name), project, since_epoch
                 )
             except Exception:
-                continue
+                # One transcript never costs the sweep. It contributed no
+                # segment, so it has nothing of its own to be counted on, and
+                # without this a file that fails every sweep is invisible.
+                failed += 1
+    try:
+        meta_set(db, "transcripts_failed", failed)
+    except Exception:
+        pass
     close_stale(db, time.time())
 
 
 # ── record ───────────────────────────────────────────────────────────────────
+
+
+def lock_pid():
+    """The pid in the lock file, or "" when there is none to read. Only a pid's
+    worth is read, whatever is in there."""
+    try:
+        with open(LOCK_PATH) as f:
+            return f.read(32).strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
 
 
 def lock_held():
@@ -1249,51 +1399,77 @@ def lock_held():
     one whose process is gone, is stolen."""
     try:
         age = time.time() - os.path.getmtime(LOCK_PATH)
-        with open(LOCK_PATH) as f:
-            # A pid and nothing else. Whatever is in there, only this much of it
-            # is ever read.
-            pid = f.read(32).strip()
     except OSError:
         return False
     if age > LOCK_STALE_SECONDS:
         return False
+    pid = lock_pid()
     return bool(pid) and pid.isdigit() and os.path.exists("/proc/%s" % pid)
 
 
 def take_lock():
-    for _ in (0, 1):
-        try:
-            fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            if lock_held():
-                return False
+    """True when this process now holds the lock.
+
+    The pid is written before the lock exists, not after: a lock file that is
+    momentarily empty reads as unheld, and a second sweep would steal it out
+    from under the first.
+    """
+    mine = "%s.%d" % (LOCK_PATH, os.getpid())
+    try:
+        with open(mine, "w") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        return False
+    try:
+        for _ in (0, 1):
             try:
-                os.unlink(LOCK_PATH)
+                os.link(mine, LOCK_PATH)
+                return True
+            except FileExistsError:
+                if lock_held():
+                    return False
+                try:
+                    os.unlink(LOCK_PATH)
+                except OSError:
+                    return False
             except OSError:
                 return False
-            continue
-        except OSError:
-            return False
+        return False
+    finally:
         try:
-            os.write(fd, str(os.getpid()).encode())
-        finally:
-            os.close(fd)
-        return True
-    return False
+            os.unlink(mine)
+        except OSError:
+            pass
+
+
+def release_lock():
+    """Only ever this process's own lock: a sweep that overran and had its lock
+    stolen must not then delete the lock of whoever took it."""
+    if lock_pid() == str(os.getpid()):
+        try:
+            os.unlink(LOCK_PATH)
+        except OSError:
+            pass
 
 
 def read_since():
     """(epoch, fresh). A missing marker is written as now and that run records
-    nothing — a missing marker must never become a backfill."""
+    nothing — a missing marker must never become a backfill.
+
+    A marker that is present but will not parse is left exactly as it is, and
+    nothing is recorded until someone fixes it. Rewriting it would move the one
+    value in the store that must never move, and destroy the evidence that it
+    had. The doctor is what says so out loud.
+    """
     try:
         with open(SINCE_PATH) as f:
-            at = parse_iso(f.read().strip())
-        if at is not None:
-            return at, False
+            raw = f.read(64).strip()
     except OSError:
-        pass
+        raw = None
+    if raw is not None:
+        at = parse_iso(raw)
+        return (at, False) if at is not None else (None, True)
     try:
-        os.makedirs(STORE, exist_ok=True)
         with open(SINCE_PATH, "w") as f:
             f.write(now_iso() + "\n")
     except OSError:
@@ -1357,10 +1533,7 @@ def record(args):
                 db.close()
         touch(SWEPT_PATH)
     finally:
-        try:
-            os.unlink(LOCK_PATH)
-        except OSError:
-            pass
+        release_lock()
     return 0
 
 
@@ -1444,7 +1617,14 @@ def digest(db, everything):
     if short_of and short_of[0]:
         parts.append("%d lines would not parse" % short_of[0])
     if short_of and short_of[1]:
-        parts.append("%d agent stops had no transcript" % short_of[1])
+        parts.append("%d agent stops had no readable transcript" % short_of[1])
+    for key, phrase in (
+        ("transcripts_failed", "%d transcripts could not be swept"),
+        ("segments_dropped", "%d segments could not be rebuilt"),
+    ):
+        count = meta_get(db, key)
+        if count:
+            parts.append(phrase % count)
     if parts:
         out.append("    incomplete: " + ", ".join(parts))
 
@@ -1577,6 +1757,9 @@ def digest(db, everything):
     try:
         installed = sorted(n for n in os.listdir(SKILLS) if not n.startswith("."))
     except OSError:
+        # Saying nothing here reads as "every installed skill fired", which is
+        # the opposite of what is known.
+        out.append("    never fired: %s would not list" % SKILLS)
         installed = []
     unused = [n for n in installed if n not in seen]
     if unused:
@@ -1629,21 +1812,73 @@ def digest(db, everything):
     return out
 
 
+def store_problem():
+    """Why the store cannot be read, in the words of whoever has to fix it."""
+    try:
+        import sqlite3
+    except ImportError:
+        return "python3 has no sqlite3 module, so nothing has ever been recorded"
+    if not os.path.exists(DB_PATH):
+        return "nothing recorded yet — no store at %s" % DB_PATH
+    try:
+        db = sqlite3.connect(DB_PATH)
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        db.close()
+    except sqlite3.DatabaseError as failure:
+        return "%s will not open: %s" % (DB_PATH, failure)
+    if version != SCHEMA_VERSION:
+        return "%s is schema version %d; this build reads version %d" % (
+            DB_PATH,
+            version,
+            SCHEMA_VERSION,
+        )
+    return "%s will not open" % DB_PATH
+
+
+def accept(db, args):
+    """Move the marker, and say what that hid. A digest nobody can get back is
+    not something to do on a typo."""
+    try:
+        seq = int(args[args.index("--accept") + 1])
+    except (IndexError, ValueError):
+        sys.stderr.write("retro: --accept needs a closed_seq\n")
+        return 2
+    through = meta_get(db, "reviewed_through")
+    highest = db.execute(
+        "SELECT MAX(closed_seq) FROM segment WHERE closed_seq IS NOT NULL"
+    ).fetchone()[0]
+    if seq <= through:
+        sys.stderr.write(
+            "retro: reviewed_through is already %d; --accept only moves forward\n"
+            % through
+        )
+        return 2
+    if highest is None or seq > highest:
+        sys.stderr.write(
+            "retro: %d is past the last closed segment (%s). Accepting it would "
+            "retire segments nobody has seen.\n"
+            % (seq, "none" if highest is None else highest)
+        )
+        return 2
+    covered = db.execute(
+        "SELECT count(*) FROM segment WHERE closed_seq > ? AND closed_seq <= ?",
+        (through, seq),
+    ).fetchone()[0]
+    meta_set(db, "reviewed_through", seq)
+    sys.stdout.write(
+        "accepted %d segments · reviewed_through %d → %d\n" % (covered, through, seq)
+    )
+    return 0
+
+
 def review(args):
     db = open_store(create=False)
     if db is None:
-        sys.stderr.write("retro: no store at %s\n" % DB_PATH)
+        sys.stderr.write("retro: %s\n" % store_problem())
         return 1
     try:
         if "--accept" in args:
-            try:
-                seq = int(args[args.index("--accept") + 1])
-            except (IndexError, ValueError):
-                sys.stderr.write("retro: --accept needs a closed_seq\n")
-                return 2
-            meta_set(db, "reviewed_through", seq)
-            sys.stdout.write("reviewed_through = %d\n" % seq)
-            return 0
+            return accept(db, args)
         try:
             for line in digest(db, "--all" in args):
                 sys.stdout.write(line + "\n")

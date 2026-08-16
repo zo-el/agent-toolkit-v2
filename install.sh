@@ -321,6 +321,43 @@ if command -v python3 >/dev/null 2>&1; then
   # inert without it and every other hook is unaffected.
   python3 -c 'import sqlite3' >/dev/null 2>&1 \
     || echo "agent-toolkit: ! python3 has no sqlite3 module — the retro recorder cannot store anything"
+  # The recorder degrades to silence by design, so silence is not evidence that
+  # it is working. This is what tells the difference: a marker it can read, and
+  # a store it can open at a schema it knows.
+  retro_state="$(python3 - "$CLAUDE_DIR" <<'PY' 2>/dev/null || true
+import os, sys
+
+store = os.path.join(sys.argv[1], "retro")
+marker = os.path.join(store, "since")
+try:
+    with open(marker) as f:
+        raw = f.read(64).strip()
+except OSError:
+    raw = None
+if raw is None:
+    print("retro/since is missing — nothing will be recorded until it is stamped")
+else:
+    from datetime import datetime
+
+    try:
+        datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        print("retro/since is not a timestamp (%r) — nothing is being recorded" % raw[:32])
+db = os.path.join(store, "retro.db")
+if os.path.exists(db):
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(db)
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.close()
+        if version != 1:
+            print("retro.db is schema version %d; this toolkit reads version 1" % version)
+    except Exception as failure:
+        print("retro.db will not open — %s" % failure)
+PY
+)"
+  [ -z "$retro_state" ] || echo "agent-toolkit: ! $retro_state"
 fi
 
 # Our wiring must be present, not merely valid. Checking only the paths found in

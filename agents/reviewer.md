@@ -60,4 +60,4 @@ Self-contained — nobody sees your transcript:
 - Ranked findings, worst first: `path:line`, what breaks, how severe.
 - What you verified against what remains uncertain.
 - The bottom line: ship it, or what must change first.
-- `Retro:` one line, or `Retro: none`. Never left off — it is recorded, not transcribed.
+- `Retro:` one line, or `Retro: none`. It is recorded, not transcribed.
