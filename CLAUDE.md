@@ -149,7 +149,7 @@ Say so and ask which wins, before acting on either reading. Quote the line and s
 
 - Structure files and folders so the shape of the codebase is obvious from the tree.
 - The code is the documentation. Never comment what the code already says.
-- Comment the **why** when it isn't obvious — the constraint that holds now, not how it was found. A "we tried X" note keeps only what would flip the answer.
+- **A comment is for what the code cannot say.** Default to none. One earns its place only where the code is not understandable without it: an external fact, a deliberate omission, or a constraint the next reader would otherwise "fix". State the constraint that holds now, never how it was found — a "we tried X" note keeps only what would flip the answer. True is not the bar; necessary is.
 - Comment what you skipped on purpose: security cases, edge cases, code left unoptimized.
 - No repeated functions. Generalise what gets reused.
 - Readable and maintainable first. Optimise where it pays, not where it costs clarity.
@@ -162,6 +162,7 @@ Say so and ask which wins, before acting on either reading. Quote the line and s
 
 - **The fewest words that carry the meaning.** If a sentence can come out without losing something, take it out.
 - No filler. Don't restate the request, don't summarise what you just wrote, don't close with a line that adds nothing.
+- **A changelog entry is the gist of a change, not its diff.** A whole PR gets a handful of lines saying what was solved or changed — never one bullet per fix, never how it was verified or which files moved. Several defects of a kind are one line between them. If it reads like a list of commits, it is still wrong.
 - State what **is** — not what was, not what changed.
 - Break into points. Write a paragraph only when points genuinely can't carry it.
 - State the fact instead of pointing at the file that holds it.
