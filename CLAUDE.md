@@ -216,8 +216,10 @@ Keep the PR itself short:
 
 A retro is a toolkit learning: something inefficient a toolkit change would fix, a pattern that works better than what we tell agents to do, or a repetition worth a skill or a plugin.
 
-Agents end their report with a `Retro:` line when they have one. When you get one, or hit one yourself, append a line to `~/.claude/agent-toolkit/RETRO.md`:
+Every agent ends its report with a `Retro:` line — one line, or `Retro: none`. It is required, so the answer exists either way, and `hooks/retro.py` harvests it straight from the transcript: an agent's line is never transcribed by hand.
+
+A learning of your own goes to `~/.claude/agent-toolkit/RETRO.md`:
 
 `- YYYY-MM-DD · <agent> · <project> — <what was inefficient, and what would be better>`
 
-Never change the toolkit mid-task. The log is reviewed on demand — that's the `toolkit` skill.
+Never change the toolkit mid-task. Both are read on demand — that's the `toolkit` skill.

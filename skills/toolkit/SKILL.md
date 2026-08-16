@@ -1,6 +1,6 @@
 ---
 name: toolkit
-description: Change the agent toolkit itself, and review the retro log. Use when the user says "add this to the toolkit", "remember this globally", "make this a rule everywhere", when editing anything in the agent-toolkit repo (CLAUDE.md, agents/, skills/, hooks/, install.sh), when reviewing RETRO.md or asking what the toolkit should learn, or when the session-start doctor reports the toolkit broken.
+description: Change the agent toolkit itself, and run a retro. Use when the user says "add this to the toolkit", "remember this globally", "make this a rule everywhere", when editing anything in the agent-toolkit repo (CLAUDE.md, agents/, skills/, hooks/, install.sh), when running a retro or asking what the toolkit should learn, or when the session-start doctor reports the toolkit broken.
 ---
 
 # Toolkit
@@ -23,15 +23,20 @@ One home. Never state the same rule in two places.
 
 `CLAUDE.md` loads in every session and every agent, so it stays short. If a rule needs a paragraph to explain itself, it is a skill.
 
-## Reviewing the retro log
+## Running a retro
 
-`RETRO.md` collects one-line learnings from sessions and agents. Review it on demand, never mid-task.
+`hooks/retro.py review` prints a digest of every compaction segment closed since the last accepted retro. It reads a machine-local store, writes nothing, and `--all` digests everything ever recorded. The recorder behind it rides hooks and never needs running by hand.
 
-1. Read the log. Group lines that are the same underlying problem worded differently.
-2. Rank by recurrence, and above all by how many different projects a line appears in — the same slip across several projects is a toolkit problem, the same slip in one repo is usually a quirk of that repo.
-3. For each group, decide: is this a rule we don't have, or a rule we have that didn't fire? A rule that didn't fire needs sharper wording, not a second rule beside it.
-4. Present the candidates to the user as a checklist. Only ticked ones land.
-5. Delete the lines you acted on. Leave the ones that are still just noise.
+An empty digest ends the review. A retro with no data is not a brainstorm.
+
+1. Run the digest. Read `RETRO.md` alongside it for the hand-written lines it cannot know about.
+2. Group what the digest shows into candidate toolkit changes. Several rows that are the same underlying problem are one candidate.
+3. Rank by projects first, then recurrence — the same slip across several projects is a toolkit problem, the same slip in one repo is usually a quirk of that repo.
+4. For each candidate, decide: is this a rule we don't have, or a rule we have that didn't fire? A rule that didn't fire needs sharper wording, not a second rule beside it.
+5. Present the candidates to the user as a checklist. Only ticked ones land.
+6. Then, and only then, `hooks/retro.py review --accept <seq>` with the sequence the digest named, so the same segments do not come back. Delete the `RETRO.md` lines you acted on.
+
+An `incomplete:` line in the window means the recorder could not read something, so a figure below it is short by an unknown amount. Say so when you rank, rather than reading it as a low number.
 
 ## Verifying a change
 

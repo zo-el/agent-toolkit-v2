@@ -53,4 +53,4 @@ Self-contained — nobody sees your transcript:
 - The build units: title, outcome, acceptance criteria, order.
 - The coverage argument: every promise → a unit.
 - Decisions made, decisions deliberately left to the developer, and anything the user has to settle.
-- `Retro:` one line, only if there is a real toolkit learning.
+- `Retro:` one line, or `Retro: none`. It is recorded, not transcribed.

@@ -108,11 +108,22 @@ fi
 #
 # taskline must stay synchronous: only a hook that finishes before the turn does
 # has its stdout injected as context, and an async one would print into the void.
+#
+# The retro recorder is the mirror image: async on every event, so it can neither
+# block a turn nor inject its stdout. No single trigger is load-bearing —
+# whichever fires first catches up everything the others missed — and --interval
+# is the whole scheduling mechanism, so nothing lands outside this repo and
+# ~/.claude.
 WIRING='[
   {"event":"SessionStart","matcher":"startup|resume|clear",
    "hooks":[{"command":"/install.sh --sync"}]},
+  {"event":"SessionStart","matcher":"",
+   "hooks":[{"command":"/hooks/retro.py record","async":true}]},
+  {"event":"PreCompact","matcher":"",
+   "hooks":[{"command":"/hooks/retro.py record","async":true}]},
   {"event":"UserPromptSubmit","matcher":"",
-   "hooks":[{"command":"/hooks/taskline.py"}]},
+   "hooks":[{"command":"/hooks/taskline.py"},
+            {"command":"/hooks/retro.py record --interval 900","async":true}]},
   {"event":"PreToolUse","matcher":"Bash",
    "hooks":[{"command":"/hooks/guard.sh"}]},
   {"event":"PreToolUse","matcher":"mcp__linear.*",
@@ -121,7 +132,8 @@ WIRING='[
    "hooks":[{"command":"/hooks/sync.sh"},
             {"command":"/hooks/format.sh","async":true}]},
   {"event":"SessionEnd","matcher":"",
-   "hooks":[{"command":"/hooks/reap.sh"}]}
+   "hooks":[{"command":"/hooks/reap.sh"},
+            {"command":"/hooks/retro.py record","async":true}]}
 ]'
 
 # No apostrophes anywhere in the jq program below — it is a single-quoted shell
@@ -277,7 +289,17 @@ else
   say "✓ ~/.claude/CLAUDE.md already current"
 fi
 
-# ── 6. doctor ────────────────────────────────────────────────────────────────
+# ── 6. retro store ───────────────────────────────────────────────────────────
+# The since marker is stamped once, at first install, and never rewritten: it is
+# what keeps every transcript written before this toolkit out of the data.
+if [ "$MODE" = "--dry-run" ]; then
+  [ -f "$CLAUDE_DIR/retro/since" ] || echo "retro: $CLAUDE_DIR/retro/since would be created"
+else
+  mkdir -p "$CLAUDE_DIR/retro"
+  [ -f "$CLAUDE_DIR/retro/since" ] || date -u +%Y-%m-%dT%H:%M:%SZ > "$CLAUDE_DIR/retro/since"
+fi
+
+# ── 7. doctor ────────────────────────────────────────────────────────────────
 for f in "$ROOT"/hooks/*.sh "$ROOT"/hooks/*.py "$ROOT/install.sh"; do
   [ -x "$f" ] || warn "not executable: $f"
 done
@@ -294,6 +316,56 @@ if command -v python3 >/dev/null 2>&1; then
   if ! err="$(python3 -m py_compile "$ROOT"/hooks/*.py "$ROOT"/hooks/lib/*.py 2>&1)"; then
     warn "a python hook does not compile — $(printf '%s' "$err" | tail -1)"
   fi
+  # Advisory, like the plugin lines below: a re-install cannot add a missing
+  # stdlib module, so it must not withhold the version stamp. The recorder is
+  # inert without it and every other hook is unaffected.
+  python3 -c 'import sqlite3' >/dev/null 2>&1 \
+    || echo "agent-toolkit: ! python3 has no sqlite3 module — the retro recorder cannot store anything"
+  # The recorder degrades to silence by design, so silence is not evidence that
+  # it is working. This is what tells the difference: a marker it can read, and
+  # a store it can open at a schema it knows.
+  retro_state="$(python3 - "$CLAUDE_DIR" "$ROOT/hooks/retro.py" <<'PY' 2>/dev/null || true
+import os, sys
+
+store = os.path.join(sys.argv[1], "retro")
+marker = os.path.join(store, "since")
+try:
+    with open(marker) as f:
+        raw = f.read(64).strip()
+except OSError:
+    raw = None
+if raw is None:
+    print("retro/since is missing — nothing will be recorded until it is stamped")
+else:
+    from datetime import datetime
+
+    try:
+        datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        print("retro/since is not a timestamp (%r) — nothing is being recorded" % raw[:32])
+db = os.path.join(store, "retro.db")
+if os.path.exists(db):
+    try:
+        import re
+        import sqlite3
+
+        # The version the recorder itself declares, so this cannot drift from it.
+        wanted = int(
+            re.search(r"^SCHEMA_VERSION = (\d+)", open(sys.argv[2]).read(), re.M).group(1)
+        )
+        conn = sqlite3.connect(db)
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.close()
+        if version != wanted:
+            print(
+                "retro.db is schema version %d; this toolkit reads version %d"
+                % (version, wanted)
+            )
+    except Exception as failure:
+        print("retro.db will not open — %s" % failure)
+PY
+)"
+  [ -z "$retro_state" ] || echo "agent-toolkit: ! $retro_state"
 fi
 
 # Our wiring must be present, not merely valid. Checking only the paths found in
@@ -357,7 +429,7 @@ if [ "$MODE" != "--dry-run" ] && command -v jq >/dev/null 2>&1; then
     || echo "agent-toolkit: ! notifications fire for sub-agents — set notifications.suppressForSubagents to true in $ncfg"
 fi
 
-# ── 7. version stamp ─────────────────────────────────────────────────────────
+# ── 8. version stamp ─────────────────────────────────────────────────────────
 # The statusline shows this and flags it once the repo moves past it. Any run
 # that actually applies something stamps; only --dry-run is excluded. Held back
 # while a problem stands, so the light never claims changes are applied when a

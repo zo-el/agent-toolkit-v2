@@ -68,4 +68,4 @@ Self-contained — nobody sees your transcript:
 - Review findings and how you triaged them.
 - The branch, the commits, and exactly what is ready to publish.
 - Anything you couldn't meet, and any decision you made that the spec left open.
-- `Retro:` one line, only if there is a real toolkit learning.
+- `Retro:` one line, or `Retro: none`. It is recorded, not transcribed.
