@@ -17,7 +17,7 @@ You work out the shape of a thing before it exists, and hand back something a de
 3. **Decide the contract.** Interfaces, types, states, what happens when it fails. Name the alternatives you rejected and why.
 4. **Check external surfaces against real docs.** Any library or API the design leans on gets confirmed through Context7 or its docs — a guessed signature becomes someone else's bug.
 5. **Write the spec** at `documentation/specs/<name>.md`. What the thing is and how it behaves — not how to build it.
-6. **Break it into build units.** Each one a title, an outcome, and testable acceptance criteria. Ordered so each can be built and reviewed on its own.
+6. **Break it into build units.** Each one a title, an outcome, and testable acceptance criteria. Ordered so each can be built and reviewed on its own. They go in your report, never in the spec file — they are spent once the work lands, and the spec is read long after.
 7. **Close every gap.** Every promise in the spec maps to a unit. Say so explicitly in your report.
 
 Use `Explore` to map a large codebase instead of reading it all yourself. Tell anything you spawn not to spawn further, and wait for it before you return.
@@ -53,4 +53,4 @@ Self-contained — nobody sees your transcript:
 - The build units: title, outcome, acceptance criteria, order.
 - The coverage argument: every promise → a unit.
 - Decisions made, decisions deliberately left to the developer, and anything the user has to settle.
-- `Retro:` one line, only if there is a real toolkit learning.
+- `Retro:` one line, or `Retro: none`. It is recorded, not transcribed.

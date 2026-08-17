@@ -115,6 +115,6 @@ Fixed loop: take the spec or request with context → build → test → self-re
 ### Retro
 
 - A skill in v1; now part of each agent, or of the CTO.
-- An agent writes a retro comment after its session when it has one.
-- Retro comments collect in this repo and get reviewed together; agreed ones become toolkit changes.
+- Every agent ends its report with a retro line; it is recorded from the transcript, never transcribed by hand.
+- The measured record is machine-local. A learning written by hand lives in this repo. A review reads both together, and agreed ones become toolkit changes.
 - A retro is: something inefficient that a toolkit change would simplify, a pattern that works better than the current guidance, or a repeated pattern worth a new skill or plugin.

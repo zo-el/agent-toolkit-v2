@@ -108,11 +108,22 @@ fi
 #
 # taskline must stay synchronous: only a hook that finishes before the turn does
 # has its stdout injected as context, and an async one would print into the void.
+#
+# The retro recorder is the mirror image: async on every event, so it can neither
+# block a turn nor inject its stdout. No single trigger is load-bearing —
+# whichever fires first catches up everything the others missed — and --interval
+# is the whole scheduling mechanism, so nothing lands outside this repo and
+# ~/.claude.
 WIRING='[
   {"event":"SessionStart","matcher":"startup|resume|clear",
    "hooks":[{"command":"/install.sh --sync"}]},
+  {"event":"SessionStart","matcher":"",
+   "hooks":[{"command":"/hooks/retro.py record","async":true}]},
+  {"event":"PreCompact","matcher":"",
+   "hooks":[{"command":"/hooks/retro.py record","async":true}]},
   {"event":"UserPromptSubmit","matcher":"",
-   "hooks":[{"command":"/hooks/taskline.py"}]},
+   "hooks":[{"command":"/hooks/taskline.py"},
+            {"command":"/hooks/retro.py record --interval 900","async":true}]},
   {"event":"PreToolUse","matcher":"Bash",
    "hooks":[{"command":"/hooks/guard.sh"}]},
   {"event":"PreToolUse","matcher":"mcp__linear.*",
@@ -121,7 +132,8 @@ WIRING='[
    "hooks":[{"command":"/hooks/sync.sh"},
             {"command":"/hooks/format.sh","async":true}]},
   {"event":"SessionEnd","matcher":"",
-   "hooks":[{"command":"/hooks/reap.sh"}]}
+   "hooks":[{"command":"/hooks/reap.sh"},
+            {"command":"/hooks/retro.py record","async":true}]}
 ]'
 
 # No apostrophes anywhere in the jq program below — it is a single-quoted shell
@@ -277,7 +289,17 @@ else
   say "✓ ~/.claude/CLAUDE.md already current"
 fi
 
-# ── 6. doctor ────────────────────────────────────────────────────────────────
+# ── 6. retro store ───────────────────────────────────────────────────────────
+# The since marker is stamped once, at first install, and never rewritten: it is
+# what keeps every transcript written before this toolkit out of the data.
+if [ "$MODE" = "--dry-run" ]; then
+  [ -f "$CLAUDE_DIR/retro/since" ] || echo "retro: $CLAUDE_DIR/retro/since would be created"
+else
+  mkdir -p "$CLAUDE_DIR/retro"
+  [ -f "$CLAUDE_DIR/retro/since" ] || date -u +%Y-%m-%dT%H:%M:%SZ > "$CLAUDE_DIR/retro/since"
+fi
+
+# ── 7. doctor ────────────────────────────────────────────────────────────────
 for f in "$ROOT"/hooks/*.sh "$ROOT"/hooks/*.py "$ROOT/install.sh"; do
   [ -x "$f" ] || warn "not executable: $f"
 done
@@ -287,13 +309,64 @@ done
 # and the whole task line while still exiting clean. This is what says so out
 # loud, and it carries the interpreter's own last line so the reason is not lost.
 if command -v python3 >/dev/null 2>&1; then
-  if ! err="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import lib.tasks' \
+  if ! err="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import lib.out, lib.tasks' \
               "$ROOT/hooks" 2>&1)"; then
     warn "hooks/lib does not import — $(printf '%s' "$err" | tail -1)"
   fi
   if ! err="$(python3 -m py_compile "$ROOT"/hooks/*.py "$ROOT"/hooks/lib/*.py 2>&1)"; then
     warn "a python hook does not compile — $(printf '%s' "$err" | tail -1)"
   fi
+  # Advisory, like the plugin lines below: a re-install cannot add a missing
+  # stdlib module, so it must not withhold the version stamp. The recorder is
+  # inert without it and every other hook is unaffected.
+  python3 -c 'import sqlite3' >/dev/null 2>&1 \
+    || echo "agent-toolkit: ! python3 has no sqlite3 module — the retro recorder cannot store anything"
+  # The recorder degrades to silence by design, so silence is not evidence that
+  # it is working. This is what tells the difference: a marker it can read, and
+  # a store it can open at a schema it knows.
+  retro_state="$(python3 - "$ROOT/hooks" <<'PY' 2>/dev/null || true
+import os
+import sys
+
+# retro.py's own answers, not a second copy of them: it owns where the store
+# lives, what a marker has to look like and which schema it reads, and a doctor
+# that re-derived any of those would drift from it in silence.
+sys.path.insert(0, sys.argv[1])
+source = open(os.path.join(sys.argv[1], "retro.py")).read()
+recorder = {}
+exec(compile(source.replace('if __name__ == "__main__":', "if False:"), "retro", "exec"), recorder)
+
+try:
+    with open(recorder["SINCE_PATH"]) as f:
+        raw = f.read(64).strip()
+except OSError:
+    raw = None
+if raw is None:
+    print("retro/since is missing — nothing will be recorded until it is stamped")
+elif recorder["parse_iso"](raw) is None:
+    print("retro/since is not a timestamp (%r) — nothing is being recorded" % raw[:32])
+
+if os.path.exists(recorder["DB_PATH"]):
+    problem = recorder["store_problem"]()
+    # store_problem answers for a store that will not open at all; one that
+    # opens and reads clean has nothing to say.
+    if recorder["open_store"](create=False) is None:
+        print(problem)
+PY
+)"
+  # One line each: the block can report a marker and a store in the same breath,
+  # and a single prefixed echo would label the first and orphan the second.
+  # --dry-run wrote nothing, so it does not also complain that nothing is there;
+  # it has already said it would create it.
+  # The || keeps the last line: the block's output has no trailing newline, and
+  # read reports failure on it while still having filled the variable.
+  printf '%s' "$retro_state" | while IFS= read -r problem || [ -n "$problem" ]; do
+    [ -z "$problem" ] && continue
+    case "$MODE:$problem" in
+      --dry-run:*"since is missing"*) continue ;;
+    esac
+    echo "agent-toolkit: ! $problem"
+  done
 fi
 
 # Our wiring must be present, not merely valid. Checking only the paths found in
@@ -357,7 +430,7 @@ if [ "$MODE" != "--dry-run" ] && command -v jq >/dev/null 2>&1; then
     || echo "agent-toolkit: ! notifications fire for sub-agents — set notifications.suppressForSubagents to true in $ncfg"
 fi
 
-# ── 7. version stamp ─────────────────────────────────────────────────────────
+# ── 8. version stamp ─────────────────────────────────────────────────────────
 # The statusline shows this and flags it once the repo moves past it. Any run
 # that actually applies something stamps; only --dry-run is excluded. Held back
 # while a problem stands, so the light never claims changes are applied when a

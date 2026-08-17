@@ -29,9 +29,9 @@ The checkout can live anywhere. Device config reaches it only through the `~/.cl
 | `CLAUDE.md` | the agreement: the CTO loop, tasks, code and writing style, the gates |
 | `agents/` | architect · developer · reviewer · project-manager · researcher |
 | `skills/` | `backlog` · `toolkit` (change this repo) · `ui-review` (screenshot galleries) |
-| `hooks/` | the guard, the statusline, the task line, the formatter, background process tracking |
+| `hooks/` | the guard, the statusline, the task line, the retro recorder, the formatter, background process tracking |
 | `install.sh` | wiring and the doctor |
-| `RETRO.md` | learnings collected from sessions, reviewed on demand |
+| `RETRO.md` | learnings written by hand, read alongside the retro digest |
 | `documentation/brief.md` | what this toolkit is for |
 
 ## The agents
@@ -61,7 +61,7 @@ Sessions on this machine work on different projects and must not reach into each
 
 Everything else is silent. `permissions.defaultMode` is `auto` and `~/.claude`, the scratchpad, and this checkout are approved working directories, so an agent runs unattended instead of stalling on a prompt nobody is watching. `Read` is denied on the credentials and settings files, which carry API tokens.
 
-[`tests/run.sh`](tests/run.sh) is the regression suite for all of it.
+[`tests/run.sh`](tests/run.sh) is the regression suite for all of it. It ends in [`tests/duplication.sh`](tests/duplication.sh), which fails the suite on copy-pasted shell or python and skips itself where `jscpd` cannot be reached.
 
 ## Task line
 
@@ -77,6 +77,19 @@ Tasks: 2 open · Retro — spec (in_progress, arch-retro) · Retro — build (bl
 - **A list read only in part** — a file being written as it is read, or one that will not open — says `(partial list)` after the count. A list that cannot be read at all prints nothing: "none open" would be a guess, and it is a guess that tells the model to open a lane that already exists.
 
 Two separate things stand between a session and its task list, and `install.sh` settles both: `CLAUDE_CODE_ENABLE_TODO_TOOLS` opts out of the removal of the tools for this generation of models, and the hint above covers the deferral that keeps their schemas unloaded until something asks. The hook itself never blocks a turn and exits 0 on every path, including its own failure.
+
+## Retro
+
+[`hooks/retro.py`](hooks/retro.py) records what the toolkit is actually costing, so a retro runs off data instead of recall. It digests Claude Code's own transcripts into `~/.claude/retro/retro.db` — machine-local, never in this repo — and `hooks/retro.py review` prints the digest the `toolkit` skill judges.
+
+The unit is the **compaction segment**, not the session: sessions here run for weeks across dozens of compactions, and a per-session row would average all of it into one number. A segment is reviewable once it is closed, and each one is reviewed exactly once.
+
+It answers toolkit questions, not cost questions — every agent's `Retro:` line is harvested straight from its transcript, so the answer exists whether or not anyone remembered to write it down.
+
+- **Counts and shapes only.** Never prompt text, file contents, command arguments, an agent's brief or its report. Two exceptions are deliberate: the normalised command verb (`git push`, `npm install`, and a driver's subcommand), because a recurring permission prompt cannot be recognised without it, and the agent's own `Retro:` line.
+- **No backfill.** A `since` marker is stamped at install and everything written before it is invisible, permanently.
+- **Four triggers, all async** — session start, compaction, session end, and a prompt at most every 15 minutes. None is load-bearing; whichever fires first catches up what the others missed, which is what keeps it off cron and out of a daemon.
+- Every path degrades to silence and exits 0, and it writes nothing to stdout. Silence is therefore not evidence that it works, so the session-start doctor checks the marker and the store instead.
 
 ## Statusline
 

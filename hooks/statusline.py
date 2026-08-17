@@ -388,7 +388,35 @@ def segment_toolkit():
     return f"{DIM}⬡ {label}{RESET}{marker}"
 
 
+def shared_out():
+    """(print_line, utf8_stdout), or builtins that do the same job less well.
+
+    Imported here rather than at module level: an import that fails above
+    __main__'s guard would put a traceback in the bar. Guarded as well as
+    deferred, because a checkout missing this module should cost the glyphs of
+    one segment, not the whole line — the doctor is what says it is missing.
+    """
+    try:
+        from lib.out import print_line, utf8_stdout
+
+        return print_line, utf8_stdout
+    except Exception:
+
+        def plain(text):
+            # Flushed, because the exit below is os._exit: it takes no buffer
+            # with it, and an unflushed line is the same as no line at all.
+            try:
+                print(text)
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+        return plain, lambda: None
+
+
 def main():
+    print_line, utf8_stdout = shared_out()
+    utf8_stdout()
     try:
         data = json.load(sys.stdin)
     except Exception:
@@ -399,17 +427,23 @@ def main():
 
     tail = head = ""
     transcript = data.get("transcript_path")
-    if transcript:
+    if isinstance(transcript, str) and transcript:
         try:
             tail, head = read_chunks(transcript)
         except OSError:
             pass
 
-    cwd = (
-        (data.get("workspace") or {}).get("current_dir")
-        or data.get("cwd")
-        or os.getcwd()
-    )
+    workspace = data.get("workspace")
+    cwd = (workspace if isinstance(workspace, dict) else {}).get(
+        "current_dir"
+    ) or data.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        try:
+            cwd = os.getcwd()
+        except OSError:
+            # Deleted under the session. Only the segments that read it drop
+            # out; the rest of the line stands.
+            cwd = ""
     now = time.time()
     segments = []
     for build in (
@@ -430,8 +464,16 @@ def main():
             seg = None
         if seg:
             segments.append(seg)
-    print(SEP.join(segments))
+    print_line(SEP.join(segments))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # Below every guard inside main(): the bar shows a status or nothing.
+        pass
+    finally:
+        # Interpreter shutdown flushes stdout outside every guard above, and a
+        # reader that closed the pipe makes that flush exit 120.
+        os._exit(0)
