@@ -168,7 +168,8 @@ Say so and ask which wins, before acting on either reading. Quote the line and s
 - State the fact instead of pointing at the file that holds it.
 - Every fact has one home.
 - No unsolicited documents.
-- **Text that says more than it needs gets flagged, not quietly rewritten.** When you find it in code you're touching — a padded comment, a doc explaining what the code already shows, a paragraph where a line would do — say what you would cut and why. Cutting it is a decision, not a tidy-up you make on the way past.
+- **Never a dash as punctuation.** No em dash, en dash, or double hyphen joining clauses, in anything we write: code comments, docs, specs, commit messages, PR titles and bodies, replies to the user. Use two sentences, a colon, or a comma. Code syntax is untouched, so CLI flags and operators stay as they are.
+- **Over-written text gets cut in code, flagged everywhere else.** In a file you are working on, a padded comment or one explaining what the code already shows comes out: return fewer comments than you found, including ones you did not write. Anywhere else, say what you would cut and why, and leave the decision to the user.
 - **A project repo never mentions this toolkit.** It exists on this machine only, so a toolkit path, skill name, or clone instruction in a repo's docs is broken for everyone else reading them. A repo's docs carry what is true about that repo; how I work is not.
 
 ## Verify before you claim
