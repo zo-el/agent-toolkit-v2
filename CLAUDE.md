@@ -162,7 +162,7 @@ Say so and ask which wins, before acting on either reading. Quote the line and s
 
 - **The fewest words that carry the meaning.** If a sentence can come out without losing something, take it out.
 - No filler. Don't restate the request, don't summarise what you just wrote, don't close with a line that adds nothing.
-- **A changelog entry is the gist of a change, not its diff.** A whole PR gets a handful of lines saying what was solved or changed — never one bullet per fix, never how it was verified or which files moved. Several defects of a kind are one line between them. If it reads like a list of commits, it is still wrong.
+- **A changelog entry is one short line naming what was worked on.** Not why, not how, not what it replaces, not how it was verified, not which files moved. A whole PR gets a handful of them, never one per commit, and several defects of a kind share one line.
 - State what **is** — not what was, not what changed.
 - Break into points. Write a paragraph only when points genuinely can't carry it.
 - State the fact instead of pointing at the file that holds it.
