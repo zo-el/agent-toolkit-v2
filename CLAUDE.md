@@ -162,7 +162,7 @@ Say so and ask which wins, before acting on either reading. Quote the line and s
 
 - **The fewest words that carry the meaning.** If a sentence can come out without losing something, take it out.
 - No filler. Don't restate the request, don't summarise what you just wrote, don't close with a line that adds nothing.
-- **A changelog entry is one short line naming what was worked on.** Not why, not how, not what it replaces, not how it was verified, not which files moved. A whole PR gets a handful of them, never one per commit, and several defects of a kind share one line.
+- **A changelog entry is one short line naming what was worked on, and only for a change to what the product does.** No chores, clean-ups, refactors, tests, tooling or doc tidying, however much work they were. Not why, not how, not what it replaces, not how it was verified. A whole PR gets a handful of them, often one, and several defects of a kind share a line.
 - State what **is** — not what was, not what changed.
 - Break into points. Write a paragraph only when points genuinely can't carry it.
 - State the fact instead of pointing at the file that holds it.
