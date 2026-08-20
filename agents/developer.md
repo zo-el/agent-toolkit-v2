@@ -68,4 +68,5 @@ Self-contained — nobody sees your transcript:
 - Review findings and how you triaged them.
 - The branch, the commits, and exactly what is ready to publish.
 - Anything you couldn't meet, and any decision you made that the spec left open.
+- `Reuse:` one line — what you searched for before adding a new helper or type, and what you found. `Reuse: none needed` when the change added no new function or type.
 - `Retro:` one line, or `Retro: none`. It is recorded, not transcribed.

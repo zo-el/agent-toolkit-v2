@@ -153,7 +153,7 @@ Say so and ask which wins, before acting on either reading. Quote the line and s
 - Comment what you skipped on purpose: security cases, edge cases, code left unoptimized.
 - No repeated functions. Generalise what gets reused.
 - Readable and maintainable first. Optimise where it pays, not where it costs clarity.
-- Use a known library before hand-rolling one.
+- **Search before you write a helper.** Grep for what it would do, not what you would call it, and read the workspace's dependency manifests: a crate another member already declares costs one line to use. A utility is the most duplicated kind of code there is, and the search takes seconds against a function you maintain forever.
 - Every change ships with the test that proves the new behaviour. Existing tests passing only proves you didn't break the old one.
 - Simple but finished. No half-implementations, no dangling TODOs, no "clean up later".
 - Rename or remove something → fix every reference in the same change. Grep the whole repo, including ignored directories.
