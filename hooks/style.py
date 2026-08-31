@@ -725,25 +725,30 @@ def message_findings(message, quotable):
 
 
 def diff_findings(files):
+    """(the finding a commit has one of, the findings it has many of).
+
+    Two lists because the report shows only its first FINDINGS_SHOWN: drift
+    reported behind a file's worth of dashes is never read at all, so the caller
+    puts it at the head of everything.
+    """
     files = [record for record in files if not excluded(record["path"])]
-    findings = []
-    # First: the report shows FINDINGS_SHOWN of these, and there is one drift
-    # finding, so anywhere behind a file's worth of dashes is off the end.
-    added, removed, paths = comment_drift(files)
-    if added - removed >= COMMENT_NET:
-        findings.append(
-            "comments: +%d/-%d in %s (limit +%d net)"
-            % (added, removed, ", ".join(paths), COMMENT_NET)
-        )
+    detail = []
     for record in files:
         for number, text in added_prose(record):
             for name, index in dashes(text):
-                findings.append(
+                detail.append(
                     '%s:%d: %s in "%s"'
                     % (record["path"], number, name, fragment(text, index))
                 )
-        findings.extend(changelog_findings(record))
-    return findings
+        detail.extend(changelog_findings(record))
+    drift = []
+    added, removed, paths = comment_drift(files)
+    if added - removed >= COMMENT_NET:
+        drift.append(
+            "comments: +%d/-%d in %s (limit +%d net)"
+            % (added, removed, ", ".join(paths), COMMENT_NET)
+        )
+    return drift, detail
 
 
 def changelog_findings(record):
@@ -863,7 +868,8 @@ def commit_findings(commit, cwd):
         except GitUnavailable:
             text = None
         if text is not None:
-            findings.extend(diff_findings(diff_records(text)))
+            drift, detail = diff_findings(diff_records(text))
+            findings = drift + findings + detail
     return findings
 
 

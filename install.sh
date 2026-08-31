@@ -102,9 +102,9 @@ fi
 # the doctor checks the installed file against it. Neither side can drift.
 # Commands are relative to $STABLE; matcher "" means the event takes none.
 #
-# Notification events (Notification, Stop) are deliberately absent: the
-# claude-notifications-go plugin owns them, and which of them reach the user is
-# its own configuration, not this toolkit's to hold an opinion on.
+# Notification events (Notification, Stop, SubagentStop) are deliberately
+# absent: the claude-notifications-go plugin owns them, and which of them reach
+# the user is its own configuration.
 #
 # taskline and style must stay synchronous. Only a hook that finishes before the
 # turn or the tool call does is read at all: an async taskline prints its line

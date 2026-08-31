@@ -577,13 +577,32 @@ check "and the count is of all of them" "45 findings" "$out"
 undo
 
 # A commit has one drift finding and can have a file's worth of dashes, so the
-# cut is what decides whether the one is ever read.
+# cut is what decides whether the one is ever read. A message fills the report
+# on its own just as well.
 comments "$FX/mod.py" 45 'x = 1' "note $EM"
 stage
 out="$(why "$(fx 'git commit -m "many notes"')")"
-check "drift survives a report that is cut"  "comments: +45/-0 in mod.py" "$out"
+check "drift survives a report that is cut" "comments: +45/-0 in mod.py" "$out"
 check "and the cut says only how many"      "and 6 more not shown" "$out"
 check "and every finding is counted"        "46 findings" "$out"
+python3 - "$TMP/msg.txt" "$EM" <<'PY'
+import sys
+open(sys.argv[1], "w").write("".join("note %s line %d\n" % (sys.argv[2], i) for i in range(40)))
+PY
+out="$(why "$(fx "git commit -F $TMP/msg.txt")")"
+check "drift leads a report the message fills" "comments: +45/-0 in mod.py" "$out"
+check "and that report is still whole"         "86 findings" "$out"
+undo
+
+# At exactly the cap nothing is hidden, so the report must not say it is.
+comments "$FX/mod.py" 39 'x = 1' "note $EM"
+stage
+out="$(why "$(fx 'git commit -m "at the cap"')")"
+check "a report of exactly the cap is whole" "40 findings" "$out"
+case "$out" in
+  *"more not shown"*) bad "and says nothing is hidden" "$out" ;;
+  *)                  ok  "and says nothing is hidden" ;;
+esac
 undo
 
 quoted="$(why "$(fx "git commit -m \"first line
@@ -804,6 +823,18 @@ chmod +x "$TMP/nosqlite/python3"
 out="$(PATH="$TMP/nosqlite:$PATH" run_install)"
 check "the doctor flags a python without sqlite3" "no sqlite3 module" "$out"
 check "and the install is still green"            "all checks green"  "$out"
+
+# Which events notify is the plugin's setting and the user's decision. A doctor
+# with an opinion on it argues on every session start, where nobody can win.
+mkdir -p "$FAKE/.claude/claude-notifications-go"
+printf '{"notifications":{"suppressForSubagents":false,"notifyOnSubagentStop":true}}\n' \
+  > "$FAKE/.claude/claude-notifications-go/config.json"
+out="$(run_install)"
+case "$out" in
+  *suppressForSubagents*|*sub-agent*|*Subagent*)
+    bad "the doctor holds no view on the notification settings" "$out" ;;
+  *) check "the doctor holds no view on the notification settings" "all checks green" "$out" ;;
+esac
 # An async hook's stdout is never injected as context, so an async taskline
 # would print into the void. Asserted as the whole array, which also pins that
 # exactly one entry runs it.
@@ -2475,10 +2506,17 @@ lanes="$(grep 'Payments rework' "$ROOT/CLAUDE.md")"
 steps="$(printf '%s\n' "$lanes" | grep -c 'Payments rework: [a-z]')"
 [ "${steps:-0}" -ge 2 ] && ok "a lane's steps are named with a colon" \
   || bad "a lane's steps are named with a colon" "${steps:-0} lines in CLAUDE.md carry the form"
-case "$lanes" in
-  *"$EM"*|*"$EN"*|*--*) bad "and the example carries no dash" "$lanes" ;;
-  *)                    ok  "and the example carries no dash" ;;
+case "${lanes:-<nothing>}" in
+  *"$EM"*|*"$EN"*|*--*|"<nothing>") bad "and the example carries no dash" "$lanes" ;;
+  *)                                ok  "and the example carries no dash" ;;
 esac
+
+# The task line is published in README.md as well, inside a fenced block the
+# style hook is proven not to read. Only this holds the two together.
+for want in "$SPEC" "${HINT%%. Tools*}"; do
+  grep -qF "$want" "$ROOT/README.md" && ok "README publishes: $want" \
+    || bad "README publishes: $want" "README.md does not carry it"
+done
 written="$(grep -c '^- [0-9]' "$ROOT/RETRO.md")"
 shaped="$(grep -cE '^- [0-9-]+ · [^ ·]+ · [^ ·]+: ' "$ROOT/RETRO.md")"
 { [ "${written:-0}" -gt 0 ] && [ "$written" = "$shaped" ]; } \
