@@ -118,11 +118,23 @@ case "$(settings '.permissions.deny | join(" ")')" in
   *SendMessage*|*ListAgents*) bad "agents can still reach main" "SendMessage or ListAgents is denied" ;;
   *)                          ok "agents can still reach main" ;;
 esac
-missing=""
+# Glob and Grep are not tools this harness has, and an unknown name is dropped in
+# silence. Whole names, because BashOutput contains Bash, ListAgents contains
+# Agent, and neither searches. A duplicate key resolves to the last line.
+missing=""; unknown=""; blind=""
 for a in "$ROOT"/agents/*.md; do
-  grep -q '^tools:.*SendMessage' "$a" || missing="$missing $(basename "$a")"
+  n="$(basename "$a")"
+  names=",$(grep '^tools:' "$a" | tail -1 | sed 's/^tools://; s/[[:space:]]//g'),"
+  case "$names" in *,SendMessage,*)  ;; *) missing="$missing $n" ;; esac
+  case "$names" in *,Glob,*|*,Grep,*)  unknown="$unknown $n" ;; esac
+  case "$names" in *,Bash,*|*,Agent,*) ;; *) blind="$blind $n" ;; esac
 done
-[ -z "$missing" ] && ok "every agent carries SendMessage" || bad "every agent carries SendMessage" "missing in:$missing"
+[ -z "$missing" ] && ok "every agent carries SendMessage" \
+                  || bad "every agent carries SendMessage" "missing in:$missing"
+[ -z "$unknown" ] && ok "no agent asks for a tool the harness dropped" \
+                  || bad "no agent asks for a tool the harness dropped" "declared in:$unknown"
+[ -z "$blind" ] && ok "every agent can search a repo" \
+                || bad "every agent can search a repo" "no Bash or Agent in:$blind"
 check "foreign env kept"      "keep"          "$(settings '.env.MY_VAR')"
 check "foreign key kept"      "dark"          "$(settings '.theme')"
 check "foreign hook kept"     "/usr/bin/true" "$(settings '[.hooks.PreToolUse[].hooks[].command] | join(" ")')"
@@ -137,6 +149,24 @@ for want in "guard.sh" "reap.sh" "format.sh" "sync.sh" "taskline.py" "install.sh
   check "wires $want" "$want" "$(settings '[.hooks[][].hooks[].command] | join(" ")')"
 done
 check "linear matcher wired" "mcp__linear.*" "$(settings '[.hooks.PreToolUse[].matcher] | join(" ")')"
+
+# The doctor speaks by printing and exiting 1, which an async entry discards. An
+# empty matcher would cover all five sources and still reads red here, because
+# nothing tells it apart from the entry having gone.
+doctor="$FAKE/.claude/agent-toolkit/install.sh --sync"
+sync_matcher="$(settings "[.hooks.SessionStart[]
+  | select(any((.hooks // [])[]; (.command // \"\") == \"$doctor\"))
+  | .matcher // \"\"] | join(\"|\")")"
+unmatched=""
+for want in startup resume clear compact fork; do
+  case "|$sync_matcher|" in *"|$want|"*) ;; *) unmatched="$unmatched $want" ;; esac
+done
+[ -z "$unmatched" ] && ok "the doctor runs on every session source" \
+                    || bad "the doctor runs on every session source" \
+                       "not matched:$unmatched (matcher: ${sync_matcher:-<none>})"
+check "the doctor is wired synchronously" "[false]" \
+  "$(settings "[.hooks.SessionStart[].hooks[]
+     | select((.command // \"\") == \"$doctor\") | (.async // false)] | tostring")"
 
 # The recorder rides four events and no trigger is load-bearing, so all four
 # have to be there — and every one of them async, or a sweep could block a turn

@@ -175,10 +175,12 @@ Say so and ask which wins, before acting on either reading. Quote the line and s
 ## Verify before you claim
 
 - Check the actual code and the current state. Never trust memory, stale docs, or comments.
+- Check a load-bearing premise against its authoritative source, never a local cache: the remote over local branches, `git ls-remote --symref origin HEAD` over `refs/remotes/origin/HEAD`, the whole population over the one fixture in front of you. An answer the brief did not enumerate is a reason to escalate, not to pick the nearest option.
 - Confirm the cause before writing the fix.
 - Scale the checking to what the change can break. Never skip the floor: it builds, it's tested, references are swept.
 - Say what actually happened. Tests failed → show it. A step was skipped → say so.
-- A result carries the environment it was measured in. Reproduce the shape CI runs — its env, container, shell — before calling a gate green.
+- A result carries the environment it was measured in, so every measurement happens inside whatever wrapper pins the project's toolchain (`nix develop -c`, a container, a venv). A green measured outside it is not green.
+- Iterate against the targeted test rather than the whole suite. The full gate set runs before you hand back, and again after any fix it forced.
 
 ## Gates
 

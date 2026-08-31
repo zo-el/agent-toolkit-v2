@@ -115,7 +115,7 @@ fi
 # is the whole scheduling mechanism, so nothing lands outside this repo and
 # ~/.claude.
 WIRING='[
-  {"event":"SessionStart","matcher":"startup|resume|clear",
+  {"event":"SessionStart","matcher":"startup|resume|clear|compact|fork",
    "hooks":[{"command":"/install.sh --sync"}]},
   {"event":"SessionStart","matcher":"",
    "hooks":[{"command":"/hooks/retro.py record","async":true}]},
