@@ -112,6 +112,9 @@ HOOK="$ROOT/hooks/style.py"
 # this suite runs on 3.2 as well.
 EM="$(printf '\xe2\x80\x94')"
 EN="$(printf '\xe2\x80\x93')"
+# The retro format as a file publishes it. Out here because the documentation
+# check at the end of the suite runs past the fixture guard below.
+template() { sed -n 's/.*`\(- YYYY-MM-DD[^`]*\)`.*/\1/p' "$1"; }
 
 FX="$TMP/fixture"
 mkdir -p "$FX"
@@ -207,14 +210,19 @@ expect "a dash in markdown prose is denied" deny "$(fx 'git commit -m "docs"')"
 undo
 
 # A retro append is routine and correct, so it must never need the override.
-retro_log() { # separator between the metadata fields and the prose
-  printf '# Retro log\n\n- 2026-08-30 · developer · agent-toolkit%s a brief that names the sha it measures costs a round\n' \
-    "$1" > "$FX/RETRO.md"
-}
-retro_log ':'; stage
-expect "a retro line in the record format needs no override" silent "$(fx 'git commit -m "retro: a line"')"
-retro_log " $EM"; stage
-expect "and the separator it replaced is denied"             deny   "$(fx 'git commit -m "retro: a line"')"
+# Filled in from the format CLAUDE.md publishes, so it is that one under test.
+line="$(template "$ROOT/CLAUDE.md" | sed -e 's/YYYY-MM-DD/2026-08-30/' -e 's/<agent>/developer/' \
+  -e 's/<project>/agent-toolkit/' -e 's/<what was inefficient.*>/a brief naming its sha costs a round/')"
+case "$line" in
+  ""|*"<"*) bad "the published format fills in" "CLAUDE.md yielded: ${line:-<nothing>}" ;;
+  *)        ok  "the published format fills in" ;;
+esac
+log() { { printf '# Retro log\n\n'; [ $# -eq 0 ] || printf '%s\n' "$1"; } > "$FX/RETRO.md"; }
+log; stage; git -C "$FX" commit -q -m "the log" >/dev/null 2>&1
+log "$line"; stage
+expect "appending it needs no override" silent "$(fx 'git commit -m "retro: a line"')"
+log "- 2026-08-30 · developer · agent-toolkit $EM a brief naming its sha costs a round"; stage
+expect "and the separator it replaced is denied" deny "$(fx 'git commit -m "retro: a line"')"
 undo
 
 printf 'x = 1\n# a note %s with a dash\n' "$EM" > "$FX/mod.py"
@@ -247,8 +255,14 @@ case "$out" in
 esac
 undo
 
-comments "$FX/mod.py" 20 'x = 1'; stage
-check "comment drift is counted" "comments: +20/-0" "$(why "$(fx 'git commit -m "notes"')")"
+printf 'y = 1\n' > "$FX/b.py"; printf 'echo hi\n' > "$FX/c.sh"; stage
+git -C "$FX" commit -q -m "two more files" >/dev/null 2>&1
+comments "$FX/mod.py" 7 'x = 1'
+comments "$FX/b.py" 7 'y = 1'
+comments "$FX/c.sh" 7 'echo hi'
+stage
+check "drift is counted over the whole commit" "comments: +21/-0 in b.py, c.sh, mod.py" \
+  "$(why "$(fx 'git commit -m "notes"')")"
 undo
 comments "$FX/fresh.py" 25 'z = 1'; stage
 expect "a brand new file's comments do not count" silent "$(fx 'git commit -m "new module"')"
@@ -416,7 +430,7 @@ check "twenty reaches it" "comments: +20/-0 in mod.py (limit +20 net)" \
   "$(why "$(fx 'git commit -m "notes"')")"
 undo
 
-comments "$FX/mod.py" 25 'x = 1'; stage
+comments "$FX/mod.py" 25 'x = 1' note; stage
 git -C "$FX" commit -q -m "a page of comments" >/dev/null 2>&1
 comments "$FX/mod.py" 25 'x = 1' reworded; stage
 expect "rewriting comments is not drift" silent "$(fx 'git commit -m "reword"')"
@@ -2433,18 +2447,44 @@ for a in "$ROOT"/agents/*.md; do
 done
 [ -z "$missing" ] && ok "every agent must answer Retro" || bad "every agent must answer Retro" "missing in:$missing"
 
-# The written log's format, in both homes and in every line already written: a
-# colon, because a dash there would ask for an override on every append.
-FORMAT='<project>: <what was inefficient'
-{ grep -qF "$FORMAT" "$ROOT/CLAUDE.md" && grep -qF "$FORMAT" "$ROOT/RETRO.md"; } \
-  && ok "the retro format is stated the same in both homes" \
-  || bad "the retro format is stated the same in both homes" "CLAUDE.md and RETRO.md disagree"
-RECORD='^- [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] · '
-written="$(grep -cE "$RECORD" "$ROOT/RETRO.md")"
-shaped="$(grep -cE "$RECORD[^ ·]+ · [^ ·]+: " "$ROOT/RETRO.md")"
+# One wording in both homes, no dash in it, and every line already written
+# matching: a dash there would ask for an override on every append.
+published="$(template "$ROOT/CLAUDE.md")"
+{ [ -n "$published" ] && [ "$published" = "$(template "$ROOT/RETRO.md")" ]; } \
+  && ok "the retro format is one wording in both homes" \
+  || bad "the retro format is one wording in both homes" \
+         "CLAUDE.md has '${published:-<nothing>}', RETRO.md has '$(template "$ROOT/RETRO.md")'"
+case "$published" in
+  *"$EM"*|*"$EN"*|*--*) bad "and carries no dash of its own" "$published" ;;
+  *)                    ok  "and carries no dash of its own" ;;
+esac
+written="$(grep -c '^- [0-9]' "$ROOT/RETRO.md")"
+shaped="$(grep -cE '^- [0-9-]+ · [^ ·]+ · [^ ·]+: ' "$ROOT/RETRO.md")"
 { [ "${written:-0}" -gt 0 ] && [ "$written" = "$shaped" ]; } \
   && ok "every line in the log carries it" \
-  || bad "every line in the log carries it" "$shaped of ${written:-0} lines match"
+  || bad "every line in the log carries it" "${shaped:-0} of ${written:-0} lines match"
+
+# Each threshold is a judgement the spec argues for, so the two must not drift.
+drifted="$(python3 - "$ROOT" <<'PY'
+import re
+import sys
+
+root = sys.argv[1]
+code = open(root + "/hooks/style.py", encoding="utf-8").read()
+spec = open(root + "/documentation/specs/style-checks.md", encoding="utf-8").read()
+rows = re.findall(r"^\| `([A-Z_]+)` \| (\S+) \|", spec, re.M)
+said = []
+for name, documented in rows:
+    found = re.search(r"^%s = (\S+)$" % name, code, re.M)
+    if not found:
+        said.append("%s is documented but not in the hook" % name)
+    elif found.group(1) != documented:
+        said.append("%s is %s in the hook and %s in the spec" % (name, found.group(1), documented))
+print("; ".join(said) if said else ("" if rows else "the spec states no thresholds at all"))
+PY
+)"
+[ -z "$drifted" ] && ok "the spec's thresholds are the hook's" \
+                  || bad "the spec's thresholds are the hook's" "$drifted"
 
 # ── bg + reap ────────────────────────────────────────────────────────────────
 echo "bg.sh + reap.sh"
