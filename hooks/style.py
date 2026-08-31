@@ -22,20 +22,14 @@ import os
 import re
 import sys
 
-# shlex, subprocess and traceback are imported where they are used. This hook
-# runs on every Bash call and returns on the first character of most of them,
-# and at that scale their import time is the whole cost of the check.
+# shlex, subprocess and traceback are imported where they are used, because this
+# runs on every Bash call and returns on the first character of most of them.
 
-# Thresholds. Grounded guesses, meant to move once the check has been seen
-# firing: 943 changelog bullets measured across this machine's projects have a
-# median of 94 characters against a rule whose own example is 44.
+# Thresholds, grounded in documentation/specs/style-checks.md and meant to move.
 CHANGELOG_ENTRY_CHARS = 160
 CHANGELOG_ENTRY_COUNT = 5
-# One genuinely earned comment must not trip it.
 COMMENT_NET = 3
-# Past this a commit is an import or a vendor drop, and its prose is not ours.
 DIFF_LINE_CAP = 5000
-# The deny reason has to be actionable in one pass, not exhaustive past reading.
 FINDINGS_SHOWN = 40
 MESSAGE_FILE_BYTES = 65536
 GIT_TIMEOUT = 10
@@ -63,11 +57,15 @@ _MARKERS = {
 COMMENT_MARKERS = {
     ext: markers for markers, exts in _MARKERS.items() for ext in exts.split()
 }
+# "Fewer comments than you found" is about code. In a configuration format a
+# comment documents an option, and it is counted for dashes but not for drift.
+CONFIG_EXTENSIONS = {".yml", ".yaml", ".toml", ".ini", ".cfg", ".tf", ".nix"}
 
 EXCLUDED_DIRS = {"node_modules", "vendor", "target", "dist", "build"}
 EXCLUDED_SUFFIXES = (".lock", ".snap", ".svg", "-lock.json")
 
-SEPARATOR_CHARS = ";&|()<>"
+CONTROL_CHARS = ";&|()"
+REDIRECT_CHARS = "<>&"
 # A leading NAME=VALUE, and the wrappers that keep the real command word behind
 # them, are stepped over so the command word can be found.
 COMMAND_PREFIXES = {"env", "command", "nohup", "time"}
@@ -125,10 +123,10 @@ class Commit:
         self.message_file = None
         self.message_elsewhere = False
         self.stage_all = False
-        self.amend = False
         self.dry_run = False
         self.include = False
         self.pathspecs = []
+        self.paths_unknown = False
 
 
 def tokenize(command):
@@ -140,18 +138,53 @@ def tokenize(command):
     return list(lexer)
 
 
+def is_redirect(token):
+    return bool(token) and "<" in token or ">" in token
+
+
 def segments(tokens):
-    """One list of words per command in a compound command."""
+    """(subshell depth, words) for each command in a compound command.
+
+    A redirect keeps its command rather than splitting it, and takes with it the
+    file descriptor in front and the target behind. Left in place, a bare 2 from
+    2>/dev/null reads as a pathspec, and the check then narrows to a file that
+    does not exist and finds nothing.
+    """
     current = []
+    depth = 0
+    skip = False
+    # A heredoc body is text, not words. Left in the segment it reads as a run
+    # of pathspecs, and the check then narrows to files that do not exist.
+    heredoc = False
+    delimiter = None
     for token in tokens:
-        if token and all(char in SEPARATOR_CHARS for char in token):
+        if skip:
+            skip = False
+            if heredoc:
+                delimiter, heredoc = token, False
+            continue
+        if not token.strip():
+            continue
+        if delimiter is not None:
+            if token == delimiter:
+                delimiter = None
+            continue
+        if is_redirect(token) and all(char in REDIRECT_CHARS for char in token):
+            if current and current[-1].isdigit():
+                current.pop()
+            heredoc = token.endswith("<<") or token.endswith("<<-")
+            skip = True
+            continue
+        if all(char in CONTROL_CHARS for char in token):
             if current:
-                yield current
+                yield depth, current
             current = []
+            depth += token.count("(") - token.count(")")
+            depth = max(depth, 0)
         else:
             current.append(token)
     if current:
-        yield current
+        yield depth, current
 
 
 def command_words(segment):
@@ -202,6 +235,8 @@ def parse_commit_options(commit, args):
             name, attached, value = arg.partition("=")
             if name in MESSAGE_FROM_ELSEWHERE:
                 commit.message_elsewhere = True
+            if name == "--pathspec-from-file":
+                commit.paths_unknown = True
             if not attached and name in LONG_VALUE:
                 value = args[index + 1] if index + 1 < len(args) else ""
                 index += 1
@@ -211,8 +246,6 @@ def parse_commit_options(commit, args):
                 commit.message_file = value
             elif name == "--all":
                 commit.stage_all = True
-            elif name == "--amend":
-                commit.amend = True
             elif name in ("--dry-run", "--short", "--porcelain"):
                 commit.dry_run = True
             elif name in ("--include", "--interactive", "--patch"):
@@ -253,25 +286,41 @@ def parse_short_cluster(commit, args, index):
     return index
 
 
-def resolve_cwd(tokens, start_cwd):
-    """The directory the commit runs in, or None when a cd cannot be followed."""
+def find_commit(tokens, start_cwd):
+    """(Commit, directory it runs in) for the first git commit, or (None, None).
+
+    A cd only counts when it runs before the commit and outside a subshell: one
+    after it has not happened yet, and one inside parentheses ends with the
+    subshell. The directory is None when a cd cannot be followed, which leaves
+    the diff checks out and the message check running.
+    """
     cwd = start_cwd
-    for segment in segments(tokens):
+    for depth, segment in segments(tokens):
+        commit = parse_git_commit(segment)
+        if commit is not None:
+            return commit, cwd
         words = command_words(segment)
-        if not words or words[0] != "cd":
+        if depth > 0 or not words or words[0] != "cd":
             continue
         targets = [word for word in words[1:] if not word.startswith("-")]
         if len(targets) != 1 or not cwd:
-            return None
+            cwd = None
+            continue
         target = targets[0]
         if any(char in target for char in "$`~*?"):
-            return None
+            cwd = None
+            continue
         cwd = os.path.normpath(os.path.join(cwd, target))
-    return cwd
+    return None, None
 
 
 def read_message_file(path, cwd):
-    """The message a -F names, when that file is readable right now."""
+    """The message a -F names, when that file is readable right now.
+
+    The path is arbitrary and is read anyway, because refusing would make -F the
+    way past the check. Nothing of its text is ever quoted back: see
+    message_findings.
+    """
     if not path or path == "-":
         return None
     if not os.path.isabs(path):
@@ -287,8 +336,25 @@ def read_message_file(path, cwd):
         return None
 
 
+GIT_SAFE_CONFIG = [
+    "-c",
+    "core.quotepath=false",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "protocol.ext.allow=never",
+]
+
+
 def git(location, args, cwd):
-    """git's stdout, or None when it did not run clean."""
+    """git's stdout, or None when it did not run clean.
+
+    A clean filter still runs when a worktree file has to be read, which is what
+    the commit itself is about to do anyway. Everything reachable from a config
+    key is turned off here instead.
+    """
     import subprocess
 
     environment = dict(os.environ)
@@ -299,7 +365,7 @@ def git(location, args, cwd):
     environment["GIT_TERMINAL_PROMPT"] = "0"
     try:
         result = subprocess.run(
-            ["git", "-c", "core.quotepath=false"] + location + args,
+            ["git"] + GIT_SAFE_CONFIG + location + args,
             cwd=cwd or None,
             capture_output=True,
             timeout=GIT_TIMEOUT,
@@ -312,6 +378,10 @@ def git(location, args, cwd):
     return result.stdout.decode("utf-8", "replace")
 
 
+def diff_base():
+    return ["diff", "--no-color", "--no-ext-diff", "--no-textconv"]
+
+
 def diff_arguments(commit):
     """The diff ranges that hold what this command is about to commit.
 
@@ -319,8 +389,8 @@ def diff_arguments(commit):
     staged change, and the content already in HEAD was checked when HEAD was
     made.
     """
-    base = ["diff", "--no-color", "--no-ext-diff", "--no-textconv"]
-    if commit.stage_all:
+    base = diff_base()
+    if commit.stage_all or commit.paths_unknown:
         return [base + ["HEAD"]]
     if commit.pathspecs:
         paths = base + ["HEAD", "--"] + commit.pathspecs
@@ -329,17 +399,44 @@ def diff_arguments(commit):
 
 
 def read_diff(commit, cwd):
-    """The unified diff of what is about to be committed, or None."""
+    """The diffs holding what is about to be committed, or None.
+
+    The size is settled from --numstat before the content is asked for, so a
+    vendor drop past DIFF_LINE_CAP is never read into memory at all.
+    """
     texts = []
+    changed = 0
     for arguments in diff_arguments(commit):
-        text = git(commit.location, arguments, cwd)
-        if text is None:
+        counts = git(commit.location, arguments + ["--numstat"], cwd)
+        if counts is None:
             # No HEAD yet: the first commit of a repository has only an index.
-            text = git(commit.location, ["diff", "--no-color", "--cached"], cwd)
+            arguments = diff_base() + ["--cached"]
+            counts = git(commit.location, arguments + ["--numstat"], cwd)
+        if counts is None:
+            return None
+        changed += numstat_total(counts)
+        if changed > DIFF_LINE_CAP:
+            return None
+        text = git(commit.location, arguments, cwd)
         if text is None:
             return None
         texts.append(text)
-    return "".join(texts)
+    return texts
+
+
+def numstat_total(counts):
+    """Lines added and removed across a --numstat listing.
+
+    A binary file reports a dash for each count and contributes nothing, which
+    is also all its content diff would contribute.
+    """
+    total = 0
+    for line in counts.split("\n"):
+        fields = line.split("\t")
+        if len(fields) < 3:
+            continue
+        total += sum(int(n) for n in fields[:2] if n.isdigit())
+    return total
 
 
 def excluded(path):
@@ -365,33 +462,34 @@ def parse_diff(text):
     current = None
     line_number = 0
     is_new = False
+    in_header = False
     for raw in text.split("\n"):
         if raw.startswith("diff --git "):
-            current, is_new = None, False
-            continue
-        # The mode line precedes the path line, so it is held until there is a
-        # record to put it on.
-        if raw.startswith("new file mode "):
-            is_new = True
-            continue
-        if raw.startswith("+++ "):
-            path = raw[4:].strip()
-            if path == "/dev/null":
-                current = None
-                continue
-            current = {
-                "path": path[2:] if path.startswith("b/") else path,
-                "new": is_new,
-                "lines": [],
-            }
-            files.append(current)
-            continue
-        if current is None:
+            current, is_new, in_header = None, False, True
             continue
         match = HUNK.match(raw)
         if match:
-            line_number = int(match.group(1))
-            current["lines"].append((None, line_number, ""))
+            in_header = False
+            if current is not None:
+                line_number = int(match.group(1))
+                current["lines"].append((None, line_number, ""))
+            continue
+        # Only the header carries the path. A committed patch file has +++ lines
+        # of its own, and reading one as a path invents a file the commit for
+        # which has none.
+        if in_header:
+            if raw.startswith("new file mode "):
+                is_new = True
+            elif raw.startswith("+++ ") and raw[4:].strip() != "/dev/null":
+                path = raw[4:].strip()
+                current = {
+                    "path": path[2:] if path.startswith("b/") else path,
+                    "new": is_new,
+                    "lines": [],
+                }
+                files.append(current)
+            continue
+        if current is None:
             continue
         if raw.startswith("+"):
             current["lines"].append(("+", line_number, raw[1:]))
@@ -404,10 +502,18 @@ def parse_diff(text):
     return files
 
 
-def changed_line_count(files):
-    return sum(
-        1 for record in files for kind, _, _ in record["lines"] if kind in ("+", "-")
-    )
+def diff_records(texts):
+    """One record per path, over every diff that was read.
+
+    The include form asks for the index and for a pathspec separately, and a
+    file in both would otherwise be checked twice. The later answer is the
+    narrower one, so it wins.
+    """
+    records = {}
+    for text in texts:
+        for record in parse_diff(text):
+            records[record["path"]] = record
+    return list(records.values())
 
 
 def doc_prose(record):
@@ -433,6 +539,8 @@ def doc_prose(record):
         if front_matter:
             if stripped in ("---", "..."):
                 front_matter = False
+            continue
+        if kind == "-":
             continue
         if stripped.startswith("```") or stripped.startswith("~~~"):
             fenced = not fenced
@@ -507,8 +615,9 @@ def comment_drift(files):
     for record in files:
         if record["new"]:
             continue
-        markers = COMMENT_MARKERS.get(os.path.splitext(record["path"])[1].lower())
-        if not markers:
+        extension = os.path.splitext(record["path"])[1].lower()
+        markers = COMMENT_MARKERS.get(extension)
+        if not markers or extension in CONFIG_EXTENSIONS:
             continue
         for kind, _, text in record["lines"]:
             if kind not in ("+", "-"):
@@ -525,11 +634,21 @@ def comment_drift(files):
     return added, removed
 
 
-def message_findings(message):
-    return [
-        'message: %s in "%s"' % (name, fragment(message, index))
-        for name, index in dashes(message)
-    ]
+def message_findings(message, quotable):
+    """Findings over the commit message.
+
+    Text the command itself carried is quoted back. Text that came from a file
+    is not: the path is arbitrary, so quoting it would read that file out to the
+    model a fragment at a time.
+    """
+    findings = []
+    for name, index in dashes(message):
+        if quotable:
+            findings.append('message: %s in "%s"' % (name, fragment(message, index)))
+        else:
+            line = message.count("\n", 0, index) + 1
+            findings.append("message: %s on line %d of the message file" % (name, line))
+    return findings
 
 
 def diff_findings(files):
@@ -631,28 +750,26 @@ def findings_for(payload):
         tokens = tokenize(command)
     except ValueError:
         return []
-    commit = next(
-        (c for c in (parse_git_commit(s) for s in segments(tokens)) if c), None
-    )
+    commit, cwd = find_commit(tokens, payload.get("cwd") or os.getcwd())
     if commit is None or commit.dry_run:
         return []
 
-    cwd = resolve_cwd(tokens, payload.get("cwd") or os.getcwd())
     message = "\n\n".join(commit.messages)
+    quotable = True
     if commit.message_file:
         from_file = read_message_file(commit.message_file, cwd)
-        message = "\n\n".join(filter(None, [message, from_file]))
+        if from_file:
+            message = "\n\n".join(filter(None, [message, from_file]))
+            quotable = False
     if message and acknowledged(message):
         return []
 
-    findings = message_findings(message) if not commit.message_elsewhere else []
+    findings = [] if commit.message_elsewhere else message_findings(message, quotable)
     absolute = any(part.startswith("/") for part in commit.location)
     if cwd or absolute:
         text = read_diff(commit, cwd)
         if text is not None:
-            files = parse_diff(text)
-            if changed_line_count(files) <= DIFF_LINE_CAP:
-                findings.extend(diff_findings(files))
+            findings.extend(diff_findings(diff_records(text)))
     return findings
 
 

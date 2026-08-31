@@ -30,6 +30,8 @@ Nothing off the shelf fits, for one structural reason each. Git hook frameworks 
 - The double hyphen is a false positive machine here. Every ` -- ` tracked in this repo (`CLAUDE.md`, `agents/developer.md`, `hooks/bg.sh`, `hooks/reap.sh`, `hooks/sync.sh`) is a shell end of options marker, and none is punctuation.
 - The failure being caught is measured. 943 changelog bullets across 50 files under `git_repo/unyt*` have a median length of 94 characters and a p90 of 217, against a rule whose own example is 44. `RETRO.md` records a +326 comment drift surviving a whole feature because nothing counted it.
 - The hook costs about 2ms of its own work per Bash call, on top of a 12ms Python interpreter start. `shlex`, `subprocess` and `traceback` are imported where they are used, because at that scale their import time is most of the cost.
+- Repository config is executable. `--no-ext-diff` and `--no-textconv` cover the external diff driver and textconv; `core.fsmonitor` and the rest are turned off on the command line, where a repository cannot re-enable them. A clean filter still runs when a worktree file has to be read, which is what the commit itself is about to do.
+- The wiring builder in `install.sh` constructs each hook entry from `type`, `command` and `async` alone, so an `if` field cannot be introduced through the wiring declaration.
 
 ## Where it lives
 
@@ -40,6 +42,10 @@ No new rule in `CLAUDE.md`: all three are already there. `agents/developer.md` c
 ## When it fires
 
 The command is split into shell words and into the segments of a compound command. A segment is a commit when its command word is `git`, past `git`'s own options, and its subcommand is `commit`. So `git -C <path> commit` counts, and `cd <path> && git commit` counts. A quoted mention inside another command does not, because its command word is that other command.
+
+A redirect keeps its command rather than splitting it, and takes with it the file descriptor in front and the target behind, so `2>/dev/null` leaves no stray word behind. A heredoc body is text rather than words and is skipped to its delimiter. A line continuation leaves a whitespace word, which is dropped. Anything left behind by these would read as a pathspec, and the check would then narrow to a file that does not exist and find nothing.
+
+A `cd` moves the check only when it runs before the commit and outside a subshell. Only the first commit in a compound command is examined.
 
 Silence, before any check runs, on:
 
@@ -56,7 +62,8 @@ The content examined is what this command is about to add, and nothing that is a
 | `git commit` | the index, `git diff --cached` |
 | `git commit -a`, `-am` | the tracked working tree, `git diff HEAD`, because `-a` stages at commit time and the index does not yet hold it |
 | `git commit <paths>` | `git diff HEAD` over those paths, which is what an implied `--only` commits |
-| `git commit -i <paths>` | the index and those paths together |
+| `git commit -i <paths>` | the index and those paths together, each file read once |
+| `--pathspec-from-file` | the whole tracked tree, since the paths it names cannot be read here |
 | `git commit --amend` | the same as the form it takes without `--amend` |
 | a repository with no `HEAD` | the index, since there is no parent to diff against |
 
@@ -67,6 +74,8 @@ The content examined is what this command is about to add, and nothing that is a
 ## Reading the message
 
 The message is what the command makes readable: every `-m` and `--message` value, every `--trailer` value, and the contents of the file a `-F` or `--file` names when that path resolves to a readable regular file at check time.
+
+Text a `-F` file supplied is never quoted back. The path is arbitrary, so quoting it would read that file out to the model a window at a time; a finding in it gives the dash and its line in the message instead. Text the command carried itself is quoted, because the command wrote it.
 
 When the message cannot be read, the message check stays silent and **the diff checks still run**. That covers an editor commit, a `-F` naming a file the command has not written yet, and `-C`, `--reuse-message`, `--reedit-message`, `--fixup`, `--squash` and `--template`, which take a message from somewhere else. An unread message is not an escape hatch: the override is, and it is one an unread message cannot reach, so an agent that needs it writes the message with `-m` instead.
 
@@ -85,7 +94,7 @@ Denies on U+2014 EM DASH and U+2013 EN DASH, in the message and in the added pro
 
 ## Check 2: comment drift
 
-Comment lines added and removed, counted only in files that existed before this commit. Denies when added minus removed reaches `COMMENT_NET`. The finding states the pair, and the fix is to account for each surviving addition or cut it.
+Comment lines added and removed, counted only in files that existed before this commit, and only in formats where a comment sits over code. A configuration format (`.yml`, `.yaml`, `.toml`, `.ini`, `.cfg`, `.tf`, `.nix`) is counted for dashes and not for drift: there a comment documents an option, and several of them is an ordinary change. Denies when added minus removed reaches `COMMENT_NET`. The finding states the pair, and the fix is to account for each surviving addition or cut it.
 
 ## Check 3: changelog volume
 
@@ -103,12 +112,15 @@ One block, listing every finding at once, each on its own line with its `path:li
 - Vendored, generated and lock paths: `node_modules/`, `vendor/`, `target/`, `dist/`, `build/`, any path with a `.claude/worktrees/` component, `*-lock.json`, `*.lock`, `*.min.*`, `*.snap`, `*.svg`, and any file the diff reports as binary.
 - A diff over `DIFF_LINE_CAP` changed lines, which is an import or a vendor drop rather than this change's prose.
 - Any repository that cannot be resolved: a `cd` to a path that cannot be worked out, a directory that is not a repository, a git call that fails or times out. The message check does not need a repository and still runs.
+- A file the commit deletes, which contributes neither its lines nor its comments.
+- A combined diff, which a merge conflict produces. Its header is not `diff --git`, so no record is opened and nothing is reported at positions that do not mean what they say.
 
 **The dash check**
 
 - Two characters only. The double hyphen the rule also names is deliberately undetected: ` -- ` is end of options in every shell, a comment marker in SQL and Lua, `--` is a decrement operator and the prefix of every long flag, and `---` is front matter, a horizontal rule and a table separator. The rule stands; the check declines to guess.
 - An en dash between two digits is a range.
-- In a documentation file (`.md`, `.markdown`, `.mdx`, `.txt`, `.rst`, `.adoc`) every added line is prose, except inside a fenced or indented code block, inside YAML front matter, and on a blockquote line, which is someone else's words. Fence state is tracked from the diff's own context lines and restarts at each hunk, because the lines between hunks were never shown: a line added inside a code block whose opening fence is out of view reads as prose.
+- In a documentation file (`.md`, `.markdown`, `.mdx`, `.txt`, `.rst`, `.adoc`) every added line is prose, except inside a fenced or indented code block, inside YAML front matter, and on a blockquote line, which is someone else's words.
+- Fence state is tracked from the diff's own kept lines and restarts at each hunk, because the lines between hunks were never shown. Two consequences are deliberate: a line added inside a code block whose opening fence is out of view reads as prose, and front matter is only recognised where a hunk reaches line 1, so an edit deep inside a long front matter block reads as prose too. Both err toward a finding, which the override clears.
 - In a source file only comment text is prose: a line whose first non blank characters are a comment marker for that extension, or a trailing comment on a line carrying no quote character.
 - Nothing else in a source file is read, so a string literal, a UI label, a test fixture and a data file are all invisible to it.
 
@@ -130,6 +142,7 @@ One block, listing every finding at once, each on its own line with its `path:li
 - A missing changelog entry, because whether a change is a product change is judgement.
 - The double hyphen, everywhere.
 - A commit made from inside another interpreter, such as `bash -c "git commit …"`, whose command word is not `git`.
+- A message built by command substitution. `git commit -m "$(cat msg.txt)"` presents the literal text `$(cat msg.txt)` as its message, and the message check reads that. The diff checks are unaffected.
 - Text that never reaches a commit: replies to the user, PR titles and bodies, an uncommitted working tree. A PR body is shown to the user for approval before it is posted, so a human already reads it.
 
 ## Failure and silence
