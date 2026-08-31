@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Reaper for bg.sh processes. Wired at SessionEnd, SessionStart and SubagentStop
-# — the safety net under each agent's own cleanup.
+# Reaper for bg.sh processes: the safety net under each agent's own cleanup.
 #
 # Two triggers, because neither alone is enough:
-#   SessionEnd    reaps the ending session's own processes. It passes its
-#                 session id, and at that moment the CLI is still alive by
-#                 construction, so a dead-owner test would never fire.
-#   SessionStart  catches what a crashed or kill -9'd session left behind.
+#   SessionEnd    is the wired one, and reaps the ending session's own
+#                 processes. It passes its session id, and at that moment the
+#                 CLI is still alive by construction, so a dead-owner test would
+#                 never fire.
+#   session start install.sh --sync runs this with no payload, which catches
+#                 what a crashed or kill -9'd session left behind.
 #
 # Only entries owned by the ending session or by a CLI that is provably gone are
 # touched, so one session never kills another's work. Everywhere it cannot be

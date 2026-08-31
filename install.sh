@@ -106,8 +106,12 @@ fi
 # claude-notifications-go plugin owns them, and its suppressForSubagents keeps
 # a sub-agent finishing from ever being a false cue.
 #
-# taskline must stay synchronous: only a hook that finishes before the turn does
-# has its stdout injected as context, and an async one would print into the void.
+# taskline and style must stay synchronous. Only a hook that finishes before the
+# turn or the tool call does is read at all: an async taskline prints its line
+# into the void, and an async style hook cannot deny a commit that already ran.
+#
+# style.py takes the whole Bash matcher rather than an if. That field is
+# permission rule syntax, and Bash(git commit *) misses git -C <repo> commit.
 #
 # The retro recorder is the mirror image: async on every event, so it can neither
 # block a turn nor inject its stdout. No single trigger is load-bearing —
@@ -125,7 +129,8 @@ WIRING='[
    "hooks":[{"command":"/hooks/taskline.py"},
             {"command":"/hooks/retro.py record --interval 900","async":true}]},
   {"event":"PreToolUse","matcher":"Bash",
-   "hooks":[{"command":"/hooks/guard.sh"}]},
+   "hooks":[{"command":"/hooks/guard.sh"},
+            {"command":"/hooks/style.py"}]},
   {"event":"PreToolUse","matcher":"mcp__linear.*",
    "hooks":[{"command":"/hooks/guard.sh"}]},
   {"event":"PostToolUse","matcher":"Write|Edit",

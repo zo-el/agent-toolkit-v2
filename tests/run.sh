@@ -2,10 +2,6 @@
 # Regression suite for the enforcement layer and the installer.
 #
 #   tests/run.sh
-#
-# Guard payloads are written to files rather than piped inline: the payload text
-# names the very commands the guard flags, and a shell cannot tell a mention
-# from an invocation, so an inline pipe would prompt for permission.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -29,19 +25,27 @@ stub_path() { # dir, tools… — a PATH carrying only these
 # ── guard ────────────────────────────────────────────────────────────────────
 echo "guard.sh"
 
-bash_payload() { printf '{"tool_name":"Bash","tool_input":{"command":%s}}' "$(jq -Rn --arg c "$1" '$c')"; }
+bash_payload() { # command, cwd
+  printf '{"tool_name":"Bash","cwd":%s,"tool_input":{"command":%s}}' \
+    "$(jq -Rn --arg d "${2:-}" '$d')" "$(jq -Rn --arg c "$1" '$c')"
+}
 tool_payload() { printf '{"tool_name":%s,"tool_input":{}}' "$(jq -Rn --arg t "$1" '$t')"; }
 
-guard() { printf '%s' "$1" > "$TMP/p.json"; "$ROOT/hooks/guard.sh" < "$TMP/p.json"; }
+# Both PreToolUse gates answer in the same shape, so one runner drives both and
+# $HOOK says which is under test. Payloads go through a file rather than a pipe:
+# they name the very commands the guard flags, and a shell cannot tell a mention
+# from an invocation.
+HOOK="$ROOT/hooks/guard.sh"
+hook() { printf '%s' "$1" > "$TMP/p.json"; "$HOOK" < "$TMP/p.json"; }
 
-# No output at all is how the guard says "not my business".
+# No output at all is how a gate says "not my business".
 decision() {
   [ -n "${1//[[:space:]]/}" ] || { echo silent; return; }
   printf '%s' "$1" | jq -r '.hookSpecificOutput.permissionDecision // "silent"' 2>/dev/null || echo malformed
 }
 
 expect() { # name, expected decision, payload
-  local got; got="$(decision "$(guard "$3")")"
+  local got; got="$(decision "$(hook "$3")")"
   [ "$got" = "$2" ] && ok "$1" || bad "$1" "expected $2, got $got"
 }
 
@@ -78,6 +82,152 @@ stub_path "$TMP/nojq" bash grep sed awk cat printf
 printf '%s' "$(bash_payload 'git push')" > "$TMP/p.json"
 out="$(env -i PATH="$TMP/nojq" HOME="$TMP" "$ROOT/hooks/guard.sh" < "$TMP/p.json" 2>/dev/null)"
 [ -z "$out" ] && ok "fails open without jq" || bad "fails open without jq" "emitted a verdict: $out"
+
+# ── style ────────────────────────────────────────────────────────────────────
+# The other gate. Every diff case runs against a real repository: the check
+# reads git, so a typed fixture would prove the parser and nothing else.
+echo "style.py"
+
+HOOK="$ROOT/hooks/style.py"
+# The two characters as bytes: a \u escape inside $'' needs bash 4.2, and
+# this suite runs on 3.2 as well.
+EM="$(printf '\xe2\x80\x94')"
+EN="$(printf '\xe2\x80\x93')"
+
+FX="$TMP/fixture"
+mkdir -p "$FX"
+git -C "$FX" init -q >/dev/null 2>&1
+# Signing would wait on a passphrase nobody is there to type. The identity is
+# the machine's own, so nothing here sets one.
+git -C "$FX" config commit.gpgsign false
+fx() { bash_payload "$1" "$FX"; }
+why() { printf '%s' "$(hook "$1")" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""' 2>/dev/null; }
+stage() { git -C "$FX" add -A >/dev/null 2>&1; }
+# Back to a known tree, so no case inherits the last one's history.
+undo() {
+  git -C "$FX" reset -q --hard base >/dev/null 2>&1
+  git -C "$FX" clean -qfdx >/dev/null 2>&1
+}
+
+printf 'x = 1\n' > "$FX/mod.py"
+printf '# Changelog\n\n' > "$FX/CHANGELOG.md"
+printf '# Doc\n\nplain line\n' > "$FX/doc.md"
+stage
+if ! git -C "$FX" commit -q -m base >/dev/null 2>&1 || ! git -C "$FX" tag base; then
+  skip "style.py" "git will not commit here, so the fixture repository does not exist"
+else
+
+expect "a dash in the message is denied"    deny   "$(fx "git commit -m \"the parser ${EM} it dropped a token\"")"
+expect "an en dash is denied too"           deny   "$(fx "git commit -m \"the parser ${EN} it dropped a token\"")"
+expect "an en dash between digits is a range" silent "$(fx "git commit -m \"covers lines 10${EN}20\"")"
+expect "a clean message is silent"          silent "$(fx 'git commit -m "cover the parser"')"
+expect "--dry-run is silent"                silent "$(fx "git commit --dry-run -m \"a ${EM} b\"")"
+expect "a command that is not a commit"     silent "$(fx 'git log --oneline -5')"
+expect "a commit quoted inside another command" silent "$(fx "echo \"git commit -m 'a ${EM} b'\"")"
+expect "git -C is a commit at any position" deny   "$(fx "git -C $FX commit -m \"a ${EM} b\"")"
+expect "words that will not split"          silent "$(fx 'git commit -m "unbalanced')"
+
+expect "a Style-ack trailer clears it" silent \
+  "$(fx "git commit -m \"the parser ${EM} dropped a token
+
+Style-ack: the dash sits inside a title quoted from upstream\"")"
+expect "a Style-ack with no reason clears nothing" deny \
+  "$(fx "git commit -m \"the parser ${EM} dropped a token
+
+Style-ack:\"")"
+
+printf 'x = 1\n# a note %s with a dash\n' "$EM" > "$FX/mod.py"; stage
+out="$(why "$(fx 'git commit -m "clean message"')")"
+check "a dash in an added comment names its line" "mod.py:2:" "$out"
+check "and quotes the offending text"             "a note $EM with a dash" "$out"
+check "and names the override"                    "Style-ack:" "$out"
+undo
+
+printf 'LABEL = "an em %s dash in a UI string"\n' "$EM" > "$FX/ui.py"; stage
+expect "a dash in a string literal is invisible" silent "$(fx 'git commit -m "label"')"
+undo
+
+printf '# Doc\n\nplain line\n\n```\ncode %s dash\n```\n\n> quoted %s dash\n' "$EM" "$EM" > "$FX/doc.md"; stage
+expect "a fenced block and a blockquote are not prose" silent "$(fx 'git commit -m "docs"')"
+printf '# Doc\n\nprose %s dash\n' "$EM" > "$FX/doc.md"; stage
+expect "a dash in markdown prose is denied" deny "$(fx 'git commit -m "docs"')"
+undo
+
+printf 'x = 1\n# a note %s with a dash\n' "$EM" > "$FX/mod.py"
+expect "nothing staged, so a plain commit is silent" silent "$(fx 'git commit -m "wip"')"
+expect "commit -am reads the working tree"           deny   "$(fx 'git commit -am "wip"')"
+expect "and so does commit -a -m"                    deny   "$(fx 'git commit -a -m "wip"')"
+undo
+
+printf 'x = 1\n# a note %s with a dash\n' "$EM" > "$FX/mod.py"; stage
+expect "an editor commit still gets the diff checks" deny "$(fx 'git commit')"
+expect "and so does --amend --no-edit"               deny "$(fx 'git commit --amend --no-edit')"
+expect "and so does --fixup"                         deny "$(fx 'git commit --fixup=HEAD')"
+printf 'fix it %s badly\n' "$EM" > "$TMP/msg.txt"
+expect "-F reads the file it names"                  deny   "$(fx "git commit -F $TMP/msg.txt")"
+printf 'fix it %s badly\n\nStyle-ack: quoting an upstream title\n' "$EM" > "$TMP/msg.txt"
+expect "a Style-ack in that file clears the diff too" silent "$(fx "git commit -F $TMP/msg.txt")"
+undo
+# The message goes unread, so only the diff is left to speak, and it is clean.
+expect "-F naming a file that is not written yet" silent "$(fx 'git commit -F not-written-yet.txt')"
+
+printf 'x = 1\n# a note %s with a dash\n' "$EM" > "$FX/mod.py"
+stage; git -C "$FX" commit -q -m "landed with a dash" >/dev/null 2>&1
+expect "an amend does not re-report HEAD" silent "$(fx 'git commit --amend --no-edit')"
+printf 'x = 1\n# a note %s with a dash\n# a second %s one\n' "$EM" "$EM" > "$FX/mod.py"; stage
+out="$(why "$(fx 'git commit --amend --no-edit')")"
+check "an amend reports what it adds" "mod.py:3:" "$out"
+case "$out" in
+  *"mod.py:2:"*) bad "an amend leaves HEAD alone" "it reported line 2, which is already committed" ;;
+  *)             ok  "an amend leaves HEAD alone" ;;
+esac
+undo
+
+printf 'x = 1\n# one\n# two\n# three\n# four\n' > "$FX/mod.py"; stage
+check "comment drift is counted" "comments: +4/-0" "$(why "$(fx 'git commit -m "notes"')")"
+undo
+printf '# one\n# two\n# three\n# four\n# five\nz = 1\n' > "$FX/fresh.py"; stage
+expect "a brand new file's comments do not count" silent "$(fx 'git commit -m "new module"')"
+undo
+
+{ printf '# Changelog\n\n'; printf -- '- %s\n' one two three four five six; } > "$FX/CHANGELOG.md"; stage
+check "too many changelog entries in one commit" "6 entries added in one commit" \
+  "$(why "$(fx 'git commit -m "release"')")"
+undo
+{ printf '# Changelog\n\n- '; printf 'a long entry that keeps going %.0s' 1 2 3 4 5 6; printf '\n'; } > "$FX/CHANGELOG.md"
+stage
+check "a changelog entry over the length limit" "characters, over 160" \
+  "$(why "$(fx 'git commit -m "release"')")"
+undo
+
+mkdir -p "$FX/node_modules/p" "$FX/.claude/worktrees/wt"
+printf '// note %s dash\n' "$EM" > "$FX/node_modules/p/i.js"
+printf '// note %s dash\n' "$EM" > "$FX/.claude/worktrees/wt/a.js"
+printf '{"a": "b %s c"}\n' "$EM" > "$FX/package-lock.json"
+stage
+expect "vendored, worktree and lock paths are excluded" silent "$(fx 'git commit -m "vendor drop"')"
+undo
+
+python3 -c "import sys; open(sys.argv[1], 'w').write(''.join('# note — %d\n' % i for i in range(6000)))" \
+  "$FX/big.py" && stage
+expect "a diff over the cap is not this change's business" silent "$(fx 'git commit -m "import"')"
+undo
+
+printf 'x = 1\n# one %s dash\n# two %s dash\n' "$EM" "$EM" > "$FX/mod.py"
+printf '# Doc\n\nprose %s dash\n' "$EM" > "$FX/doc.md"
+stage
+out="$(why "$(fx "git commit -m \"a ${EM} b\"")")"
+for want in "4 findings" "message:" "doc.md:3:" "mod.py:2:" "mod.py:3:"; do
+  check "one block carries $want" "$want" "$out"
+done
+undo
+
+printf 'not json at all' > "$TMP/p.json"
+out="$("$HOOK" < "$TMP/p.json" 2>/dev/null)"
+[ -z "$out" ] && ok "input it cannot parse is silent" || bad "input it cannot parse is silent" "$out"
+
+fi
+HOOK="$ROOT/hooks/guard.sh"
 
 # ── installer ────────────────────────────────────────────────────────────────
 echo "install.sh"
@@ -145,7 +295,7 @@ check "review plugin enabled" "true" "$(settings '.enabledPlugins["pr-review-too
 check "pointer written"       "$ROOT"         "$(readlink "$FAKE/.claude/agent-toolkit")"
 check "pointer imports CLAUDE.md" "agent-toolkit/CLAUDE.md" "$(cat "$FAKE/.claude/CLAUDE.md")"
 
-for want in "guard.sh" "reap.sh" "format.sh" "sync.sh" "taskline.py" "install.sh --sync"; do
+for want in "guard.sh" "style.py" "reap.sh" "format.sh" "sync.sh" "taskline.py" "install.sh --sync"; do
   check "wires $want" "$want" "$(settings '[.hooks[][].hooks[].command] | join(" ")')"
 done
 check "linear matcher wired" "mcp__linear.*" "$(settings '[.hooks.PreToolUse[].matcher] | join(" ")')"
@@ -200,6 +350,9 @@ check "and the install is still green"            "all checks green"  "$out"
 # exactly one entry runs it.
 check "taskline is wired synchronously" "[false]" \
   "$(settings '[.hooks.UserPromptSubmit[].hooks[] | select((.command // "") | test("taskline")) | (.async // false)] | tostring')"
+# An async PreToolUse entry decides after the tool ran, so the gate would vanish.
+check "the style gate is wired synchronously" "[false]" \
+  "$(settings '[.hooks.PreToolUse[].hooks[] | select((.command // "") | test("style")) | (.async // false)] | tostring')"
 
 linked="$(find "$FAKE/.claude/skills" -maxdepth 1 -type l | wc -l | tr -d ' ')"
 have="$(find "$ROOT/skills" -name SKILL.md | wc -l | tr -d ' ')"

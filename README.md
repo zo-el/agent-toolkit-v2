@@ -29,7 +29,7 @@ The checkout can live anywhere. Device config reaches it only through the `~/.cl
 | `CLAUDE.md` | the agreement: the CTO loop, tasks, code and writing style, the gates |
 | `agents/` | architect · developer · reviewer · project-manager · researcher |
 | `skills/` | `backlog` · `toolkit` (change this repo) · `ui-review` (screenshot galleries) |
-| `hooks/` | the guard, the statusline, the task line, the retro recorder, the formatter, background process tracking |
+| `hooks/` | the guard, the style check, the statusline, the task line, the retro recorder, the formatter, background process tracking |
 | `install.sh` | wiring and the doctor |
 | `RETRO.md` | learnings written by hand, read alongside the retro digest |
 | `documentation/brief.md` | what this toolkit is for |
@@ -54,12 +54,16 @@ Sessions on this machine work on different projects and must not reach into each
 
 ## Enforcement
 
-[`hooks/guard.sh`](hooks/guard.sh) is the only gate, and it fires regardless of permission mode, inside subagents too:
+Two hooks gate a session. Both fire regardless of permission mode, inside subagents too.
+
+[`hooks/guard.sh`](hooks/guard.sh) is the approval gate:
 
 - **denies** posting publicly as the user — PR and issue comments, review submissions.
 - **asks** before anything leaves the machine (push, PR, release, package publish), before Linear writes, before touching the device outside the workspace, and before the few git commands the reflog cannot undo.
 
 Everything else is silent. `permissions.defaultMode` is `auto` and `~/.claude`, the scratchpad, and this checkout are approved working directories, so an agent runs unattended instead of stalling on a prompt nobody is watching. `Read` is denied on the credentials and settings files, which carry API tokens.
+
+[`hooks/style.py`](hooks/style.py) is the writing gate, described in [`documentation/specs/style-checks.md`](documentation/specs/style-checks.md). It reads a `git commit` before it runs and denies it over the message and the diff it is about to make, naming every finding at once with its path, its line and the offending text. A finding that is wrong or deliberately accepted is cleared by a `Style-ack:` trailer on the message, which lands in git history where it stays auditable.
 
 [`tests/run.sh`](tests/run.sh) is the regression suite for all of it. It ends in [`tests/duplication.sh`](tests/duplication.sh), which fails the suite on copy-pasted shell or python and skips itself where `jscpd` cannot be reached.
 
