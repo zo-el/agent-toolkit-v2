@@ -85,20 +85,6 @@ GIT_VALUE_OPTIONS = GIT_LOCATION_OPTIONS | {
 SHORT_VALUE = set("mFCct")
 # Attached values only, which is what keeps -S<keyid> from reading as -a.
 SHORT_OPTIONAL_VALUE = set("Su")
-LONG_VALUE = {
-    "--message",
-    "--file",
-    "--reuse-message",
-    "--reedit-message",
-    "--fixup",
-    "--squash",
-    "--template",
-    "--author",
-    "--date",
-    "--cleanup",
-    "--pathspec-from-file",
-    "--trailer",
-}
 # A message these produce cannot be read here, so the message check stays quiet
 # while the diff checks still run.
 MESSAGE_FROM_ELSEWHERE = {
@@ -107,6 +93,15 @@ MESSAGE_FROM_ELSEWHERE = {
     "--fixup",
     "--squash",
     "--template",
+}
+LONG_VALUE = MESSAGE_FROM_ELSEWHERE | {
+    "--message",
+    "--file",
+    "--author",
+    "--date",
+    "--cleanup",
+    "--pathspec-from-file",
+    "--trailer",
 }
 
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)")
