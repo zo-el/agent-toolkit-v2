@@ -582,7 +582,7 @@ comments "$FX/mod.py" 45 'x = 1' "note $EM"
 stage
 out="$(why "$(fx 'git commit -m "many notes"')")"
 check "drift survives a report that is cut"  "comments: +45/-0 in mod.py" "$out"
-check "and the cut count covers both kinds" "and 6 more not shown" "$out"
+check "and the cut says only how many"      "and 6 more not shown" "$out"
 check "and every finding is counted"        "46 findings" "$out"
 undo
 
@@ -2467,6 +2467,17 @@ published="$(template "$ROOT/CLAUDE.md")"
 case "$published" in
   *"$EM"*|*"$EN"*|*--*) bad "and carries no dash of its own" "$published" ;;
   *)                    ok  "and carries no dash of its own" ;;
+esac
+
+# A lane's steps are named many times a session, and only the example teaches
+# the separator, so a dash there is the rule breaking itself all day.
+lanes="$(grep 'Payments rework' "$ROOT/CLAUDE.md")"
+steps="$(printf '%s\n' "$lanes" | grep -c 'Payments rework: [a-z]')"
+[ "${steps:-0}" -ge 2 ] && ok "a lane's steps are named with a colon" \
+  || bad "a lane's steps are named with a colon" "${steps:-0} lines in CLAUDE.md carry the form"
+case "$lanes" in
+  *"$EM"*|*"$EN"*|*--*) bad "and the example carries no dash" "$lanes" ;;
+  *)                    ok  "and the example carries no dash" ;;
 esac
 written="$(grep -c '^- [0-9]' "$ROOT/RETRO.md")"
 shaped="$(grep -cE '^- [0-9-]+ · [^ ·]+ · [^ ·]+: ' "$ROOT/RETRO.md")"
