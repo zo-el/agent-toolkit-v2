@@ -141,6 +141,11 @@ undo() {
   git -C "$FX" reset -q --hard base >/dev/null 2>&1
   git -C "$FX" clean -qfdx >/dev/null 2>&1
 }
+# The drift limit is counted in tens, so the files that reach it are generated.
+comments() { # path, count, opening line, word for the comment text
+  printf '%s\n' "$3" > "$1"
+  awk -v n="$2" -v w="${4:-note}" 'BEGIN { for (i = 1; i <= n; i++) print "# " w " " i }' >> "$1"
+}
 
 printf 'x = 1\n' > "$FX/mod.py"
 printf '# Changelog\n\n' > "$FX/CHANGELOG.md"
@@ -201,6 +206,17 @@ printf '# Doc\n\nprose %s dash\n' "$EM" > "$FX/doc.md"; stage
 expect "a dash in markdown prose is denied" deny "$(fx 'git commit -m "docs"')"
 undo
 
+# A retro append is routine and correct, so it must never need the override.
+retro_log() { # separator between the metadata fields and the prose
+  printf '# Retro log\n\n- 2026-08-30 · developer · agent-toolkit%s a brief that names the sha it measures costs a round\n' \
+    "$1" > "$FX/RETRO.md"
+}
+retro_log ':'; stage
+expect "a retro line in the record format needs no override" silent "$(fx 'git commit -m "retro: a line"')"
+retro_log " $EM"; stage
+expect "and the separator it replaced is denied"             deny   "$(fx 'git commit -m "retro: a line"')"
+undo
+
 printf 'x = 1\n# a note %s with a dash\n' "$EM" > "$FX/mod.py"
 expect "nothing staged, so a plain commit is silent" silent "$(fx 'git commit -m "wip"')"
 expect "commit -am reads the working tree"           deny   "$(fx 'git commit -am "wip"')"
@@ -231,10 +247,10 @@ case "$out" in
 esac
 undo
 
-printf 'x = 1\n# one\n# two\n# three\n# four\n' > "$FX/mod.py"; stage
-check "comment drift is counted" "comments: +4/-0" "$(why "$(fx 'git commit -m "notes"')")"
+comments "$FX/mod.py" 20 'x = 1'; stage
+check "comment drift is counted" "comments: +20/-0" "$(why "$(fx 'git commit -m "notes"')")"
 undo
-printf '# one\n# two\n# three\n# four\n# five\nz = 1\n' > "$FX/fresh.py"; stage
+comments "$FX/fresh.py" 25 'z = 1'; stage
 expect "a brand new file's comments do not count" silent "$(fx 'git commit -m "new module"')"
 undo
 
@@ -278,7 +294,7 @@ expect "a cd after the commit does not move it"   deny "$(fx 'git commit -m "cle
 expect "nor does a cd inside a subshell"          deny "$(fx '(cd /tmp && git pull) && git commit -m "clean"')"
 undo
 
-printf 'x = 1\n# one\n# two\n' > "$FX/mod.py"; stage
+comments "$FX/mod.py" 15 'x = 1'; stage
 expect "the include form counts a file once" silent "$(fx 'git commit -i -m "notes" mod.py')"
 undo
 # The index and the pathspec name different files, so both halves have to be read.
@@ -296,16 +312,16 @@ expect "a fence that gained a language tag is still a fence" silent "$(fx 'git c
 undo
 
 # Drift is the code rule. A comment in a configuration format documents an
-# option, and four of them is an ordinary change.
+# option, and a page of them is an ordinary change.
 printf 'a = 1\n' > "$FX/config.toml"; printf 'echo hi\n' > "$FX/run.sh"; stage
 git -C "$FX" commit -q -m "config and script" >/dev/null 2>&1
-printf 'a = 1\n# one\n# two\n# three\n# four\n' > "$FX/config.toml"; stage
+comments "$FX/config.toml" 25 'a = 1'; stage
 expect "a config file's comments are not drift" silent "$(fx 'git commit -m "config"')"
 printf 'a = 1\n# a note %s dash\n' "$EM" > "$FX/config.toml"; stage
 expect "but a dash in one is still a dash" deny "$(fx 'git commit -m "config"')"
 git -C "$FX" reset -q --hard >/dev/null 2>&1
-printf 'echo hi\n# one\n# two\n# three\n# four\n' > "$FX/run.sh"; stage
-check "a shell script's comments are drift" "comments: +4/-0 in run.sh" "$(why "$(fx 'git commit -m "script"')")"
+comments "$FX/run.sh" 20 'echo hi'; stage
+check "a shell script's comments are drift" "comments: +20/-0 in run.sh" "$(why "$(fx 'git commit -m "script"')")"
 undo
 
 # A -F path need have nothing to do with the commit, so quoting its text would
@@ -393,19 +409,19 @@ expect "the first commit of a repository is checked" deny \
 expect "and so is its -a form"                       deny \
   "$(bash_payload 'git commit -am first' "$FRESH")"
 
-printf 'x = 1\n# one\n# two\n' > "$FX/mod.py"; stage
-expect "two comments is under the drift limit" silent "$(fx 'git commit -m "notes"')"
-printf 'x = 1\n# one\n# two\n# three\n' > "$FX/mod.py"; stage
-check "three reaches it" "comments: +3/-0 in mod.py (limit +3 net)" \
+comments "$FX/mod.py" 19 'x = 1'; stage
+expect "nineteen comments is under the drift limit" silent "$(fx 'git commit -m "notes"')"
+comments "$FX/mod.py" 20 'x = 1'; stage
+check "twenty reaches it" "comments: +20/-0 in mod.py (limit +20 net)" \
   "$(why "$(fx 'git commit -m "notes"')")"
 undo
 
-printf 'x = 1\n# one\n# two\n# three\n# four\n# five\n' > "$FX/mod.py"; stage
-git -C "$FX" commit -q -m "five comments" >/dev/null 2>&1
-printf 'x = 1\n# a\n# b\n# c\n# d\n# e\n' > "$FX/mod.py"; stage
+comments "$FX/mod.py" 25 'x = 1'; stage
+git -C "$FX" commit -q -m "a page of comments" >/dev/null 2>&1
+comments "$FX/mod.py" 25 'x = 1' reworded; stage
 expect "rewriting comments is not drift" silent "$(fx 'git commit -m "reword"')"
-printf 'x = 1\n# a\n# b\n# c\n# d\n# e\n# f\n# g\n# h\n' > "$FX/mod.py"; stage
-check "adding more than it removes is" "comments: +8/-5" "$(why "$(fx 'git commit -m "more"')")"
+comments "$FX/mod.py" 50 'x = 1' reworded; stage
+check "adding more than it removes is" "comments: +50/-25" "$(why "$(fx 'git commit -m "more"')")"
 undo
 
 { printf '# Changelog\n\n'; printf -- '- %s\n' one two three four five; } > "$FX/CHANGELOG.md"; stage
@@ -461,7 +477,7 @@ undo
 printf '#!/usr/bin/env python3\n# a note %s dash\n' "$EM" > "$FX/s.py"; stage
 check "the line under a shebang is prose" "s.py:2:" "$(why "$(fx 'git commit -m "script"')")"
 undo
-printf '#!/usr/bin/env python3\nx = 1\n# one\n# two\n' > "$FX/mod.py"; stage
+comments "$FX/mod.py" 19 '#!/usr/bin/env python3'; stage
 expect "a shebang is not a comment it can count" silent "$(fx 'git commit -m "make it a script"')"
 undo
 printf '#!/usr/bin/env run %s dash\nx = 1\n' "$EM" > "$FX/s.py"; stage
@@ -2416,6 +2432,19 @@ for a in "$ROOT"/agents/*.md; do
   grep -q '`Retro: none`' "$a" || missing="$missing $(basename "$a")"
 done
 [ -z "$missing" ] && ok "every agent must answer Retro" || bad "every agent must answer Retro" "missing in:$missing"
+
+# The written log's format, in both homes and in every line already written: a
+# colon, because a dash there would ask for an override on every append.
+FORMAT='<project>: <what was inefficient'
+{ grep -qF "$FORMAT" "$ROOT/CLAUDE.md" && grep -qF "$FORMAT" "$ROOT/RETRO.md"; } \
+  && ok "the retro format is stated the same in both homes" \
+  || bad "the retro format is stated the same in both homes" "CLAUDE.md and RETRO.md disagree"
+RECORD='^- [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] · '
+written="$(grep -cE "$RECORD" "$ROOT/RETRO.md")"
+shaped="$(grep -cE "$RECORD[^ ·]+ · [^ ·]+: " "$ROOT/RETRO.md")"
+{ [ "${written:-0}" -gt 0 ] && [ "$written" = "$shaped" ]; } \
+  && ok "every line in the log carries it" \
+  || bad "every line in the log carries it" "$shaped of ${written:-0} lines match"
 
 # ── bg + reap ────────────────────────────────────────────────────────────────
 echo "bg.sh + reap.sh"

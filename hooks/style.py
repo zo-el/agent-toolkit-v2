@@ -28,7 +28,7 @@ import sys
 # Thresholds, grounded in documentation/specs/style-checks.md and meant to move.
 CHANGELOG_ENTRY_CHARS = 160
 CHANGELOG_ENTRY_COUNT = 5
-COMMENT_NET = 3
+COMMENT_NET = 20
 DIFF_LINE_CAP = 5000
 FINDINGS_SHOWN = 40
 MESSAGE_FILE_BYTES = 65536

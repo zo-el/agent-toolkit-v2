@@ -224,6 +224,6 @@ Every agent ends its report with a `Retro:` line — one line, or `Retro: none`.
 
 A learning of your own goes to `~/.claude/agent-toolkit/RETRO.md`:
 
-`- YYYY-MM-DD · <agent> · <project> — <what was inefficient, and what would be better>`
+`- YYYY-MM-DD · <agent> · <project>: <what was inefficient, and what would be better>`
 
 Never change the toolkit mid-task. Both are read on demand — that's the `toolkit` skill.
