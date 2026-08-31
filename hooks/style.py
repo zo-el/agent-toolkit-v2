@@ -104,6 +104,7 @@ LONG_VALUE = MESSAGE_FROM_ELSEWHERE | {
     "--trailer",
 }
 
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)")
 BULLET = re.compile(r"^ {0,3}[-*+]\s+(\S.*)$")
 TRAILER = re.compile(r"^\s*style-ack\s*:(.*)$", re.IGNORECASE)
@@ -124,17 +125,62 @@ class Commit:
         self.paths_unknown = False
 
 
+class GitUnavailable(Exception):
+    """git could not be run at all, so no later call would work either.
+
+    Raised rather than returned so one timeout is paid once, instead of once per
+    probe and once per diff range.
+    """
+
+
+def warn(text):
+    """One line to stderr, which reaches the debug log and never the model.
+
+    Silence is this hook's answer to most things, so the few failures that are
+    breakage rather than a verdict have to leave a trace somewhere.
+    """
+    try:
+        sys.stderr.write("style: %s\n" % text)
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def strip_heredocs(command):
+    """The command with every heredoc body removed.
+
+    A body is text rather than shell words, and an apostrophe in it opens a
+    quote that never closes. A run with no closing delimiter is not a heredoc,
+    and nothing is dropped for it.
+    """
+    if "<<" not in command:
+        return command
+    lines = command.split("\n")
+    kept = []
+    index = 0
+    while index < len(lines):
+        kept.append(lines[index])
+        index += 1
+        for match in HEREDOC.finditer(kept[-1]):
+            end = index
+            while end < len(lines) and lines[end].strip() != match.group(2):
+                end += 1
+            if end < len(lines):
+                index = end + 1
+    return "\n".join(kept)
+
+
 def tokenize(command):
     """Shell words, with the separators kept as words of their own."""
     import shlex
 
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer = shlex.shlex(strip_heredocs(command), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     return list(lexer)
 
 
 def is_redirect(token):
-    return bool(token) and "<" in token or ">" in token
+    return "<" in token or ">" in token
 
 
 def segments(tokens):
@@ -148,26 +194,15 @@ def segments(tokens):
     current = []
     depth = 0
     skip = False
-    # A heredoc body is text, not words. Left in the segment it reads as a run
-    # of pathspecs, and the check then narrows to files that do not exist.
-    heredoc = False
-    delimiter = None
     for token in tokens:
         if skip:
             skip = False
-            if heredoc:
-                delimiter, heredoc = token, False
             continue
         if not token.strip():
-            continue
-        if delimiter is not None:
-            if token == delimiter:
-                delimiter = None
             continue
         if is_redirect(token) and all(char in REDIRECT_CHARS for char in token):
             if current and current[-1].isdigit():
                 current.pop()
-            heredoc = token.endswith("<<") or token.endswith("<<-")
             skip = True
             continue
         if all(char in CONTROL_CHARS for char in token):
@@ -281,32 +316,34 @@ def parse_short_cluster(commit, args, index):
     return index
 
 
-def find_commit(tokens, start_cwd):
-    """(Commit, directory it runs in) for the first git commit, or (None, None).
+def find_commits(tokens, start_cwd):
+    """(Commit, directory it runs in) for every git commit in the command.
 
-    A cd only counts when it runs before the commit and outside a subshell: one
-    after it has not happened yet, and one inside parentheses ends with the
-    subshell. The directory is None when a cd cannot be followed, which leaves
-    the diff checks out and the message check running.
+    A cd counts for a commit in the same subshell or in one enclosing it, and
+    not for a subshell that has already closed, so the directory is tracked per
+    depth. It is None where a cd cannot be followed, which leaves the diff
+    checks out and the message check running.
     """
-    cwd = start_cwd
+    found = []
+    cwds = [start_cwd]
     for depth, segment in segments(tokens):
+        while len(cwds) <= depth:
+            cwds.append(cwds[-1])
+        del cwds[depth + 1 :]
         commit = parse_git_commit(segment)
         if commit is not None:
-            return commit, cwd
+            found.append((commit, cwds[depth]))
+            continue
         words = command_words(segment)
-        if depth > 0 or not words or words[0] != "cd":
+        if not words or words[0] != "cd":
             continue
         targets = [word for word in words[1:] if not word.startswith("-")]
-        if len(targets) != 1 or not cwd:
-            cwd = None
+        target = targets[0] if len(targets) == 1 else ""
+        if not target or not cwds[depth] or any(c in target for c in "$`~*?"):
+            cwds[depth] = None
             continue
-        target = targets[0]
-        if any(char in target for char in "$`~*?"):
-            cwd = None
-            continue
-        cwd = os.path.normpath(os.path.join(cwd, target))
-    return None, None
+        cwds[depth] = os.path.normpath(os.path.join(cwds[depth], target))
+    return found
 
 
 def read_message_file(path, cwd):
@@ -343,7 +380,7 @@ GIT_SAFE_CONFIG = [
 ]
 
 
-def git(location, args, cwd):
+def git(location, args, cwd, quiet=False):
     """git's stdout, or None when it did not run clean.
 
     A clean filter still runs when a worktree file has to be read, which is what
@@ -358,6 +395,7 @@ def git(location, args, cwd):
     environment["GIT_OPTIONAL_LOCKS"] = "0"
     environment["GIT_PAGER"] = "cat"
     environment["GIT_TERMINAL_PROMPT"] = "0"
+    environment["LC_ALL"] = "C"
     try:
         result = subprocess.run(
             ["git"] + GIT_SAFE_CONFIG + location + args,
@@ -366,15 +404,28 @@ def git(location, args, cwd):
             timeout=GIT_TIMEOUT,
             env=environment,
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except (OSError, subprocess.SubprocessError) as error:
+        # A timeout or a missing binary is never the silence the spec sanctions,
+        # so it speaks whatever the caller asked for.
+        warn("git %s in %s: %s" % (" ".join(args[:2]), cwd, error))
+        raise GitUnavailable(error)
     if result.returncode != 0:
+        if not quiet:
+            first = result.stderr.decode("utf-8", "replace").strip().split("\n")[0]
+            warn("git %s in %s: %s" % (" ".join(args[:2]), cwd, first))
         return None
     return result.stdout.decode("utf-8", "replace")
 
 
 def diff_base():
-    return ["diff", "--no-color", "--no-ext-diff", "--no-textconv"]
+    return [
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+    ]
 
 
 def diff_arguments(commit):
@@ -401,11 +452,21 @@ def read_diff(commit, cwd):
     """
     texts = []
     changed = 0
+    state = None
     for arguments in diff_arguments(commit):
-        counts = git(commit.location, arguments + ["--numstat"], cwd)
+        counts = git(commit.location, arguments + ["--numstat"], cwd, quiet=True)
         if counts is None:
-            # No HEAD yet: the first commit of a repository has only an index.
-            arguments = diff_base() + ["--cached"]
+            if state is None:
+                state = repository_state(commit.location, cwd)
+            is_repository, has_head = state
+            if not is_repository:
+                return None
+            if has_head:
+                warn("git diff failed in a repository at %s" % cwd)
+                return None
+            # A first commit has an index and no parent. The pathspec is kept,
+            # or this judges files the commit will not carry.
+            arguments = ["--cached" if a == "HEAD" else a for a in arguments]
             counts = git(commit.location, arguments + ["--numstat"], cwd)
         if counts is None:
             return None
@@ -419,6 +480,18 @@ def read_diff(commit, cwd):
     return texts
 
 
+def repository_state(location, cwd):
+    """(it is a repository, it has a HEAD) for the target of this commit.
+
+    A directory that is not a repository is the silence the spec sanctions. One
+    that is, and whose diff still failed, is breakage that has to leave a line.
+    """
+    if git(location, ["rev-parse", "--git-dir"], cwd, quiet=True) is None:
+        return False, False
+    head = git(location, ["rev-parse", "--verify", "HEAD"], cwd, quiet=True)
+    return True, head is not None
+
+
 def numstat_total(counts):
     """Lines added and removed across a --numstat listing.
 
@@ -428,7 +501,9 @@ def numstat_total(counts):
     total = 0
     for line in counts.split("\n"):
         fields = line.split("\t")
-        if len(fields) < 3:
+        # A path this never reads must not spend the cap, or one vendor drop
+        # switches the checks off for everything committed beside it.
+        if len(fields) < 3 or excluded(fields[2]):
             continue
         total += sum(int(n) for n in fields[:2] if n.isdigit())
     return total
@@ -605,8 +680,9 @@ def fragment(text, index, width=40):
 
 
 def comment_drift(files):
-    """(added, removed) comment lines, over files that existed before this."""
+    """(added, removed, paths) for comment lines over files that existed."""
     added = removed = 0
+    paths = []
     for record in files:
         if record["new"]:
             continue
@@ -626,7 +702,9 @@ def comment_drift(files):
                 added += 1
             else:
                 removed += 1
-    return added, removed
+            if record["path"] not in paths:
+                paths.append(record["path"])
+    return added, removed, paths
 
 
 def message_findings(message, quotable):
@@ -657,11 +735,11 @@ def diff_findings(files):
                     % (record["path"], number, name, fragment(text, index))
                 )
         findings.extend(changelog_findings(record))
-    added, removed = comment_drift(files)
+    added, removed, paths = comment_drift(files)
     if added - removed >= COMMENT_NET:
         findings.append(
-            "comments: +%d/-%d in files that already existed (limit +%d net)"
-            % (added, removed, COMMENT_NET)
+            "comments: +%d/-%d in %s (limit +%d net)"
+            % (added, removed, ", ".join(paths), COMMENT_NET)
         )
     return findings
 
@@ -698,10 +776,15 @@ def changelog_findings(record):
 
 
 def acknowledged(message):
-    """True when the message carries a Style-ack trailer that gives a reason."""
+    """True when the message's trailers carry a Style-ack that gives a reason.
+
+    Trailers are the last paragraph, so a body that quotes one, such as this
+    feature's own documentation, does not clear anything.
+    """
+    last = message.strip().split("\n\n")[-1]
     return any(
         match.group(1).strip()
-        for match in (TRAILER.match(line) for line in message.split("\n"))
+        for match in (TRAILER.match(line) for line in last.split("\n"))
         if match
     )
 
@@ -743,12 +826,20 @@ def findings_for(payload):
         return []
     try:
         tokens = tokenize(command)
-    except ValueError:
+    except ValueError as error:
+        warn("could not split the command: %s" % error)
         return []
-    commit, cwd = find_commit(tokens, payload.get("cwd") or os.getcwd())
-    if commit is None or commit.dry_run:
-        return []
+    findings = []
+    for commit, cwd in find_commits(tokens, payload.get("cwd") or os.getcwd()):
+        # A dry run writes nothing, and it does not answer for the commit that
+        # may follow it in the same command.
+        if not commit.dry_run:
+            findings.extend(commit_findings(commit, cwd))
+    return findings
 
+
+def commit_findings(commit, cwd):
+    """Every finding against one commit, or none when it is acknowledged."""
     message = "\n\n".join(commit.messages)
     quotable = True
     if commit.message_file:
@@ -759,10 +850,16 @@ def findings_for(payload):
     if message and acknowledged(message):
         return []
 
-    findings = [] if commit.message_elsewhere else message_findings(message, quotable)
-    absolute = any(part.startswith("/") for part in commit.location)
+    # The flag means the message cannot be read, not that a flag was present:
+    # git commit --squash=HEAD -m "..." commits the -m text.
+    unreadable = commit.message_elsewhere and not commit.messages
+    findings = [] if unreadable else message_findings(message, quotable)
+    absolute = any("=/" in part or part.startswith("/") for part in commit.location)
     if cwd or absolute:
-        text = read_diff(commit, cwd)
+        try:
+            text = read_diff(commit, cwd)
+        except GitUnavailable:
+            text = None
         if text is not None:
             findings.extend(diff_findings(diff_records(text)))
     return findings
@@ -775,7 +872,15 @@ def main():
         return None
     if not isinstance(payload, dict):
         return None
-    findings = findings_for(payload)
+    try:
+        findings = findings_for(payload)
+    except Exception:
+        # A traceback carries file and line only, which no one can reproduce.
+        warn(
+            "failed on %.200r in %r"
+            % (payload.get("tool_input", {}).get("command"), payload.get("cwd"))
+        )
+        raise
     if not findings:
         return None
     return json.dumps(
@@ -794,10 +899,9 @@ if __name__ == "__main__":
         try:
             verdict = main()
             if verdict:
-                from lib.out import print_line, utf8_stdout
-
-                utf8_stdout()
-                print_line(verdict)
+                # json.dumps escapes to ASCII, so no locale can refuse this.
+                sys.stdout.write(verdict + "\n")
+                sys.stdout.flush()
         except Exception:
             import traceback
 

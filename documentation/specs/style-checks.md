@@ -43,9 +43,11 @@ No new rule in `CLAUDE.md`: all three are already there. `agents/developer.md` c
 
 The command is split into shell words and into the segments of a compound command. A segment is a commit when its command word is `git`, past `git`'s own options, and its subcommand is `commit`. So `git -C <path> commit` counts, and `cd <path> && git commit` counts. A quoted mention inside another command does not, because its command word is that other command.
 
-A redirect keeps its command rather than splitting it, and takes with it the file descriptor in front and the target behind, so `2>/dev/null` leaves no stray word behind. A heredoc body is text rather than words and is skipped to its delimiter. A line continuation leaves a whitespace word, which is dropped. Anything left behind by these would read as a pathspec, and the check would then narrow to a file that does not exist and find nothing.
+A heredoc body is removed before the command is split at all: it is prose, and an apostrophe in it opens a quote that never closes, which would otherwise take the whole check down. A run with no closing delimiter is not a heredoc, and nothing is dropped for it. A redirect then keeps its command rather than splitting it, and takes with it the file descriptor in front and the target behind, so `2>/dev/null` leaves no stray word. A line continuation leaves a whitespace word, which is dropped. Anything left behind by these would read as a pathspec, and the check would narrow to a file that does not exist and find nothing.
 
-A `cd` moves the check only when it runs before the commit and outside a subshell. Only the first commit in a compound command is examined.
+**Every commit in the command is examined**, and the findings are one list. A `--dry-run` writes nothing and does not answer for a commit beside it, so `git commit --dry-run && git commit -m …` is checked on the second.
+
+A `cd` is tracked per subshell depth. It counts for a commit in the same subshell or in one enclosing it, and not for a subshell that has already closed.
 
 Silence, before any check runs, on:
 
@@ -64,8 +66,8 @@ The content examined is what this command is about to add, and nothing that is a
 | `git commit <paths>` | `git diff HEAD` over those paths, which is what an implied `--only` commits |
 | `git commit -i <paths>` | the index and those paths together, each file read once |
 | `--pathspec-from-file` | the whole tracked tree, since the paths it names cannot be read here |
+| a repository with no `HEAD` | the index, with the pathspec kept, so a first commit is judged on what it carries |
 | `git commit --amend` | the same as the form it takes without `--amend` |
-| a repository with no `HEAD` | the index, since there is no parent to diff against |
 
 **An amend is not special.** What it newly introduces is the staged change; the content already in `HEAD` was checked when `HEAD` was made. Re-reading it would report findings that were already answered, and would block a plain reword of a message that the check itself just rejected.
 
@@ -77,13 +79,14 @@ The message is what the command makes readable: every `-m` and `--message` value
 
 Text a `-F` file supplied is never quoted back. The path is arbitrary, so quoting it would read that file out to the model a window at a time; a finding in it gives the dash and its line in the message instead. Text the command carried itself is quoted, because the command wrote it.
 
-When the message cannot be read, the message check stays silent and **the diff checks still run**. That covers an editor commit, a `-F` naming a file the command has not written yet, and `-C`, `--reuse-message`, `--reedit-message`, `--fixup`, `--squash` and `--template`, which take a message from somewhere else. An unread message is not an escape hatch: the override is, and it is one an unread message cannot reach, so an agent that needs it writes the message with `-m` instead.
+When the message cannot be read, the message check stays silent and **the diff checks still run**. That covers an editor commit, a `-F` naming a file the command has not written yet, and `-C`, `--reuse-message`, `--reedit-message`, `--fixup`, `--squash` and `--template`, which take a message from somewhere else. What matters is an unreadable message rather than the presence of a flag: `git commit --squash=HEAD -m …` commits the `-m` text, so that text is read. An unread message is not an escape hatch: the override is, and it is one an unread message cannot reach, so an agent that needs it writes the message with `-m` instead.
 
 ## The override
 
 A `Style-ack:` trailer on the commit message clears every finding on that commit.
 
 - It must carry a reason. A bare `Style-ack:` with nothing after it clears nothing.
+- It is a trailer, so it is read in the message's last paragraph only. A body that quotes one, such as this document, clears nothing.
 - It is for a finding that is wrong, or text that is deliberate and accepted. It is not a way past a finding that is real, and the deny reason says so.
 - It lands in git history, so any override can be found later and judged.
 - It is only reachable where the message is readable, which is `-m`, `--message`, `--trailer` and a `-F` file that already exists.
@@ -110,7 +113,7 @@ One block, listing every finding at once, each on its own line with its `path:li
 
 - Any line the commit did not add. Removed lines and untouched context are invisible.
 - Vendored, generated and lock paths: `node_modules/`, `vendor/`, `target/`, `dist/`, `build/`, any path with a `.claude/worktrees/` component, `*-lock.json`, `*.lock`, `*.min.*`, `*.snap`, `*.svg`, and any file the diff reports as binary.
-- A diff over `DIFF_LINE_CAP` changed lines, which is an import or a vendor drop rather than this change's prose.
+- A diff over `DIFF_LINE_CAP` changed lines, which is an import or a vendor drop rather than this change's prose. Excluded paths do not count toward it, or one vendored drop would switch every check off for the work committed beside it.
 - Any repository that cannot be resolved: a `cd` to a path that cannot be worked out, a directory that is not a repository, a git call that fails or times out. The message check does not need a repository and still runs.
 - A file the commit deletes, which contributes neither its lines nor its comments.
 - A combined diff, which a merge conflict produces. Its header is not `diff --git`, so no record is opened and nothing is reported at positions that do not mean what they say.
@@ -147,7 +150,11 @@ One block, listing every finding at once, each on its own line with its `path:li
 
 ## Failure and silence
 
-The hook exits 0 on every path and blocks only on a finding it can state. Input it cannot parse, a repository it cannot resolve, a diff it cannot read, a diff over the cap, its own unexpected error: every one produces silence, the way `hooks/guard.sh` falls silent without jq. A bug prints its traceback to stderr, which reaches the debug log and never the model's context.
+The hook exits 0 on every path and blocks only on a finding it can state. Input it cannot parse, a directory that is not a repository, a diff over the cap, its own unexpected error: every one produces silence, the way `hooks/guard.sh` falls silent without jq.
+
+Silence that is breakage rather than a verdict writes one line to stderr, which reaches the debug log and never the model's context. A hook engineered never to fail turns a hard breakage into total silence, so these are the exceptions: a command whose words will not split, git out of reach or timing out, and a diff that fails in a directory that **is** a repository. A directory that is simply not a repository stays quiet, because that is a sanctioned answer rather than a fault. A bug prints its traceback with the command and the directory that produced it, since a trace carrying file and line alone cannot be reproduced.
+
+A verdict that cannot be written raises rather than being swallowed. A deny quietly becoming an allow is the one failure this must not have.
 
 Silence is a bypass as well as a failure mode, so the ways past the check are named rather than hidden: an unreadable repository, another interpreter, and a message the hook can read that carries an acknowledged trailer.
 
@@ -170,6 +177,7 @@ Named constants at the top of `hooks/style.py`, and meant to move once the check
 | `COMMENT_NET` | 3 | one genuinely earned comment must not trip it |
 | `DIFF_LINE_CAP` | 5000 | past this a commit is an import or a vendor drop, and its prose is not ours |
 | `FINDINGS_SHOWN` | 40 | enough that a real commit lists all of its findings, capped so a vendor drop that slipped the cap is still readable |
+| `GIT_TIMEOUT` | 10 | a git that hangs is paid for once, not once per probe and once per range |
 
 ## Not doing now
 

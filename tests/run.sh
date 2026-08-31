@@ -123,6 +123,13 @@ git -C "$FX" config commit.gpgsign false
 git -C "$FX" config user.name "style fixture"
 git -C "$FX" config user.email "fixture@example.invalid"
 fx() { bash_payload "$1" "$FX"; }
+noted() { # name, expected stderr substring, payload
+  local got err
+  got="$(decision "$(hook "$3")")"
+  err="$(cat "$TMP/hook.err" 2>/dev/null)"
+  if [ "$got" != silent ]; then bad "$1" "expected silent, got $got"
+  else check "$1" "$2" "$err"; fi
+}
 why() { printf '%s' "$(hook "$1")" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""' 2>/dev/null; }
 stage() {
   git -C "$FX" add -A >/dev/null 2>&1
@@ -151,7 +158,8 @@ expect "--dry-run is silent"                silent "$(fx "git commit --dry-run -
 expect "a command that is not a commit"     silent "$(fx 'git log --oneline -5')"
 expect "a commit quoted inside another command" silent "$(fx "echo \"git commit -m 'a ${EM} b'\"")"
 expect "git -C is a commit at any position" deny   "$(fx "git -C $FX commit -m \"a ${EM} b\"")"
-expect "words that will not split"          silent "$(fx 'git commit -m "unbalanced')"
+noted "words that will not split say so" "could not split the command" \
+  "$(fx 'git commit -m "unbalanced')"
 
 expect "a Style-ack trailer clears it" silent \
   "$(fx "git commit -m \"the parser ${EM} dropped a token
@@ -297,7 +305,7 @@ printf 'a = 1\n# a note %s dash\n' "$EM" > "$FX/config.toml"; stage
 expect "but a dash in one is still a dash" deny "$(fx 'git commit -m "config"')"
 git -C "$FX" reset -q --hard >/dev/null 2>&1
 printf 'echo hi\n# one\n# two\n# three\n# four\n' > "$FX/run.sh"; stage
-check "a shell script's comments are drift" "comments: +4/-0" "$(why "$(fx 'git commit -m "script"')")"
+check "a shell script's comments are drift" "comments: +4/-0 in run.sh" "$(why "$(fx 'git commit -m "script"')")"
 undo
 
 # A -F path need have nothing to do with the commit, so quoting its text would
@@ -388,7 +396,7 @@ expect "and so is its -a form"                       deny \
 printf 'x = 1\n# one\n# two\n' > "$FX/mod.py"; stage
 expect "two comments is under the drift limit" silent "$(fx 'git commit -m "notes"')"
 printf 'x = 1\n# one\n# two\n# three\n' > "$FX/mod.py"; stage
-check "three reaches it" "comments: +3/-0 in files that already existed (limit +3 net)" \
+check "three reaches it" "comments: +3/-0 in mod.py (limit +3 net)" \
   "$(why "$(fx 'git commit -m "notes"')")"
 undo
 
@@ -547,6 +555,91 @@ esac
 [ "$(printf '%s' "$quoted" | wc -l)" = "0" ] \
   && ok "and the quote carries no newline of its own" \
   || bad "and the quote carries no newline of its own" "the finding spans lines"
+
+# A heredoc body is prose, and an apostrophe in it opens a quote that never
+# closes, which takes the whole command with it.
+printf 'x = 1\n# a note %s dash\n' "$EM" > "$FX/mod.py"; stage
+expect "an apostrophe in a heredoc body" deny "$(fx "git commit -F- <<'EOF'
+the user's fix
+EOF")"
+# Check then commit is an ordinary pattern, and the dry run does not answer for
+# the commit beside it.
+expect "a dry run does not disarm the commit after it" deny \
+  "$(fx 'git commit --dry-run && git commit -m "clean"')"
+undo
+expect "every commit in the command is read" deny \
+  "$(fx "git commit -m clean && git commit --amend -m \"a ${EM} b\"")"
+
+expect "--template with a readable -m is read" deny "$(fx "git commit -t tmpl.txt -m \"a ${EM} b\"")"
+expect "and so is --squash with one"           deny "$(fx "git commit --squash=HEAD -m \"a ${EM} b\"")"
+
+mkdir -p "$FX/node_modules/p"
+python3 -c "import sys; open(sys.argv[1], 'w').write(''.join('// line %d\n' % i for i in range(6000)))" \
+  "$FX/node_modules/p/i.js"
+printf '# Doc\n\nreal prose %s dash\n' "$EM" > "$FX/doc.md"
+stage
+check "an excluded path does not spend the cap" "doc.md:3:" "$(why "$(fx 'git commit -m "npm install"')")"
+undo
+
+SUB="$TMP/sub-repo"
+mkdir -p "$SUB"
+git -C "$SUB" init -q >/dev/null 2>&1
+git -C "$SUB" config user.name "style fixture"
+git -C "$SUB" config user.email "fixture@example.invalid"
+printf 'y = 1\n' > "$SUB/seed.py"
+git -C "$SUB" add -A >/dev/null 2>&1
+git -C "$SUB" commit -q -m base >/dev/null 2>&1
+printf 'y = 1\n# a note %s dash\n' "$EM" > "$SUB/seed.py"
+git -C "$SUB" add -A >/dev/null 2>&1
+expect "a cd inside the commit's own subshell moves it" deny \
+  "$(bash_payload "(cd $SUB && git commit -m clean)" "$TMP")"
+
+UNBORN="$TMP/unborn-repo"
+mkdir -p "$UNBORN"
+git -C "$UNBORN" init -q >/dev/null 2>&1
+git -C "$UNBORN" config user.name "style fixture"
+git -C "$UNBORN" config user.email "fixture@example.invalid"
+printf 'a = 1\n' > "$UNBORN/wanted.py"
+printf '# unrelated %s dash\n' "$EM" > "$UNBORN/other.py"
+git -C "$UNBORN" add -A >/dev/null 2>&1
+expect "an unborn HEAD keeps the pathspec" silent \
+  "$(bash_payload 'git commit -m "only wanted" wanted.py' "$UNBORN")"
+printf 'a = 1\n# wanted %s dash\n' "$EM" > "$UNBORN/wanted.py"
+git -C "$UNBORN" add -A >/dev/null 2>&1
+expect "and still reads the path it names" deny \
+  "$(bash_payload 'git commit -m "only wanted" wanted.py' "$UNBORN")"
+
+expect "a directory that is not a repository is silent" silent \
+  "$(bash_payload 'git commit -m clean' "$TMP")"
+BROKEN="$TMP/broken-repo"
+mkdir -p "$BROKEN"
+git -C "$BROKEN" init -q >/dev/null 2>&1
+git -C "$BROKEN" config user.name "style fixture"
+git -C "$BROKEN" config user.email "fixture@example.invalid"
+printf 'x = 1\n' > "$BROKEN/mod.py"
+git -C "$BROKEN" add -A >/dev/null 2>&1
+git -C "$BROKEN" commit -q -m base >/dev/null 2>&1
+printf 'GARBAGE NOT AN INDEX' > "$BROKEN/.git/index"
+noted "a repository it cannot read says so" "git diff failed in a repository" \
+  "$(bash_payload 'git commit -m clean' "$BROKEN")"
+
+# A missing binary reaches the same handler a timeout does, without spending
+# ten seconds to get there.
+stub_path "$TMP/nogit" bash python3 env
+printf '%s' "$(bash_payload 'git commit -m clean' "$FX")" > "$TMP/p.json"
+nogit_err="$(PATH="$TMP/nogit" "$ROOT/hooks/style.py" < "$TMP/p.json" 2>&1 >/dev/null)"
+check "git out of reach says so" "git diff" "$nogit_err"
+
+expect "a Style-ack outside the trailers clears nothing" deny \
+  "$(fx "git commit -m \"a ${EM} b
+
+Style-ack: this paragraph is documentation, not a trailer
+
+and another paragraph follows it\"")"
+expect "and in the last paragraph it clears" silent \
+  "$(fx "git commit -m \"a ${EM} b
+
+Style-ack: quoting an upstream title\"")"
 
 printf 'not json at all' > "$TMP/p.json"
 out="$("$HOOK" < "$TMP/p.json" 2>/dev/null)"
