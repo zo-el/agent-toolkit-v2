@@ -72,12 +72,12 @@ Everything else is silent. `permissions.defaultMode` is `auto` and `~/.claude`, 
 [`hooks/taskline.py`](hooks/taskline.py) puts the session's own task list into context on every turn, so the rule to open a task before acting cannot quietly decay:
 
 ```
-Tasks: 2 open · Retro — spec (in_progress, arch-retro) · Retro — build (blocked)
+Tasks: 2 open · Retro: spec (in_progress, arch-retro) · Retro: build (blocked)
 ```
 
 - **`(blocked)`** — pending, with a blocker that has not finished. The platform stores no such status; it is read off `blockedBy`.
 - **Four tasks named**, in-progress first, then `+N more` for the rest. The count covers every open task, named or not.
-- **Nothing open** prints `Tasks: none open — open a lane before acting`, and names the task tools, which are deferred: a session that never searched for their schemas cannot call them and has nothing to show that it failed. Once tasks exist the tools are demonstrably loaded and the hint drops.
+- **Nothing open** prints `Tasks: none open. Open a lane before acting`, and names the task tools, which are deferred: a session that never searched for their schemas cannot call them and has nothing to show that it failed. Once tasks exist the tools are demonstrably loaded and the hint drops.
 - **A list read only in part** — a file being written as it is read, or one that will not open — says `(partial list)` after the count. A list that cannot be read at all prints nothing: "none open" would be a guess, and it is a guess that tells the model to open a lane that already exists.
 
 Two separate things stand between a session and its task list, and `install.sh` settles both: `CLAUDE_CODE_ENABLE_TODO_TOOLS` opts out of the removal of the tools for this generation of models, and the hint above covers the deferral that keeps their schemas unloaded until something asks. The hook itself never blocks a turn and exits 0 on every path, including its own failure.

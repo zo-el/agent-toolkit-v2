@@ -1125,8 +1125,8 @@ echo "taskline.py"
 # The contract is: exactly one line, on stdout, only when it is true, and never
 # a failed turn. stdout and stderr are captured apart — the harness injects only
 # stdout, so a line written to stderr would kill the feature while looking fine.
-HINT='Tasks: none open — open a lane before acting. Tools are deferred: ToolSearch "select:TaskCreate,TaskUpdate,TaskGet,TaskList"'
-SPEC='Retro — spec (in_progress, arch-retro)'
+HINT='Tasks: none open. Open a lane before acting. Tools are deferred: ToolSearch "select:TaskCreate,TaskUpdate,TaskGet,TaskList"'
+SPEC='Retro: spec (in_progress, arch-retro)'
 
 tl_with() { # environment assignments, payload → tl_out, tl_err, tl_rc
   tl_out="$(printf '%s' "$2" | env HOME="$FAKE" $1 python3 "$ROOT/hooks/taskline.py" 2>"$TMP/tl.err")"; tl_rc=$?
@@ -1153,17 +1153,17 @@ exact() { # name, expected stdout
 quiet() { tl "$2"; exact "$1" ""; }   # name, payload
 
 OPEN="$FAKE/.claude/tasks/tl-open"
-task "$OPEN" 1.json '{"id":"1","subject":"Retro — audit","status":"completed","blocks":[],"blockedBy":[]}'
-task "$OPEN" 2.json '{"id":"2","subject":"Retro — spec","status":"in_progress","owner":"arch-retro","blocks":["3"],"blockedBy":[]}'
-task "$OPEN" 3.json '{"id":"3","subject":"Retro — build","status":"pending","blocks":[],"blockedBy":["2"]}'
+task "$OPEN" 1.json '{"id":"1","subject":"Retro: audit","status":"completed","blocks":[],"blockedBy":[]}'
+task "$OPEN" 2.json '{"id":"2","subject":"Retro: spec","status":"in_progress","owner":"arch-retro","blocks":["3"],"blockedBy":[]}'
+task "$OPEN" 3.json '{"id":"3","subject":"Retro: build","status":"pending","blocks":[],"blockedBy":["2"]}'
 tl "$(prompt tl-open)"
 is_line "an open list is one line"
-exact "names every open task with status and owner" "Tasks: 2 open · $SPEC · Retro — build (blocked)"
+exact "names every open task with status and owner" "Tasks: 2 open · $SPEC · Retro: build (blocked)"
 
 # An ascii output encoding would raise on the first separator and lose the whole
 # line. PYTHONIOENCODING stands in for the C-locale machine that does the same.
 tl_with "PYTHONIOENCODING=ascii" "$(prompt tl-open)"
-exact "an ascii output encoding keeps the line whole" "Tasks: 2 open · $SPEC · Retro — build (blocked)"
+exact "an ascii output encoding keeps the line whole" "Tasks: 2 open · $SPEC · Retro: build (blocked)"
 
 # The line sits in a block buffer until the process ends, so a reader that
 # closed the pipe turns the interpreter's own shutdown flush into a failed turn
@@ -1197,33 +1197,33 @@ def load_tasks(_):
     return TaskList([{"id": "1", "subject": "HIJACKED", "status": "pending"}], True)
 PY
 tl_with "PYTHONPATH=$TMP/shadow" "$(prompt tl-open)"
-exact "a lib on PYTHONPATH cannot hijack the import" "Tasks: 2 open · $SPEC · Retro — build (blocked)"
+exact "a lib on PYTHONPATH cannot hijack the import" "Tasks: 2 open · $SPEC · Retro: build (blocked)"
 
 # blocked is derived, so every way of not being blocked must read as pending: a
 # blocker that finished, one that is not in the list at all, and a field of the
 # wrong type — which must cost the derivation and not the line.
-task "$OPEN" 3.json '{"id":"3","subject":"Retro — build","status":"pending","blocks":[],"blockedBy":["1"]}'
+task "$OPEN" 3.json '{"id":"3","subject":"Retro: build","status":"pending","blocks":[],"blockedBy":["1"]}'
 tl "$(prompt tl-open)"
-exact "a finished blocker does not block" "Tasks: 2 open · $SPEC · Retro — build (pending)"
-task "$OPEN" 3.json '{"id":"3","subject":"Retro — build","status":"pending","blocks":[],"blockedBy":["99"]}'
+exact "a finished blocker does not block" "Tasks: 2 open · $SPEC · Retro: build (pending)"
+task "$OPEN" 3.json '{"id":"3","subject":"Retro: build","status":"pending","blocks":[],"blockedBy":["99"]}'
 tl "$(prompt tl-open)"
-exact "a dangling blocker does not block" "Tasks: 2 open · $SPEC · Retro — build (pending)"
-task "$OPEN" 3.json '{"id":"3","subject":"Retro — build","status":"pending","blocks":[],"blockedBy":7}'
+exact "a dangling blocker does not block" "Tasks: 2 open · $SPEC · Retro: build (pending)"
+task "$OPEN" 3.json '{"id":"3","subject":"Retro: build","status":"pending","blocks":[],"blockedBy":7}'
 tl "$(prompt tl-open)"
-exact "an unusable blockedBy costs the derivation only" "Tasks: 2 open · $SPEC · Retro — build (pending)"
+exact "an unusable blockedBy costs the derivation only" "Tasks: 2 open · $SPEC · Retro: build (pending)"
 # Ids are strings on disk today; integers must derive the same answer. Both the
 # id and the blocker are integers here, or the comparison passes on one side.
-task "$OPEN" 2.json '{"id":2,"subject":"Retro — spec","status":"in_progress","owner":"arch-retro","blocks":[3],"blockedBy":[]}'
-task "$OPEN" 3.json '{"id":3,"subject":"Retro — build","status":"pending","blocks":[],"blockedBy":[2]}'
+task "$OPEN" 2.json '{"id":2,"subject":"Retro: spec","status":"in_progress","owner":"arch-retro","blocks":[3],"blockedBy":[]}'
+task "$OPEN" 3.json '{"id":3,"subject":"Retro: build","status":"pending","blocks":[],"blockedBy":[2]}'
 tl "$(prompt tl-open)"
-exact "integer ids still derive blocked" "Tasks: 2 open · $SPEC · Retro — build (blocked)"
+exact "integer ids still derive blocked" "Tasks: 2 open · $SPEC · Retro: build (blocked)"
 # Every field on the line is free text on the same line, so every field is cut.
-task "$OPEN" 3.json "{\"id\":\"3\",\"subject\":\"Retro — build\",\"status\":\"pending\",\"owner\":\"$(printf 'o%.0s' $(seq 40))\",\"blockedBy\":[]}"
+task "$OPEN" 3.json "{\"id\":\"3\",\"subject\":\"Retro: build\",\"status\":\"pending\",\"owner\":\"$(printf 'o%.0s' $(seq 40))\",\"blockedBy\":[]}"
 tl "$(prompt tl-open)"
-exact "a long owner is cut too" "Tasks: 2 open · $SPEC · Retro — build (pending, $(printf 'o%.0s' $(seq 23))…)"
-task "$OPEN" 3.json "{\"id\":\"3\",\"subject\":\"Retro — build\",\"status\":\"$(printf 's%.0s' $(seq 40))\",\"blockedBy\":[]}"
+exact "a long owner is cut too" "Tasks: 2 open · $SPEC · Retro: build (pending, $(printf 'o%.0s' $(seq 23))…)"
+task "$OPEN" 3.json "{\"id\":\"3\",\"subject\":\"Retro: build\",\"status\":\"$(printf 's%.0s' $(seq 40))\",\"blockedBy\":[]}"
 tl "$(prompt tl-open)"
-exact "a long status is cut too" "Tasks: 2 open · $SPEC · Retro — build ($(printf 's%.0s' $(seq 15))…)"
+exact "a long status is cut too" "Tasks: 2 open · $SPEC · Retro: build ($(printf 's%.0s' $(seq 15))…)"
 
 # The tools are deferred, so a session that never searched for their schemas
 # cannot open a task at all — which is exactly the session this line lands in.
@@ -1231,7 +1231,7 @@ tl "$(prompt tl-no-such-session)"
 is_line "an empty list is one line"
 exact "no task dir names the deferred tools" "$HINT"
 
-task "$FAKE/.claude/tasks/tl-all-done" 1.json '{"id":"1","subject":"Lane — build","status":"completed","blocks":[],"blockedBy":[]}'
+task "$FAKE/.claude/tasks/tl-all-done" 1.json '{"id":"1","subject":"Lane: build","status":"completed","blocks":[],"blockedBy":[]}'
 tl "$(prompt tl-all-done)"
 exact "an all-complete list counts as none open" "$HINT"
 
@@ -1239,7 +1239,7 @@ exact "an all-complete list counts as none open" "$HINT"
 # directory sits beside it. The decoy must not win, or the list goes quiet.
 mkdir -p "$FAKE/.claude/tasks/tlteam99-aaaa-bbbb"
 TEAM="$FAKE/.claude/tasks/session-tlteam99"
-task "$TEAM" 1.json '{"id":"1","subject":"Lane — spec","status":"completed","blocks":[],"blockedBy":[]}'
+task "$TEAM" 1.json '{"id":"1","subject":"Lane: spec","status":"completed","blocks":[],"blockedBy":[]}'
 task "$TEAM" 2.json '{"id":"2","status":"pending","blocks":[],"blockedBy":[]}'
 tl "$(prompt tlteam99-aaaa-bbbb)"
 exact "an empty dir does not hide the team-named list" 'Tasks: 1 open · untitled (pending)'
@@ -1251,24 +1251,24 @@ MAL="$FAKE/.claude/tasks/tl-malformed"
 task "$MAL" 1.json 'not json at all'
 task "$MAL" 2.json '[1,2]'
 task "$MAL" 4.json "$(python3 -c "import sys; sys.stdout.write('[' * 200000)")"
-task "$MAL" 3.json '{"id":"3","subject":"Lane — sane\nsecond line","status":"pending","blocks":[],"blockedBy":[]}'
+task "$MAL" 3.json '{"id":"3","subject":"Lane: sane\nsecond line","status":"pending","blocks":[],"blockedBy":[]}'
 tl "$(prompt tl-malformed)"
 is_line "a partly read list is one line"
 exact "an unparsable entry marks the line partial" \
-  'Tasks: 1 open (partial list) · Lane — sane second line (pending)'
+  'Tasks: 1 open (partial list) · Lane: sane second line (pending)'
 rm -f "$MAL/3.json"
 quiet "a list that will not parse at all says nothing" "$(prompt tl-malformed)"
 
 # Root reads a chmod 000 file regardless, so the assertions that depend on the
 # read failing are skipped there rather than inverted.
 UNREAD="$FAKE/.claude/tasks/tl-unreadable"
-task "$UNREAD" 1.json '{"id":"1","subject":"Lane — build","status":"pending","blocks":[],"blockedBy":[]}'
-task "$UNREAD" 2.json '{"id":"2","subject":"Lane — hidden","status":"pending","blocks":[],"blockedBy":[]}'
+task "$UNREAD" 1.json '{"id":"1","subject":"Lane: build","status":"pending","blocks":[],"blockedBy":[]}'
+task "$UNREAD" 2.json '{"id":"2","subject":"Lane: hidden","status":"pending","blocks":[],"blockedBy":[]}'
 chmod 000 "$UNREAD/2.json"
 tl "$(prompt tl-unreadable)"
 survives "an unreadable file never fails the turn"
 [ "$(id -u)" -eq 0 ] || exact "an unreadable file marks the line partial" \
-  'Tasks: 1 open (partial list) · Lane — build (pending)'
+  'Tasks: 1 open (partial list) · Lane: build (pending)'
 chmod 644 "$UNREAD/2.json"
 
 # A task file that is already gone is not one that would not read: the platform
@@ -1276,15 +1276,15 @@ chmod 644 "$UNREAD/2.json"
 # is still a whole read of what is there. A dangling symlink stands in for the
 # file that disappears between the listing and the open.
 GONE="$FAKE/.claude/tasks/tl-gone"
-task "$GONE" 1.json '{"id":"1","subject":"Lane — build","status":"pending","blocks":[],"blockedBy":[]}'
+task "$GONE" 1.json '{"id":"1","subject":"Lane: build","status":"pending","blocks":[],"blockedBy":[]}'
 ln -sfn /nonexistent-task-file "$GONE/2.json"
 tl "$(prompt tl-gone)"
-exact "a task file already gone is not an unreadable one" 'Tasks: 1 open · Lane — build (pending)'
+exact "a task file already gone is not an unreadable one" 'Tasks: 1 open · Lane: build (pending)'
 
 # A directory that will not list is not an empty one, and saying "none open"
 # there would instruct the model to open a lane that already exists.
 BLOCKED="$FAKE/.claude/tasks/tl-blocked-dir"
-task "$BLOCKED" 1.json '{"id":"1","subject":"Lane — build","status":"pending","blocks":[],"blockedBy":[]}'
+task "$BLOCKED" 1.json '{"id":"1","subject":"Lane: build","status":"pending","blocks":[],"blockedBy":[]}'
 chmod 000 "$BLOCKED"
 tl "$(prompt tl-blocked-dir)"
 survives "an unlistable task dir never fails the turn"
@@ -1295,37 +1295,37 @@ chmod 755 "$BLOCKED"
 # may not be the whole list — the flag has to survive the early answer. This is
 # the agent-teams shape: a stale directory found first, the real one refusing.
 ASYM="$FAKE/.claude/tasks/tlasym01-aaaa-bbbb"
-task "$ASYM" 1.json '{"id":"1","subject":"Lane — stale","status":"pending","blocks":[],"blockedBy":[]}'
+task "$ASYM" 1.json '{"id":"1","subject":"Lane: stale","status":"pending","blocks":[],"blockedBy":[]}'
 TEAMDIR="$FAKE/.claude/tasks/session-tlasym01"
-task "$TEAMDIR" 9.json '{"id":"9","subject":"Lane — real","status":"in_progress","blocks":[],"blockedBy":[]}'
+task "$TEAMDIR" 9.json '{"id":"9","subject":"Lane: real","status":"in_progress","blocks":[],"blockedBy":[]}'
 chmod 000 "$TEAMDIR"
 tl "$(prompt tlasym01-aaaa-bbbb)"
 survives "an unlistable second layout never fails the turn"
 [ "$(id -u)" -eq 0 ] || exact "an unlistable second layout still marks the line partial" \
-  'Tasks: 1 open (partial list) · Lane — stale (pending)'
+  'Tasks: 1 open (partial list) · Lane: stale (pending)'
 chmod 755 "$TEAMDIR"
 
 # Over a partial list an unknown blocker is more likely a file that would not
 # read than a dangling reference, and "pending" is the one wrong answer that
 # gets the task picked up while something else owns it.
 PART="$FAKE/.claude/tasks/tl-part-blocker"
-task "$PART" 1.json '{"id":"1","subject":"Lane — spec","status":"in_progress","blocks":["2"],"blockedBy":[]}'
-task "$PART" 2.json '{"id":"2","subject":"Lane — build","status":"pending","blocks":[],"blockedBy":["1"]}'
+task "$PART" 1.json '{"id":"1","subject":"Lane: spec","status":"in_progress","blocks":["2"],"blockedBy":[]}'
+task "$PART" 2.json '{"id":"2","subject":"Lane: build","status":"pending","blocks":[],"blockedBy":["1"]}'
 chmod 000 "$PART/1.json"
 tl "$(prompt tl-part-blocker)"
 [ "$(id -u)" -eq 0 ] || exact "a blocker that would not read still blocks" \
-  'Tasks: 1 open (partial list) · Lane — build (blocked)'
+  'Tasks: 1 open (partial list) · Lane: build (blocked)'
 chmod 644 "$PART/1.json"
 
 # Sizing. At the cap every task is named and nothing is elided; past it the
 # count stays true to every open task and what was dropped is stated.
 MANY="$FAKE/.claude/tasks/tl-many"
 for i in 1 2 3 4; do
-  task "$MANY" "$i.json" "{\"id\":\"$i\",\"subject\":\"Lane — step $i\",\"status\":\"pending\",\"blocks\":[],\"blockedBy\":[]}"
+  task "$MANY" "$i.json" "{\"id\":\"$i\",\"subject\":\"Lane: step $i\",\"status\":\"pending\",\"blocks\":[],\"blockedBy\":[]}"
 done
 tl "$(prompt tl-many)"
 exact "at the cap nothing is elided" \
-  'Tasks: 4 open · Lane — step 1 (pending) · Lane — step 2 (pending) · Lane — step 3 (pending) · Lane — step 4 (pending)'
+  'Tasks: 4 open · Lane: step 1 (pending) · Lane: step 2 (pending) · Lane: step 3 (pending) · Lane: step 4 (pending)'
 case "$tl_out" in
   *ToolSearch*) bad "no tool hint while tasks are open" "printed: $tl_out" ;;
   *)            ok "no tool hint while tasks are open" ;;
@@ -1334,20 +1334,20 @@ esac
 # Ids are numbers written as text, and a lane is past 9 quickly: a string sort
 # would name 1, 10, 11, 2 and drop the steps actually in front of the user.
 for i in 10 11; do
-  task "$MANY" "$i.json" "{\"id\":\"$i\",\"subject\":\"Lane — step $i\",\"status\":\"pending\",\"blocks\":[],\"blockedBy\":[]}"
+  task "$MANY" "$i.json" "{\"id\":\"$i\",\"subject\":\"Lane: step $i\",\"status\":\"pending\",\"blocks\":[],\"blockedBy\":[]}"
 done
 tl "$(prompt tl-many)"
 exact "ids sort as numbers, not as text" \
-  'Tasks: 6 open · Lane — step 1 (pending) · Lane — step 2 (pending) · Lane — step 3 (pending) · Lane — step 4 (pending) · +2 more'
+  'Tasks: 6 open · Lane: step 1 (pending) · Lane: step 2 (pending) · Lane: step 3 (pending) · Lane: step 4 (pending) · +2 more'
 
 # One line for the rest of the sizing contract: the running work is named first
 # however late its id, a subject is cut to a fixed width with the cut visible,
 # and the elided count covers everything that did not fit.
-task "$MANY" 12.json "{\"id\":\"12\",\"subject\":\"Lane — $(printf 'x%.0s' $(seq 70))\",\"status\":\"in_progress\",\"owner\":\"dev-x\",\"blocks\":[],\"blockedBy\":[]}"
+task "$MANY" 12.json "{\"id\":\"12\",\"subject\":\"Lane: $(printf 'x%.0s' $(seq 70))\",\"status\":\"in_progress\",\"owner\":\"dev-x\",\"blocks\":[],\"blockedBy\":[]}"
 tl "$(prompt tl-many)"
 is_line "a long list is still one line"
 exact "running work first, subject cut, remainder counted" \
-  "Tasks: 7 open · Lane — $(printf 'x%.0s' $(seq 52))… (in_progress, dev-x) · Lane — step 1 (pending) · Lane — step 2 (pending) · Lane — step 3 (pending) · +3 more"
+  "Tasks: 7 open · Lane: $(printf 'x%.0s' $(seq 53))… (in_progress, dev-x) · Lane: step 1 (pending) · Lane: step 2 (pending) · Lane: step 3 (pending) · +3 more"
 
 # Nothing to say beats a guess: without a session there is no list to speak for.
 quiet "no session id prints nothing"    '{"hook_event_name":"UserPromptSubmit","prompt":"go"}'

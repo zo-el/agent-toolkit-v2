@@ -96,7 +96,7 @@ Agents can reach the session while they work, and should when they are genuinely
 - Independent work → spawn every agent in one message so they run at once.
 - Dependent work → one agent, verify, then the next.
 - Never two agents writing in the same repo at once. Split by directory, give each `isolation: worktree`, or sequence them.
-- Start each agent's description with its lane: `Payments rework — build the parser`.
+- Start each agent's description with its lane: `Payments rework: build the parser`.
 
 ## Tasks
 
@@ -108,9 +108,9 @@ The task list is the user's only view of what is in flight. It is worth nothing 
 
 ```
 Payments rework                 ← the lane
-Payments rework — spec          ← its steps
-Payments rework — build
-Payments rework — review
+Payments rework: spec           ← its steps
+Payments rework: build
+Payments rework: review
 ```
 
 There is no parent field, so the name carries the grouping and the dependencies carry the order: a step that cannot start until another finishes gets `addBlockedBy`, and the list then shows it as blocked. While you are still gathering context, the lane alone is the whole list — open the steps once the plan is agreed.
