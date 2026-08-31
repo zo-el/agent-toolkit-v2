@@ -102,9 +102,9 @@ fi
 # the doctor checks the installed file against it. Neither side can drift.
 # Commands are relative to $STABLE; matcher "" means the event takes none.
 #
-# Notification events (Notification, Stop) are deliberately absent — the
-# claude-notifications-go plugin owns them, and its suppressForSubagents keeps
-# a sub-agent finishing from ever being a false cue.
+# Notification events (Notification, Stop) are deliberately absent: the
+# claude-notifications-go plugin owns them, and which of them reach the user is
+# its own configuration, not this toolkit's to hold an opinion on.
 #
 # taskline and style must stay synchronous. Only a hook that finishes before the
 # turn or the tool call does is read at all: an async taskline prints its line
@@ -428,11 +428,8 @@ if [ "$MODE" != "--dry-run" ] && command -v jq >/dev/null 2>&1; then
            claude-notifications-go@claude-notifications-go; do
     jq -e --arg k "$p" '(.plugins[$k] // []) | length > 0' \
       "$CLAUDE_DIR/plugins/installed_plugins.json" >/dev/null 2>&1 \
-      || echo "agent-toolkit: ! plugin $p is enabled but not installed — see README"
+      || echo "agent-toolkit: ! plugin $p is enabled but not installed: see README"
   done
-  ncfg="$CLAUDE_DIR/claude-notifications-go/config.json"
-  [ ! -f "$ncfg" ] || jq -e '.notifications.suppressForSubagents == true' "$ncfg" >/dev/null 2>&1 \
-    || echo "agent-toolkit: ! notifications fire for sub-agents — set notifications.suppressForSubagents to true in $ncfg"
 fi
 
 # ── 8. version stamp ─────────────────────────────────────────────────────────

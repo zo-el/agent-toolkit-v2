@@ -18,7 +18,7 @@ The installer enables two plugins but cannot install them. Once per machine:
 claude plugin install pr-review-toolkit@claude-plugins-official --scope user
 ```
 
-Notifications come from [claude-notifications-go](https://github.com/777genius/claude-notifications-go) — install it from its README, then `/claude-notifications-go:settings`. It fires when the main agent finishes or needs you, and stays quiet for sub-agents.
+Notifications come from [claude-notifications-go](https://github.com/777genius/claude-notifications-go). Install it from its README, then `/claude-notifications-go:settings`. It fires when an agent finishes or needs you, and which of those reach you is its own setting.
 
 The checkout can live anywhere. Device config reaches it only through the `~/.claude/agent-toolkit` symlink, so moving it is one `./install.sh` from the new location. On another machine, `git pull` is the whole upgrade — the next session start re-links everything.
 

@@ -37,7 +37,7 @@ Several sessions run on one machine for different projects. They do not know abo
 
 ## Notifications
 
-Use the plugin v1 used for system notifications. Notify when the **default agent** finishes — never when a sub-agent does.
+Use the plugin v1 used for system notifications. **Which events notify is mine to set in the plugin**, including whether a sub-agent finishing counts. The toolkit wires none of them and checks none of them.
 
 ## Language
 
