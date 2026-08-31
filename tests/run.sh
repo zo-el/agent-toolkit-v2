@@ -149,6 +149,8 @@ undo
 
 printf '# Doc\n\nplain line\n\n```\ncode %s dash\n```\n\n> quoted %s dash\n' "$EM" "$EM" > "$FX/doc.md"; stage
 expect "a fenced block and a blockquote are not prose" silent "$(fx 'git commit -m "docs"')"
+printf -- '---\ntitle: a %s b\n---\n\n# Doc\n\nplain line\n' "$EM" > "$FX/doc.md"; stage
+expect "yaml front matter is not prose" silent "$(fx 'git commit -m "docs"')"
 printf '# Doc\n\nprose %s dash\n' "$EM" > "$FX/doc.md"; stage
 expect "a dash in markdown prose is denied" deny "$(fx 'git commit -m "docs"')"
 undo
