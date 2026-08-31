@@ -587,11 +587,12 @@ check "and the cut says only how many"      "and 6 more not shown" "$out"
 check "and every finding is counted"        "46 findings" "$out"
 python3 - "$TMP/msg.txt" "$EM" <<'PY'
 import sys
-open(sys.argv[1], "w").write("".join("note %s line %d\n" % (sys.argv[2], i) for i in range(40)))
+open(sys.argv[1], "w").write("".join("note %s line %d\n" % (sys.argv[2], i) for i in range(50)))
 PY
 out="$(why "$(fx "git commit -F $TMP/msg.txt")")"
 check "drift leads a report the message fills" "comments: +45/-0 in mod.py" "$out"
-check "and that report is still whole"         "86 findings" "$out"
+check "and that report is still whole"         "96 findings" "$out"
+check "and it counts what it dropped"          "and 56 more not shown" "$out"
 undo
 
 # At exactly the cap nothing is hidden, so the report must not say it is.
@@ -599,9 +600,9 @@ comments "$FX/mod.py" 39 'x = 1' "note $EM"
 stage
 out="$(why "$(fx 'git commit -m "at the cap"')")"
 check "a report of exactly the cap is whole" "40 findings" "$out"
-case "$out" in
-  *"more not shown"*) bad "and says nothing is hidden" "$out" ;;
-  *)                  ok  "and says nothing is hidden" ;;
+case "${out:-<nothing>}" in
+  *"more not shown"*|"<nothing>") bad "and says nothing is hidden" "$out" ;;
+  *)                              ok  "and says nothing is hidden" ;;
 esac
 undo
 
@@ -824,17 +825,21 @@ out="$(PATH="$TMP/nosqlite:$PATH" run_install)"
 check "the doctor flags a python without sqlite3" "no sqlite3 module" "$out"
 check "and the install is still green"            "all checks green"  "$out"
 
-# Which events notify is the plugin's setting and the user's decision. A doctor
-# with an opinion on it argues on every session start, where nobody can win.
-mkdir -p "$FAKE/.claude/claude-notifications-go"
-printf '{"notifications":{"suppressForSubagents":false,"notifyOnSubagentStop":true}}\n' \
-  > "$FAKE/.claude/claude-notifications-go/config.json"
+# Which events notify is the plugin's setting and the user's decision, so the
+# doctor says the same thing either way. Asserted as identical output, which
+# holds for whichever key a view would read.
+ncfg="$FAKE/.claude/claude-notifications-go/config.json"
+mkdir -p "$(dirname "$ncfg")"
+rm -f "$ncfg"
+silent="$(run_install)"
+printf '{"notifications":{"suppressForSubagents":false,"notifyOnSubagentStop":true}}\n' > "$ncfg"
+grep -q '"suppressForSubagents":false' "$ncfg" \
+  || bad "the notifications fixture is the one a view would flag" "$(cat "$ncfg" 2>/dev/null)"
 out="$(run_install)"
-case "$out" in
-  *suppressForSubagents*|*sub-agent*|*Subagent*)
-    bad "the doctor holds no view on the notification settings" "$out" ;;
-  *) check "the doctor holds no view on the notification settings" "all checks green" "$out" ;;
-esac
+[ "$out" = "$silent" ] \
+  && check "the doctor holds no view on the notification settings" "all checks green" "$out" \
+  || bad "the doctor holds no view on the notification settings" \
+         "the plugin's config changed what the doctor said: $out"
 # An async hook's stdout is never injected as context, so an async taskline
 # would print into the void. Asserted as the whole array, which also pins that
 # exactly one entry runs it.
@@ -1158,6 +1163,9 @@ echo "taskline.py"
 # stdout, so a line written to stderr would kill the feature while looking fine.
 HINT='Tasks: none open. Open a lane before acting. Tools are deferred: ToolSearch "select:TaskCreate,TaskUpdate,TaskGet,TaskList"'
 SPEC='Retro: spec (in_progress, arch-retro)'
+# The whole line, because README.md publishes this one verbatim and the check at
+# the end of the suite holds the two to the same string.
+BLOCKED_LINE="Tasks: 2 open · $SPEC · Retro: build (blocked)"
 
 tl_with() { # environment assignments, payload → tl_out, tl_err, tl_rc
   tl_out="$(printf '%s' "$2" | env HOME="$FAKE" $1 python3 "$ROOT/hooks/taskline.py" 2>"$TMP/tl.err")"; tl_rc=$?
@@ -1189,12 +1197,12 @@ task "$OPEN" 2.json '{"id":"2","subject":"Retro: spec","status":"in_progress","o
 task "$OPEN" 3.json '{"id":"3","subject":"Retro: build","status":"pending","blocks":[],"blockedBy":["2"]}'
 tl "$(prompt tl-open)"
 is_line "an open list is one line"
-exact "names every open task with status and owner" "Tasks: 2 open · $SPEC · Retro: build (blocked)"
+exact "names every open task with status and owner" "$BLOCKED_LINE"
 
 # An ascii output encoding would raise on the first separator and lose the whole
 # line. PYTHONIOENCODING stands in for the C-locale machine that does the same.
 tl_with "PYTHONIOENCODING=ascii" "$(prompt tl-open)"
-exact "an ascii output encoding keeps the line whole" "Tasks: 2 open · $SPEC · Retro: build (blocked)"
+exact "an ascii output encoding keeps the line whole" "$BLOCKED_LINE"
 
 # The line sits in a block buffer until the process ends, so a reader that
 # closed the pipe turns the interpreter's own shutdown flush into a failed turn
@@ -1228,7 +1236,7 @@ def load_tasks(_):
     return TaskList([{"id": "1", "subject": "HIJACKED", "status": "pending"}], True)
 PY
 tl_with "PYTHONPATH=$TMP/shadow" "$(prompt tl-open)"
-exact "a lib on PYTHONPATH cannot hijack the import" "Tasks: 2 open · $SPEC · Retro: build (blocked)"
+exact "a lib on PYTHONPATH cannot hijack the import" "$BLOCKED_LINE"
 
 # blocked is derived, so every way of not being blocked must read as pending: a
 # blocker that finished, one that is not in the list at all, and a field of the
@@ -1247,7 +1255,7 @@ exact "an unusable blockedBy costs the derivation only" "Tasks: 2 open · $SPEC 
 task "$OPEN" 2.json '{"id":2,"subject":"Retro: spec","status":"in_progress","owner":"arch-retro","blocks":[3],"blockedBy":[]}'
 task "$OPEN" 3.json '{"id":3,"subject":"Retro: build","status":"pending","blocks":[],"blockedBy":[2]}'
 tl "$(prompt tl-open)"
-exact "integer ids still derive blocked" "Tasks: 2 open · $SPEC · Retro: build (blocked)"
+exact "integer ids still derive blocked" "$BLOCKED_LINE"
 # Every field on the line is free text on the same line, so every field is cut.
 task "$OPEN" 3.json "{\"id\":\"3\",\"subject\":\"Retro: build\",\"status\":\"pending\",\"owner\":\"$(printf 'o%.0s' $(seq 40))\",\"blockedBy\":[]}"
 tl "$(prompt tl-open)"
@@ -2511,9 +2519,10 @@ case "${lanes:-<nothing>}" in
   *)                                ok  "and the example carries no dash" ;;
 esac
 
-# The task line is published in README.md as well, inside a fenced block the
-# style hook is proven not to read. Only this holds the two together.
-for want in "$SPEC" "${HINT%%. Tools*}"; do
+# README.md quotes the task line verbatim, and nothing else holds the two to the
+# same wording. An empty expected string would match any file, so it is refused.
+for want in "$BLOCKED_LINE" "${HINT%%. Tools*}"; do
+  case "$want" in "") bad "README publishes the task line" "the expected string is empty"; continue ;; esac
   grep -qF "$want" "$ROOT/README.md" && ok "README publishes: $want" \
     || bad "README publishes: $want" "README.md does not carry it"
 done
