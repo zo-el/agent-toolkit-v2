@@ -106,7 +106,7 @@ Over added lines in a file whose basename starts with `CHANGELOG`: an entry long
 
 ## The deny reason
 
-One block, listing every finding at once, each on its own line with its `path:line` and the offending text. An agent fixes all of them in one pass rather than discovering them one at a time. Past `FINDINGS_SHOWN` the rest are counted rather than listed. The block closes with what each rule asks for, and with the override and what it is for.
+One block, listing every finding at once, each on its own line with its `path:line` and the offending text. An agent fixes all of them in one pass rather than discovering them one at a time. Comment drift leads, because a commit has one of it and the cut is what would take it. Past `FINDINGS_SHOWN` the rest are counted and not listed, and the count claims nothing about what kind they are: a truncated report is a mixed set. The block closes with what each rule asks for, and with the override and what it is for.
 
 ## What is never examined
 

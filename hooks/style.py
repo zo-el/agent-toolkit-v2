@@ -727,6 +727,14 @@ def message_findings(message, quotable):
 def diff_findings(files):
     files = [record for record in files if not excluded(record["path"])]
     findings = []
+    # First: the report shows FINDINGS_SHOWN of these, and there is one drift
+    # finding, so anywhere behind a file's worth of dashes is off the end.
+    added, removed, paths = comment_drift(files)
+    if added - removed >= COMMENT_NET:
+        findings.append(
+            "comments: +%d/-%d in %s (limit +%d net)"
+            % (added, removed, ", ".join(paths), COMMENT_NET)
+        )
     for record in files:
         for number, text in added_prose(record):
             for name, index in dashes(text):
@@ -735,12 +743,6 @@ def diff_findings(files):
                     % (record["path"], number, name, fragment(text, index))
                 )
         findings.extend(changelog_findings(record))
-    added, removed, paths = comment_drift(files)
-    if added - removed >= COMMENT_NET:
-        findings.append(
-            "comments: +%d/-%d in %s (limit +%d net)"
-            % (added, removed, ", ".join(paths), COMMENT_NET)
-        )
     return findings
 
 
@@ -799,7 +801,7 @@ def reason(findings):
     ]
     lines.extend("  " + finding for finding in shown)
     if hidden:
-        lines.append("  and %d more of the same kind" % hidden)
+        lines.append("  and %d more not shown" % hidden)
     lines.extend(
         [
             "",

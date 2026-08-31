@@ -572,8 +572,18 @@ open(sys.argv[1], "w").write("".join("# note %s %d\n" % (sys.argv[2], i) for i i
 PY
 stage
 out="$(why "$(fx 'git commit -m "many"')")"
-check "past the shown cap the rest are counted" "and 5 more of the same kind" "$out"
+check "past the shown cap the rest are counted" "and 5 more not shown" "$out"
 check "and the count is of all of them" "45 findings" "$out"
+undo
+
+# A commit has one drift finding and can have a file's worth of dashes, so the
+# cut is what decides whether the one is ever read.
+comments "$FX/mod.py" 45 'x = 1' "note $EM"
+stage
+out="$(why "$(fx 'git commit -m "many notes"')")"
+check "drift survives a report that is cut"  "comments: +45/-0 in mod.py" "$out"
+check "and the cut count covers both kinds" "and 6 more not shown" "$out"
+check "and every finding is counted"        "46 findings" "$out"
 undo
 
 quoted="$(why "$(fx "git commit -m \"first line
