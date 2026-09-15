@@ -112,7 +112,7 @@ The rename is what makes a release staged: a folder under a `v<N>` name is alway
 
 ### Checking
 
-- **Throttled to six hours.** A check that starts less than six hours after the last one began does nothing. `now` ignores this.
+- **Throttled to six hours.** A check that starts less than six hours after the last one began does nothing. A last check recorded in the future counts as never having happened, so a clock that was wrong once does not stop a machine checking for good. `now` ignores the throttle.
 - Two reads answer it: the release the track names, and the tag it carries. An annotated tag is followed to its commit.
 - **A 404 is not an answer on its own.** The repository is private, so a token that cannot see it 404s exactly as a repository with no release does. A 404 is resolved by reading the repository itself: 404 again means the token cannot see it, which is an access failure, and a read means no release has been published yet, which is silence.
 - **Every call is bounded**, and the whole of `stage` is bounded, so a hung network cannot leave a process behind.
@@ -248,6 +248,7 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 | the stable link dangles | the updater is behind it and cannot run. The launcher reports it, and the bootstrap is the way back |
 | a staged folder is deleted by hand | it is staged again at the next check |
 | the suite fails in the workflow | no release. The run fails, and GitHub tells the author. Machines see nothing new, which is correct |
+| the account's runner minutes are spent | no run, so no release. GitHub tells the account owner. Machines stay where they are and report nothing, because nothing on a machine is wrong. A merge that reaches no machine is visible on GitHub and nowhere else |
 | the merged pull request says `none` | no release. The run succeeds and its summary says so |
 | there is no pull request, or no changelog section | no release, and the run fails |
 | `v<count>` already exists | no release. The run says so in its summary |
