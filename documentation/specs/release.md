@@ -137,7 +137,7 @@ Any failure stages nothing, records the reason, and is reported at the next `app
 
 ### Activating
 
-- Nothing staged for the wanted release, or a staged version equal to the live one, means nothing runs and nothing prints. This is the ordinary case, and it costs no more than reading the record and the live version.
+- Nothing staged for the wanted release, or a staged version equal to the live one, means no install runs. This is the ordinary case, and it costs no more than reading the track, the record and the live version. Whether anything prints is the report's own rule below.
 - Otherwise install runs from the staged folder and does everything install does. Its root checks come first, the stable link moves only when they pass, and its report names what applied.
 - **An activation is as slow as a full install, plugin fetches included**, and the session start or compaction that runs it waits. It happens once per release, and the alternative is a machine that never quite has the version it reports.
 - **Went live**, meaning the stable link resolves to the staged folder afterwards: the release is this machine's. The report carries install's own output.
