@@ -13,7 +13,7 @@ Install is the other half of this and is not restated here: `documentation/specs
 | wanted release | the release the track resolves to |
 | live version | the version directory the stable link points at, and the version it holds |
 | staged | a release unpacked at `~/.claude/agent-toolkit-releases/v<N>`, complete, with its `VERSION` written |
-| record | `~/.claude/agent-toolkit-staging.json`, what the updater knows: the last check, what is staged, what failed, what it has announced |
+| record | `~/.claude/agent-toolkit-staging.json`, everything the updater remembers: the wanted release and its commit, when the last check began and whether it succeeded, the last failure and its cause, the versions marked bad, the version last reported live, the directory that was live before the current one, and the releases it has already announced |
 | dev mode | the live version directory is a git work tree, so this machine's toolkit is a clone someone edits |
 
 ## Boundaries
@@ -28,15 +28,16 @@ Install is the other half of this and is not restated here: `documentation/specs
 
 ## Making a release
 
-Rulesets and branch protection are not available on this plan, so no check can be required before a merge. The gate is moved rather than lost: **the merge is the human gate, and the release is the machine gate.** A merge that fails the suite lands on `main` and produces no release, so no machine ever sees it.
+Rulesets and branch protection are not available on this plan, so no check can be required before a merge. The gate is moved rather than lost: **the merge is the human gate, and the release is the machine gate.** A merge that fails the suite lands on `main` and is released by nothing, so no machine ever runs a tree the suite has not passed. The commit itself reaches machines later, inside the next release that does pass.
 
 A push to `main` runs the release workflow, which:
 
 1. checks out the pushed commit with its whole history, because the release name counts it;
-2. runs `tests/run.sh`, and stops unless it passes;
+2. runs `tests/run.sh`, and stops unless it reports no failures and no skips;
 3. reads the changelog lines of the pull request that carried the commit, and stops when there are none;
 4. publishes `v<count>` from that commit, with those lines as its notes.
 
+- **A skipped check is not a passed one.** The suite exits `0` with any number of skips, and four of its checks skip on a machine that lacks `jscpd`, lacks git history, or runs as root. The gate is the suite's own count of failures and skips, both at zero, which is what the runner has to provide.
 - **`v<count>`** is the commit count of the released commit, the same number install reads for a checkout, so a release and a clone compare directly.
 - **The tag is lightweight and points at the released commit**, so one API call gives a machine the exact commit a release names.
 - **Runs are serialised**, so counts are published in the order they were merged.
@@ -57,8 +58,6 @@ The pull request body carries a `## Changelog` section holding either one or mor
 ### Rolling back
 
 A release that should be running nowhere is marked a prerelease. The latest release is by definition the newest that is neither a draft nor a prerelease, so the one before it becomes latest again. Every machine tracking `latest` converges on it at its next check, downgrading, and each says so in its report. Immutability leaves the prerelease and latest flags editable for exactly this.
-
-Marking the previous release latest outright is the same act in one step, and it rests on GitHub honouring that flag over its own date order, which its reference does not state. The prerelease flag rests on the definition itself.
 
 A machine that must not move at all is pinned in its track instead, which needs nobody else's agreement.
 
@@ -93,8 +92,9 @@ The machine verifies the commit for itself either way, so immutability is a seco
 | any other argument | none | nothing | usage on stderr | `2` |
 
 - `stage` is wired async at every `SessionStart`. Nothing waits on it, so it is where the network lives.
-- `apply` is wired synchronously at `SessionStart` for `startup`, `resume`, `clear` and `compact`. It is silent and immediate when there is nothing to do, which is every start but the one that takes a new release.
+- `apply` is wired synchronously at `SessionStart` for `startup`, `resume`, `clear` and `compact`. It reads the track, the record and the live version, and nothing else. It is silent and immediate when there is nothing to do, which is every start but the one that takes a new release.
 - `now` is the whole cycle at once, in the foreground, ignoring the throttle and any bad mark. It is how a person updates on demand, how a machine leaves dev mode, and what a report offers as its fix. It ends by running the wanted version's `install.sh`, so a machine already at the wanted release re-installs it.
+- **`now` that could stage nothing** prints the reason with its fix and stops, installing nothing and changing nothing. The live version stays live and untouched, and the exit is `1`. This is its commonest ending, because it is the one a person runs the moment updates stop working.
 - `now` on a machine tracking `off` changes nothing, says so, and exits `1`.
 
 ## The cycle
@@ -114,7 +114,10 @@ The rename is what makes a release staged: a folder under a `v<N>` name is alway
 
 - **Throttled to six hours.** A check that starts less than six hours after the last one began does nothing. A last check recorded in the future counts as never having happened, so a clock that was wrong once does not stop a machine checking for good. `now` ignores the throttle.
 - Two reads answer it: the release the track names, and the tag it carries. An annotated tag is followed to its commit.
-- **A 404 is not an answer on its own.** The repository is private, so a token that cannot see it 404s exactly as a repository with no release does. A 404 is resolved by reading the repository itself: 404 again means the token cannot see it, which is an access failure, and a read means no release has been published yet, which is silence.
+- **A 404 is not an answer on its own.** The repository is private, so a token that cannot see it 404s exactly as a repository with no release does. A 404 is resolved by reading the repository itself, and what the second read means depends on what was asked for:
+  - the repository 404s too: the token cannot see it, which is an access failure;
+  - the repository reads and the track says `latest`: no release has been published yet, which is silence;
+  - the repository reads and the track named a release: that release does not exist, which is a required finding naming the track's line. A machine pinned to a release nobody published would otherwise check every six hours forever and say nothing.
 - **Every call is bounded**, and the whole of `stage` is bounded, so a hung network cannot leave a process behind.
 - **One stage at a time.** A second takes no lock and exits. The lock is the updater's own, so staging never delays an install.
 
@@ -126,7 +129,9 @@ Three things, all of them before anything is staged:
 - the commit id the archive carries is the commit the release names;
 - that commit is the head of `main`, or an ancestor of it.
 
-The third is the one that matters most: it is what makes *a person merged this* the condition for running on every machine, rather than *a person published a release*. A release built from a branch that was never merged is refused by every machine, whatever the release says.
+The third is the one that matters most: it is what makes *a person merged this* the condition for running on every machine, rather than *a person published a release*.
+
+**A check that was not answered is not a check that failed.** GitHub saying the commit is not on `main` is a required finding, because the release is wrong. GitHub saying nothing, through a rate limit, a refusal or a read that did not complete, is an ordinary recorded failure: nothing is staged, and the next `apply` reports the cause. One unlucky call must never tell the user their repository has been tampered with.
 
 Any failure stages nothing, records the reason, and is reported at the next `apply`.
 
@@ -138,7 +143,9 @@ Any failure stages nothing, records the reason, and is reported at the next `app
 - **Went live**, meaning the stable link resolves to the staged folder afterwards: the release is this machine's. The report carries install's own output.
 - **Going live always calls for a restart**, whatever install says. Install asks for one when it changed something Claude Code reads only at start, and swapping the version directory changes none of those files while changing everything they point at: `CLAUDE.md` resolves through the stable link, and so does every agent definition.
 - **Did not go live**: nothing on the machine changed, the version is marked bad, and it is not tried again until the wanted release changes. The report carries install's reason. `hooks/update.sh now` tries it regardless, which is what a machine does after fixing the cause.
-- **Install's lock serialises everything that applies on this machine**, so activating needs no lock of its own. Two sessions starting at once both activate, and the second finds the release already live and reports it as its own session's change, which it is. A `--sync` that takes the lock after an activation finds the stable link moved off its own root and stops, and an activation that takes it after a `--sync` applies over what that wrote, which is what going live means.
+- **One activation at a time.** `apply` takes the updater's activation lock without waiting more than a moment for it, and a session that cannot take it installs nothing. No session start ever waits out another session's install.
+- **The report comes off the record, not off this run.** `apply` reports whenever the live version differs from the version the record says was last reported, whether this run caused the change or another session did, and then records what it reported. Two sessions starting together are each told once, which is right: they are two sessions.
+- Install's own lock still stands behind all of this, so a `--sync` that takes it after an activation finds the stable link moved off its own root and stops, and an activation that takes it after a `--sync` applies over what that wrote.
 
 **What a new version reaches, and when.** Hooks, permissions, settings, agents and skills are live as soon as install applies them, because Claude Code reloads them when `settings.json` changes. `CLAUDE.md` reaches a session only at its next start, and an agent already running keeps the definition it started with. Applying at a compaction therefore changes the machine mid-lane and the rules at the next start, which is the accepted cost of not waiting for a session to end.
 
@@ -149,6 +156,7 @@ A machine is in dev mode when its live version directory is a git work tree. Not
 - The updater checks, and does nothing else. It downloads nothing and activates nothing, so an edit in progress is never overwritten.
 - A machine leaves dev mode with `hooks/update.sh now`, which installs the wanted release over it. The clone is left on disk, untouched.
 - When the wanted release's count is above the clone's, the updater says so once, naming both versions and both ways forward: pull the clone, or install the release.
+- **The comparison is a count**, so a clone carrying work of its own can sit above the release while missing it, and is told nothing. That is the right way to be wrong: a clone is somebody's work in progress, and a release it has not merged is not news.
 
 ## Announcing once
 
@@ -185,18 +193,12 @@ A release the machine will not install is announced at most once, and the record
 - **Silence is the normal state.** A machine at the wanted release whose last check succeeded prints nothing at all.
 - **The updater reports its own access failures**, rather than leaving them to the doctor. A session start that skips the checks a user can only fix outside Claude Code would otherwise skip the one thing that stops updates.
 - **`stage` reports nothing.** An async hook's output reaches nothing reliably and is killed at teardown in `-p` mode, so it records and `apply` reports. A failure is therefore reported at the session start after the one that hit it.
-- **Two checks catch two different silences.** A recorded failure names its own cause the moment it happens, which a clock cannot do; and a successful check older than seven days catches a `stage` that is not running at all, which a recorded failure cannot.
-
-## Which release a machine runs
-
-No new mechanism. A staged release carries `VERSION` holding `v<count>·<sha>`, install stamps it once the install is clean, and the status line shows it. A release and a clone are named the same way on purpose, so the same stamp answers for both.
-
-The updater's report is what distinguishes them when it matters: it names the live version and the wanted release whenever they differ.
+- **The report names the live version and the wanted release whenever they differ**, which is the only place the two are distinguished. Which release a machine runs needs no mechanism of its own: a staged release carries `VERSION`, install stamps it, and the status line shows it, exactly as for a clone.
 
 ## Pruning
 
 - **Only `stage` prunes**, never `apply`, so no session start waits on a removal.
-- It keeps the live version directory, the wanted release, and the one that was live before the current one. Everything else under `~/.claude/agent-toolkit-releases` goes, along with any part-written folder more than a day old.
+- It keeps the live version directory, the wanted release, and the one the record names as live before the current one. Install computes that directory and keeps no note of it, so the activation that moves off a directory is what records it. Everything else under `~/.claude/agent-toolkit-releases` goes, along with any part-written folder more than a day old.
 - The stable link is read again immediately before each removal, and the directory it points at is never removed.
 - Install never removes a version directory, and that boundary is unchanged. Release folders are the updater's to remove, and a clone is nobody's.
 
@@ -245,7 +247,11 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 | `~/.claude/agent-toolkit-releases` cannot be created, written, or holds no room | nothing is staged, the reason is recorded, and the next `apply` reports it with its own fix |
 | install from the staged folder does not go live | nothing on the machine changed. The version is marked bad and the report carries install's reason |
 | install goes live and a later write fails | install's own contract: the new version is live and the report names what did not apply |
+| an activation is killed partway | the stable link may already have moved, so the release is live and the rest of the install is not done. The session's own `--sync`, which runs from the new root, applies the remainder and stamps it. The report was lost with the process, so the next `apply` finds a live version the record never reported and says so then |
+| two sessions start at once | one activates and both are told. The one that cannot take the activation lock installs nothing and waits on nothing |
 | the track holds something the updater does not accept | the updater stops and reports. Nothing is checked, downloaded or applied |
+| the track names a release nobody published | nothing is staged. Required finding naming the track's line, rather than the silence a missing `latest` earns |
+| GitHub will not say whether the commit is on `main` | nothing is staged. An ordinary recorded failure, never the finding that the release is wrong |
 | the record will not parse | it is replaced and the run says so. A check and an activation both still happen: the record is what the updater remembers, not what it is allowed to do |
 | the stable link dangles | the updater is behind it and cannot run. The launcher reports it, and the bootstrap is the way back |
 | a staged folder is deleted by hand | it is staged again at the next check |
@@ -261,6 +267,7 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 - **A `gh` extension.** `gh` would own fetching, pinning and upgrading, and it authenticates exactly as we want. An extension is a command on `PATH` under `gh`'s own directory, not a version directory a stable link can point at, and it moves only when told.
 - **chezmoi, or another dotfile manager.** It would replace `install.sh`, which is where the cost actually is: root checks, the launcher, the settings merge, the ledger.
 - **Generated release notes.** They list every merged pull request, chores included.
+- **Marking the previous release latest, to roll back in one step.** It rests on GitHub honouring that flag over its own date order, which its reference does not state. The prerelease flag rests on the definition of latest itself.
 - **A required check before merge.** Rulesets and branch protection answer 403 on this plan.
 - **Downloading in the hook that applies.** Every session start would wait on the network.
 - **Reporting from the async stage.** Its output reaches nothing reliably and is killed at teardown in `-p` mode.
@@ -280,5 +287,5 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 | how the record is written | one JSON file through jq, or a directory of one-line files | `hooks/update.sh` |
 | how `stage` bounds itself | `timeout` around the whole run, or a deadline checked between steps | `hooks/update.sh` |
 | how `stage` takes its lock | `flock` through python as install does, or a directory rename | `hooks/update.sh` |
-| the runner image | the pinned image the suite passes on | the release workflow |
+| the runner image and the user it runs as | a pinned image on which the suite reports no failures and no skips, which rules out running as root | the release workflow |
 | whether the suite also runs on pull requests | a second workflow, against a budget of 2,000 runner minutes a month and a suite of about four | the workflows |
