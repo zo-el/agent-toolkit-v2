@@ -241,6 +241,7 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 | the release's commit is not on `main` | nothing is staged. Required finding naming the release |
 | `stage` is killed partway | a part-written folder is left and pruned later. Nothing is staged, and the next `stage` starts again |
 | two stages overlap | the second takes no lock and exits |
+| `~/.claude/agent-toolkit-releases` cannot be created, written, or holds no room | nothing is staged, the reason is recorded, and the next `apply` reports it with its own fix |
 | install from the staged folder does not go live | nothing on the machine changed. The version is marked bad and the report carries install's reason |
 | install goes live and a later write fails | install's own contract: the new version is live and the report names what did not apply |
 | the track holds something the updater does not accept | the updater stops and reports. Nothing is checked, downloaded or applied |
