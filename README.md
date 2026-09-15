@@ -18,7 +18,7 @@ The installer enables two plugins but cannot install them. Once per machine:
 claude plugin install pr-review-toolkit@claude-plugins-official --scope user
 ```
 
-Notifications come from [claude-notifications-go](https://github.com/777genius/claude-notifications-go) — install it from its README, then `/claude-notifications-go:settings`. It fires when the main agent finishes or needs you, and stays quiet for sub-agents.
+Notifications come from [claude-notifications-go](https://github.com/777genius/claude-notifications-go). Install it from its README, then `/claude-notifications-go:settings`. It fires when an agent finishes or needs you, and which of those reach you is its own setting.
 
 The checkout can live anywhere. Device config reaches it only through the `~/.claude/agent-toolkit` symlink, so moving it is one `./install.sh` from the new location. On another machine, `git pull` is the whole upgrade — the next session start re-links everything.
 
@@ -29,7 +29,7 @@ The checkout can live anywhere. Device config reaches it only through the `~/.cl
 | `CLAUDE.md` | the agreement: the CTO loop, tasks, code and writing style, the gates |
 | `agents/` | architect · developer · reviewer · project-manager · researcher |
 | `skills/` | `backlog` · `toolkit` (change this repo) · `ui-review` (screenshot galleries) |
-| `hooks/` | the guard, the statusline, the task line, the retro recorder, the formatter, background process tracking |
+| `hooks/` | the guard, the style check, the statusline, the task line, the retro recorder, the formatter, background process tracking |
 | `install.sh` | wiring and the doctor |
 | `RETRO.md` | learnings written by hand, read alongside the retro digest |
 | `documentation/brief.md` | what this toolkit is for |
@@ -46,7 +46,7 @@ Each runs in its own context with a tool allowlist as its outer boundary and its
 | `project-manager` | high | write anything but Linear |
 | `researcher` | high | write anything |
 
-Linear tools live only in `project-manager`. Only `developer` can edit source. Subagents nest one level deep, which is what lets the developer and reviewer run their review agents. Every agent carries `SendMessage`, so it can reach the session mid-run when it is genuinely blocked instead of finishing a long task on a wrong assumption.
+Linear tools live only in `project-manager`. Only `developer` can edit source. Subagents nest one level deep, which is what lets the developer and reviewer run their review agents, and the researcher reach a repo through `Explore`. Every agent carries `SendMessage`, so it can reach the session mid-run when it is genuinely blocked instead of finishing a long task on a wrong assumption.
 
 ## Session isolation
 
@@ -54,12 +54,16 @@ Sessions on this machine work on different projects and must not reach into each
 
 ## Enforcement
 
-[`hooks/guard.sh`](hooks/guard.sh) is the only gate, and it fires regardless of permission mode, inside subagents too:
+Two hooks gate a session. Both fire regardless of permission mode, inside subagents too.
+
+[`hooks/guard.sh`](hooks/guard.sh) is the approval gate:
 
 - **denies** posting publicly as the user — PR and issue comments, review submissions.
 - **asks** before anything leaves the machine (push, PR, release, package publish), before Linear writes, before touching the device outside the workspace, and before the few git commands the reflog cannot undo.
 
 Everything else is silent. `permissions.defaultMode` is `auto` and `~/.claude`, the scratchpad, and this checkout are approved working directories, so an agent runs unattended instead of stalling on a prompt nobody is watching. `Read` is denied on the credentials and settings files, which carry API tokens.
+
+[`hooks/style.py`](hooks/style.py) is the writing gate, described in [`documentation/specs/style-checks.md`](documentation/specs/style-checks.md). It reads a `git commit` before it runs and denies it over the message and the diff it is about to make, naming every finding at once with its path, its line and the offending text. A finding that is wrong or deliberately accepted is cleared by a `Style-ack:` trailer on the message, which lands in git history where it stays auditable.
 
 [`tests/run.sh`](tests/run.sh) is the regression suite for all of it. It ends in [`tests/duplication.sh`](tests/duplication.sh), which fails the suite on copy-pasted shell or python and skips itself where `jscpd` cannot be reached.
 
@@ -68,12 +72,12 @@ Everything else is silent. `permissions.defaultMode` is `auto` and `~/.claude`, 
 [`hooks/taskline.py`](hooks/taskline.py) puts the session's own task list into context on every turn, so the rule to open a task before acting cannot quietly decay:
 
 ```
-Tasks: 2 open · Retro — spec (in_progress, arch-retro) · Retro — build (blocked)
+Tasks: 2 open · Retro: spec (in_progress, arch-retro) · Retro: build (blocked)
 ```
 
 - **`(blocked)`** — pending, with a blocker that has not finished. The platform stores no such status; it is read off `blockedBy`.
 - **Four tasks named**, in-progress first, then `+N more` for the rest. The count covers every open task, named or not.
-- **Nothing open** prints `Tasks: none open — open a lane before acting`, and names the task tools, which are deferred: a session that never searched for their schemas cannot call them and has nothing to show that it failed. Once tasks exist the tools are demonstrably loaded and the hint drops.
+- **Nothing open** prints `Tasks: none open. Open a lane before acting`, and names the task tools, which are deferred: a session that never searched for their schemas cannot call them and has nothing to show that it failed. Once tasks exist the tools are demonstrably loaded and the hint drops.
 - **A list read only in part** — a file being written as it is read, or one that will not open — says `(partial list)` after the count. A list that cannot be read at all prints nothing: "none open" would be a guess, and it is a guess that tells the model to open a lane that already exists.
 
 Two separate things stand between a session and its task list, and `install.sh` settles both: `CLAUDE_CODE_ENABLE_TODO_TOOLS` opts out of the removal of the tools for this generation of models, and the hint above covers the deferral that keeps their schemas unloaded until something asks. The hook itself never blocks a turn and exits 0 on every path, including its own failure.

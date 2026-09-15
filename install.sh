@@ -102,12 +102,16 @@ fi
 # the doctor checks the installed file against it. Neither side can drift.
 # Commands are relative to $STABLE; matcher "" means the event takes none.
 #
-# Notification events (Notification, Stop) are deliberately absent — the
-# claude-notifications-go plugin owns them, and its suppressForSubagents keeps
-# a sub-agent finishing from ever being a false cue.
+# Notification events (Notification, Stop, SubagentStop) are deliberately
+# absent: the claude-notifications-go plugin owns them, and which of them reach
+# the user is its own configuration.
 #
-# taskline must stay synchronous: only a hook that finishes before the turn does
-# has its stdout injected as context, and an async one would print into the void.
+# taskline and style must stay synchronous. Only a hook that finishes before the
+# turn or the tool call does is read at all: an async taskline prints its line
+# into the void, and an async style hook cannot deny a commit that already ran.
+#
+# style.py takes the whole Bash matcher rather than an if. That field is
+# permission rule syntax, and Bash(git commit *) misses git -C <repo> commit.
 #
 # The retro recorder is the mirror image: async on every event, so it can neither
 # block a turn nor inject its stdout. No single trigger is load-bearing —
@@ -115,7 +119,7 @@ fi
 # is the whole scheduling mechanism, so nothing lands outside this repo and
 # ~/.claude.
 WIRING='[
-  {"event":"SessionStart","matcher":"startup|resume|clear",
+  {"event":"SessionStart","matcher":"startup|resume|clear|compact|fork",
    "hooks":[{"command":"/install.sh --sync"}]},
   {"event":"SessionStart","matcher":"",
    "hooks":[{"command":"/hooks/retro.py record","async":true}]},
@@ -125,7 +129,8 @@ WIRING='[
    "hooks":[{"command":"/hooks/taskline.py"},
             {"command":"/hooks/retro.py record --interval 900","async":true}]},
   {"event":"PreToolUse","matcher":"Bash",
-   "hooks":[{"command":"/hooks/guard.sh"}]},
+   "hooks":[{"command":"/hooks/guard.sh"},
+            {"command":"/hooks/style.py"}]},
   {"event":"PreToolUse","matcher":"mcp__linear.*",
    "hooks":[{"command":"/hooks/guard.sh"}]},
   {"event":"PostToolUse","matcher":"Write|Edit",
@@ -423,11 +428,8 @@ if [ "$MODE" != "--dry-run" ] && command -v jq >/dev/null 2>&1; then
            claude-notifications-go@claude-notifications-go; do
     jq -e --arg k "$p" '(.plugins[$k] // []) | length > 0' \
       "$CLAUDE_DIR/plugins/installed_plugins.json" >/dev/null 2>&1 \
-      || echo "agent-toolkit: ! plugin $p is enabled but not installed — see README"
+      || echo "agent-toolkit: ! plugin $p is enabled but not installed: see README"
   done
-  ncfg="$CLAUDE_DIR/claude-notifications-go/config.json"
-  [ ! -f "$ncfg" ] || jq -e '.notifications.suppressForSubagents == true' "$ncfg" >/dev/null 2>&1 \
-    || echo "agent-toolkit: ! notifications fire for sub-agents — set notifications.suppressForSubagents to true in $ncfg"
 fi
 
 # ── 8. version stamp ─────────────────────────────────────────────────────────

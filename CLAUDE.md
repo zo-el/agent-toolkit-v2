@@ -96,7 +96,7 @@ Agents can reach the session while they work, and should when they are genuinely
 - Independent work → spawn every agent in one message so they run at once.
 - Dependent work → one agent, verify, then the next.
 - Never two agents writing in the same repo at once. Split by directory, give each `isolation: worktree`, or sequence them.
-- Start each agent's description with its lane: `Payments rework — build the parser`.
+- Start each agent's description with its lane: `Payments rework: build the parser`.
 
 ## Tasks
 
@@ -108,9 +108,9 @@ The task list is the user's only view of what is in flight. It is worth nothing 
 
 ```
 Payments rework                 ← the lane
-Payments rework — spec          ← its steps
-Payments rework — build
-Payments rework — review
+Payments rework: spec           ← its steps
+Payments rework: build
+Payments rework: review
 ```
 
 There is no parent field, so the name carries the grouping and the dependencies carry the order: a step that cannot start until another finishes gets `addBlockedBy`, and the list then shows it as blocked. While you are still gathering context, the lane alone is the whole list — open the steps once the plan is agreed.
@@ -153,7 +153,7 @@ Say so and ask which wins, before acting on either reading. Quote the line and s
 - Comment what you skipped on purpose: security cases, edge cases, code left unoptimized.
 - No repeated functions. Generalise what gets reused.
 - Readable and maintainable first. Optimise where it pays, not where it costs clarity.
-- Use a known library before hand-rolling one.
+- **Search before you write a helper.** Grep for what it would do, not what you would call it, and read the workspace's dependency manifests: a crate another member already declares costs one line to use. A utility is the most duplicated kind of code there is, and the search takes seconds against a function you maintain forever.
 - Every change ships with the test that proves the new behaviour. Existing tests passing only proves you didn't break the old one.
 - Simple but finished. No half-implementations, no dangling TODOs, no "clean up later".
 - Rename or remove something → fix every reference in the same change. Grep the whole repo, including ignored directories.
@@ -162,7 +162,7 @@ Say so and ask which wins, before acting on either reading. Quote the line and s
 
 - **The fewest words that carry the meaning.** If a sentence can come out without losing something, take it out.
 - No filler. Don't restate the request, don't summarise what you just wrote, don't close with a line that adds nothing.
-- **A changelog entry is one short line naming what was worked on, and only for a change to what the product does.** No chores, clean-ups, refactors, tests, tooling or doc tidying, however much work they were. Not why, not how, not what it replaces, not how it was verified. A whole PR gets a handful of them, often one, and several defects of a kind share a line.
+- **A changelog entry is one short line naming what the user now sees, and only for a change to what the product does.** Name the thing on screen, not the outcome in the abstract: "the settings screen shows your full agent key", never "real values replace the placeholders". No chores, clean-ups, refactors, tests, tooling or doc tidying, however much work they were. Not why, not how, not what it replaces, not how it was verified. A whole PR gets a handful of them, often one, and several defects of a kind share a line.
 - State what **is** — not what was, not what changed.
 - Break into points. Write a paragraph only when points genuinely can't carry it.
 - State the fact instead of pointing at the file that holds it.
@@ -175,10 +175,12 @@ Say so and ask which wins, before acting on either reading. Quote the line and s
 ## Verify before you claim
 
 - Check the actual code and the current state. Never trust memory, stale docs, or comments.
+- Check a load-bearing premise against its authoritative source, never a local cache: the remote over local branches, `git ls-remote --symref origin HEAD` over `refs/remotes/origin/HEAD`, the whole population over the one fixture in front of you. An answer the brief did not enumerate is a reason to escalate, not to pick the nearest option.
 - Confirm the cause before writing the fix.
 - Scale the checking to what the change can break. Never skip the floor: it builds, it's tested, references are swept.
 - Say what actually happened. Tests failed → show it. A step was skipped → say so.
-- A result carries the environment it was measured in. Reproduce the shape CI runs — its env, container, shell — before calling a gate green.
+- A result carries the environment it was measured in, so every measurement happens inside whatever wrapper pins the project's toolchain (`nix develop -c`, a container, a venv). A green measured outside it is not green.
+- Iterate against the targeted test rather than the whole suite. The full gate set runs before you hand back, and again after any fix it forced.
 
 ## Gates
 
@@ -222,6 +224,6 @@ Every agent ends its report with a `Retro:` line — one line, or `Retro: none`.
 
 A learning of your own goes to `~/.claude/agent-toolkit/RETRO.md`:
 
-`- YYYY-MM-DD · <agent> · <project> — <what was inefficient, and what would be better>`
+`- YYYY-MM-DD · <agent> · <project>: <what was inefficient, and what would be better>`
 
 Never change the toolkit mid-task. Both are read on demand — that's the `toolkit` skill.

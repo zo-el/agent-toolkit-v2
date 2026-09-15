@@ -2,10 +2,6 @@
 # Regression suite for the enforcement layer and the installer.
 #
 #   tests/run.sh
-#
-# Guard payloads are written to files rather than piped inline: the payload text
-# names the very commands the guard flags, and a shell cannot tell a mention
-# from an invocation, so an inline pipe would prompt for permission.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -29,20 +25,47 @@ stub_path() { # dir, tools… — a PATH carrying only these
 # ── guard ────────────────────────────────────────────────────────────────────
 echo "guard.sh"
 
-bash_payload() { printf '{"tool_name":"Bash","tool_input":{"command":%s}}' "$(jq -Rn --arg c "$1" '$c')"; }
+bash_payload() { # command, cwd
+  printf '{"tool_name":"Bash","cwd":%s,"tool_input":{"command":%s}}' \
+    "$(jq -Rn --arg d "${2:-}" '$d')" "$(jq -Rn --arg c "$1" '$c')"
+}
 tool_payload() { printf '{"tool_name":%s,"tool_input":{}}' "$(jq -Rn --arg t "$1" '$t')"; }
 
-guard() { printf '%s' "$1" > "$TMP/p.json"; "$ROOT/hooks/guard.sh" < "$TMP/p.json"; }
+# Both PreToolUse gates answer in the same shape, so one runner drives both and
+# $HOOK says which is under test. Payloads go through a file rather than a pipe:
+# they name the very commands the guard flags, and a shell cannot tell a mention
+# from an invocation.
+HOOK="$ROOT/hooks/guard.sh"
+# The exit status and stderr are left in files: hook runs inside a command
+# substitution, so a variable it set would die with the subshell.
+hook() {
+  printf '%s' "$1" > "$TMP/p.json"
+  "$HOOK" < "$TMP/p.json" 2> "$TMP/hook.err"
+  printf '%s' "$?" > "$TMP/hook.rc"
+}
 
-# No output at all is how the guard says "not my business".
+# No output at all is how a gate says "not my business".
 decision() {
   [ -n "${1//[[:space:]]/}" ] || { echo silent; return; }
   printf '%s' "$1" | jq -r '.hookSpecificOutput.permissionDecision // "silent"' 2>/dev/null || echo malformed
 }
 
 expect() { # name, expected decision, payload
-  local got; got="$(decision "$(guard "$3")")"
-  [ "$got" = "$2" ] && ok "$1" || bad "$1" "expected $2, got $got"
+  local got rc err
+  got="$(decision "$(hook "$3")")"
+  rc="$(cat "$TMP/hook.rc" 2>/dev/null)"
+  err="$(cat "$TMP/hook.err" 2>/dev/null)"
+  if [ "$got" != "$2" ]; then
+    bad "$1" "expected $2, got $got"
+  elif [ "$rc" != 0 ]; then
+    # Silence and a crash are the same empty stdout. A gate that blocks nothing
+    # because it died still has to say so here.
+    bad "$1" "exited $rc, and a hook must exit 0 on every path"
+  elif [ -n "$err" ]; then
+    bad "$1" "wrote to stderr: $(printf '%s' "$err" | tail -1)"
+  else
+    ok "$1"
+  fi
 }
 
 expect "git push asks"                ask    "$(bash_payload 'git push origin main')"
@@ -78,6 +101,612 @@ stub_path "$TMP/nojq" bash grep sed awk cat printf
 printf '%s' "$(bash_payload 'git push')" > "$TMP/p.json"
 out="$(env -i PATH="$TMP/nojq" HOME="$TMP" "$ROOT/hooks/guard.sh" < "$TMP/p.json" 2>/dev/null)"
 [ -z "$out" ] && ok "fails open without jq" || bad "fails open without jq" "emitted a verdict: $out"
+
+# ── style ────────────────────────────────────────────────────────────────────
+# The other gate. Every diff case runs against a real repository: the check
+# reads git, so a typed fixture would prove the parser and nothing else.
+echo "style.py"
+
+HOOK="$ROOT/hooks/style.py"
+# The two characters as bytes: a \u escape inside $'' needs bash 4.2, and
+# this suite runs on 3.2 as well.
+EM="$(printf '\xe2\x80\x94')"
+EN="$(printf '\xe2\x80\x93')"
+# The retro format as a file publishes it. Out here because the documentation
+# check at the end of the suite runs past the fixture guard below.
+template() { sed -n 's/.*`\(- YYYY-MM-DD[^`]*\)`.*/\1/p' "$1"; }
+
+FX="$TMP/fixture"
+mkdir -p "$FX"
+git -C "$FX" init -q >/dev/null 2>&1
+# Local to a throwaway repository under $TMP, so it reaches no commit of the
+# user's. Without it the whole section skips wherever git has no identity, which
+# is every fresh runner. Signing is off because it would wait on a passphrase.
+git -C "$FX" config commit.gpgsign false
+git -C "$FX" config user.name "style fixture"
+git -C "$FX" config user.email "fixture@example.invalid"
+fx() { bash_payload "$1" "$FX"; }
+noted() { # name, expected stderr substring, payload
+  local got err
+  got="$(decision "$(hook "$3")")"
+  err="$(cat "$TMP/hook.err" 2>/dev/null)"
+  if [ "$got" != silent ]; then bad "$1" "expected silent, got $got"
+  else check "$1" "$2" "$err"; fi
+}
+why() { printf '%s' "$(hook "$1")" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""' 2>/dev/null; }
+stage() {
+  git -C "$FX" add -A >/dev/null 2>&1
+  git -C "$FX" diff --cached --quiet HEAD 2>/dev/null \
+    && bad "the fixture staged something" "nothing is staged, so the case below would pass on an empty tree"
+}
+# Back to a known tree, so no case inherits the last one's history.
+undo() {
+  git -C "$FX" reset -q --hard base >/dev/null 2>&1
+  git -C "$FX" clean -qfdx >/dev/null 2>&1
+}
+# The drift limit is counted in tens, so the files that reach it are generated.
+comments() { # path, count, opening line, word for the comment text
+  printf '%s\n' "$3" > "$1"
+  awk -v n="$2" -v w="${4:-note}" 'BEGIN { for (i = 1; i <= n; i++) print "# " w " " i }' >> "$1"
+}
+
+printf 'x = 1\n' > "$FX/mod.py"
+printf '# Changelog\n\n' > "$FX/CHANGELOG.md"
+printf '# Doc\n\nplain line\n' > "$FX/doc.md"
+stage
+if ! git -C "$FX" commit -q -m base >/dev/null 2>&1 || ! git -C "$FX" tag base; then
+  skip "style.py" "git will not commit here, so the fixture repository does not exist"
+else
+
+expect "a dash in the message is denied"    deny   "$(fx "git commit -m \"the parser ${EM} it dropped a token\"")"
+expect "an en dash is denied too"           deny   "$(fx "git commit -m \"the parser ${EN} it dropped a token\"")"
+expect "an en dash between digits is a range" silent "$(fx "git commit -m \"covers lines 10${EN}20\"")"
+expect "a clean message is silent"          silent "$(fx 'git commit -m "cover the parser"')"
+expect "--dry-run is silent"                silent "$(fx "git commit --dry-run -m \"a ${EM} b\"")"
+expect "a command that is not a commit"     silent "$(fx 'git log --oneline -5')"
+expect "a commit quoted inside another command" silent "$(fx "echo \"git commit -m 'a ${EM} b'\"")"
+expect "git -C is a commit at any position" deny   "$(fx "git -C $FX commit -m \"a ${EM} b\"")"
+noted "words that will not split say so" "could not split the command" \
+  "$(fx 'git commit -m "unbalanced')"
+
+expect "a Style-ack trailer clears it" silent \
+  "$(fx "git commit -m \"the parser ${EM} dropped a token
+
+Style-ack: the dash sits inside a title quoted from upstream\"")"
+expect "a Style-ack with no reason clears nothing" deny \
+  "$(fx "git commit -m \"the parser ${EM} dropped a token
+
+Style-ack:\"")"
+
+printf 'x = 1\n# a note %s with a dash\n' "$EM" > "$FX/mod.py"; stage
+out="$(why "$(fx 'git commit -m "clean message"')")"
+check "a dash in an added comment names its line" "mod.py:2:" "$out"
+check "and quotes the offending text"             "a note $EM with a dash" "$out"
+check "and names the override"                    "Style-ack:" "$out"
+undo
+
+printf 'LABEL = "an em %s dash in a UI string"\n' "$EM" > "$FX/ui.py"; stage
+expect "a dash in a string literal is invisible" silent "$(fx 'git commit -m "label"')"
+undo
+
+# An added line reading "++ x" arrives as "+++ x". Read as a path, it invents a
+# file the commit does not touch and numbers every line after it against that.
+printf -- '++ b/phantom.py\n# note %s dash\n' "$EM" > "$FX/notes.txt"
+stage
+out="$(why "$(fx 'git commit -m "notes"')")"
+case "$out" in
+  *phantom.py*) bad "a +++ inside a hunk is content" "it reported phantom.py, which this commit does not touch" ;;
+  *)           ok  "a +++ inside a hunk is content" ;;
+esac
+check "and the dash is filed under the real path" "notes.txt:2:" "$out"
+undo
+
+printf '# Doc\n\nplain line\n\n```\ncode %s dash\n```\n\n> quoted %s dash\n' "$EM" "$EM" > "$FX/doc.md"; stage
+expect "a fenced block and a blockquote are not prose" silent "$(fx 'git commit -m "docs"')"
+printf -- '---\ntitle: a %s b\n---\n\n# Doc\n\nplain line\n' "$EM" > "$FX/doc.md"; stage
+expect "yaml front matter is not prose" silent "$(fx 'git commit -m "docs"')"
+printf '# Doc\n\nprose %s dash\n' "$EM" > "$FX/doc.md"; stage
+expect "a dash in markdown prose is denied" deny "$(fx 'git commit -m "docs"')"
+undo
+
+# A retro append is routine and correct, so it must never need the override.
+# Filled in from the format CLAUDE.md publishes, so it is that one under test.
+line="$(template "$ROOT/CLAUDE.md" | sed -e 's/YYYY-MM-DD/2026-08-30/' -e 's/<agent>/developer/' \
+  -e 's/<project>/agent-toolkit/' -e 's/<what was inefficient.*>/a brief naming its sha costs a round/')"
+case "$line" in
+  ""|*"<"*) bad "the published format fills in" "CLAUDE.md yielded: ${line:-<nothing>}" ;;
+  *)        ok  "the published format fills in" ;;
+esac
+log() { { printf '# Retro log\n\n'; [ $# -eq 0 ] || printf '%s\n' "$1"; } > "$FX/RETRO.md"; }
+log; stage; git -C "$FX" commit -q -m "the log" >/dev/null 2>&1
+log "$line"; stage
+expect "appending it needs no override" silent "$(fx 'git commit -m "retro: a line"')"
+log "- 2026-08-30 · developer · agent-toolkit $EM a brief naming its sha costs a round"; stage
+expect "and the separator it replaced is denied" deny "$(fx 'git commit -m "retro: a line"')"
+undo
+
+printf 'x = 1\n# a note %s with a dash\n' "$EM" > "$FX/mod.py"
+expect "nothing staged, so a plain commit is silent" silent "$(fx 'git commit -m "wip"')"
+expect "commit -am reads the working tree"           deny   "$(fx 'git commit -am "wip"')"
+expect "and so does commit -a -m"                    deny   "$(fx 'git commit -a -m "wip"')"
+undo
+
+printf 'x = 1\n# a note %s with a dash\n' "$EM" > "$FX/mod.py"; stage
+expect "an editor commit still gets the diff checks" deny "$(fx 'git commit')"
+expect "and so does --amend --no-edit"               deny "$(fx 'git commit --amend --no-edit')"
+expect "and so does --fixup"                         deny "$(fx 'git commit --fixup=HEAD')"
+printf 'fix it %s badly\n' "$EM" > "$TMP/msg.txt"
+expect "-F reads the file it names"                  deny   "$(fx "git commit -F $TMP/msg.txt")"
+printf 'fix it %s badly\n\nStyle-ack: quoting an upstream title\n' "$EM" > "$TMP/msg.txt"
+expect "a Style-ack in that file clears the diff too" silent "$(fx "git commit -F $TMP/msg.txt")"
+undo
+# The message goes unread, so only the diff is left to speak, and it is clean.
+expect "-F naming a file that is not written yet" silent "$(fx 'git commit -F not-written-yet.txt')"
+
+printf 'x = 1\n# a note %s with a dash\n' "$EM" > "$FX/mod.py"
+stage; git -C "$FX" commit -q -m "landed with a dash" >/dev/null 2>&1
+expect "an amend does not re-report HEAD" silent "$(fx 'git commit --amend --no-edit')"
+printf 'x = 1\n# a note %s with a dash\n# a second %s one\n' "$EM" "$EM" > "$FX/mod.py"; stage
+out="$(why "$(fx 'git commit --amend --no-edit')")"
+check "an amend reports what it adds" "mod.py:3:" "$out"
+case "$out" in
+  *"mod.py:2:"*) bad "an amend leaves HEAD alone" "it reported line 2, which is already committed" ;;
+  *)             ok  "an amend leaves HEAD alone" ;;
+esac
+undo
+
+printf 'y = 1\n' > "$FX/b.py"; printf 'echo hi\n' > "$FX/c.sh"; stage
+git -C "$FX" commit -q -m "two more files" >/dev/null 2>&1
+comments "$FX/mod.py" 7 'x = 1'
+comments "$FX/b.py" 7 'y = 1'
+comments "$FX/c.sh" 7 'echo hi'
+stage
+check "drift is counted over the whole commit" "comments: +21/-0 in b.py, c.sh, mod.py" \
+  "$(why "$(fx 'git commit -m "notes"')")"
+undo
+comments "$FX/fresh.py" 25 'z = 1'; stage
+expect "a brand new file's comments do not count" silent "$(fx 'git commit -m "new module"')"
+undo
+
+{ printf '# Changelog\n\n'; printf -- '- %s\n' one two three four five six; } > "$FX/CHANGELOG.md"; stage
+check "too many changelog entries in one commit" "6 entries added in one commit" \
+  "$(why "$(fx 'git commit -m "release"')")"
+undo
+{ printf '# Changelog\n\n- '; printf 'a long entry that keeps going %.0s' 1 2 3 4 5 6; printf '\n'; } > "$FX/CHANGELOG.md"
+stage
+check "a changelog entry over the length limit" "characters, over 160" \
+  "$(why "$(fx 'git commit -m "release"')")"
+undo
+
+mkdir -p "$FX/node_modules/p" "$FX/.claude/worktrees/wt"
+printf '// note %s dash\n' "$EM" > "$FX/node_modules/p/i.js"
+printf '// note %s dash\n' "$EM" > "$FX/.claude/worktrees/wt/a.js"
+printf '{"a": "b %s c"}\n' "$EM" > "$FX/package-lock.json"
+stage
+expect "vendored, worktree and lock paths are excluded" silent "$(fx 'git commit -m "vendor drop"')"
+undo
+
+python3 -c "import sys; open(sys.argv[1], 'w').write(''.join('# note — %d\n' % i for i in range(5000)))" \
+  "$FX/big.py" && stage
+expect "a diff of exactly the cap is still read" deny "$(fx 'git commit -m "import"')"
+python3 -c "import sys; open(sys.argv[1], 'w').write(''.join('# note — %d\n' % i for i in range(5001)))" \
+  "$FX/big.py" && stage
+expect "one line more is not this change's business" silent "$(fx 'git commit -m "import"')"
+undo
+
+# Anything that leaves a stray word in the segment reads as a pathspec, and the
+# check then narrows to a file that does not exist and finds nothing.
+printf 'x = 1\n# a note %s with a dash\n' "$EM" > "$FX/mod.py"; stage
+expect "a stderr redirect does not switch it off" deny "$(fx 'git commit -m "clean" 2>/dev/null')"
+expect "nor does 2>&1"                            deny "$(fx 'git commit -m "clean" 2>&1')"
+expect "nor does a line continuation"             deny "$(fx "git commit \\
+  -m \"clean\"")"
+expect "nor does a heredoc body"                  deny "$(fx "git commit -F - <<EOF
+a clean message
+EOF")"
+expect "a cd after the commit does not move it"   deny "$(fx 'git commit -m "clean" && cd /tmp')"
+expect "nor does a cd inside a subshell"          deny "$(fx '(cd /tmp && git pull) && git commit -m "clean"')"
+undo
+
+comments "$FX/mod.py" 15 'x = 1'; stage
+expect "the include form counts a file once" silent "$(fx 'git commit -i -m "notes" mod.py')"
+undo
+# The index and the pathspec name different files, so both halves have to be read.
+printf 'x = 1\n# a note %s dash\n' "$EM" > "$FX/mod.py"; stage
+printf '# Doc\n\nprose %s dash\n' "$EM" > "$FX/doc.md"
+out="$(why "$(fx 'git commit -i -m "notes" doc.md')")"
+check "the include form reads the index too" "mod.py:2:" "$out"
+check "and the paths it was given"           "doc.md:3:" "$out"
+undo
+
+printf '# Doc\n\n```\nold code\n```\n' > "$FX/doc.md"; stage
+git -C "$FX" commit -q -m "a code block" >/dev/null 2>&1
+printf '# Doc\n\n```python\nold code\nnew code %s here\n```\n' "$EM" > "$FX/doc.md"; stage
+expect "a fence that gained a language tag is still a fence" silent "$(fx 'git commit -m "docs"')"
+undo
+
+# Drift is the code rule. A comment in a configuration format documents an
+# option, and a page of them is an ordinary change.
+printf 'a = 1\n' > "$FX/config.toml"; printf 'echo hi\n' > "$FX/run.sh"; stage
+git -C "$FX" commit -q -m "config and script" >/dev/null 2>&1
+comments "$FX/config.toml" 25 'a = 1'; stage
+expect "a config file's comments are not drift" silent "$(fx 'git commit -m "config"')"
+printf 'a = 1\n# a note %s dash\n' "$EM" > "$FX/config.toml"; stage
+expect "but a dash in one is still a dash" deny "$(fx 'git commit -m "config"')"
+git -C "$FX" reset -q --hard >/dev/null 2>&1
+comments "$FX/run.sh" 20 'echo hi'; stage
+check "a shell script's comments are drift" "comments: +20/-0 in run.sh" "$(why "$(fx 'git commit -m "script"')")"
+undo
+
+# A -F path need have nothing to do with the commit, so quoting its text would
+# read a file out to the model a window at a time.
+printf 'private %s notes, and a token nobody asked for\n' "$EM" > "$TMP/private.txt"
+out="$(why "$(fx "git commit -F $TMP/private.txt")")"
+check "a message file is reported by line" "on line 1 of the message file" "$out"
+case "$out" in
+  *private*|*token*) bad "and never quoted back" "the reason carried the file's text" ;;
+  *)                 ok  "and never quoted back" ;;
+esac
+
+# Repository config is executable, and this runs before the commit is approved.
+# Everything reachable from a config key is turned off on the command line.
+HOSTILE="$TMP/hostile"
+mkdir -p "$HOSTILE"
+printf '#!/bin/sh\ntouch %s\nexit 1\n' "$TMP/payload-ran" > "$TMP/payload.sh"
+chmod +x "$TMP/payload.sh"
+git -C "$HOSTILE" init -q >/dev/null 2>&1
+git -C "$HOSTILE" config commit.gpgsign false
+git -C "$HOSTILE" config user.name "style fixture"
+git -C "$HOSTILE" config user.email "fixture@example.invalid"
+git -C "$HOSTILE" config core.fsmonitor "$TMP/payload.sh"
+git -C "$HOSTILE" config diff.external "$TMP/payload.sh"
+printf 'x = 1\n' > "$HOSTILE/a.py"
+git -C "$HOSTILE" add -A >/dev/null 2>&1
+rm -f "$TMP/payload-ran"
+# -am with no HEAD is what reaches the fallback: diff HEAD fails, and the
+# arguments are rebuilt.
+hook "$(bash_payload 'git commit -am first' "$HOSTILE")" >/dev/null
+[ -e "$TMP/payload-ran" ] && bad "the no-HEAD fallback cannot run a program" "repository config ran it" \
+                          || ok "the no-HEAD fallback cannot run a program"
+git -C "$HOSTILE" -c core.fsmonitor= commit -q -m base >/dev/null 2>&1
+printf 'x = 1\n# note\n' > "$HOSTILE/a.py"
+git -C "$HOSTILE" -c core.fsmonitor= add -A >/dev/null 2>&1
+rm -f "$TMP/payload-ran"
+hook "$(bash_payload 'git commit -m "second"' "$HOSTILE")" >/dev/null
+[ -e "$TMP/payload-ran" ] && bad "nor can the ordinary one" "repository config ran it" \
+                          || ok "nor can the ordinary one"
+
+# A combined diff numbers nothing the way a two-way one does. Its header is not
+# "diff --git", so no record opens and no invented position is reported.
+combined="$(python3 - "$ROOT" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/hooks")
+import style
+text = "diff --cc f.txt\n--- a/f.txt\n+++ b/f.txt\n@@@ -1,1 -1,1 +1,5 @@@\n++both sides\n"
+print(len(style.parse_diff(text)))
+PY
+)"
+check "a combined diff yields no records" "0" "$combined"
+
+printf 'x = 1\n# one %s dash\n# two %s dash\n' "$EM" "$EM" > "$FX/mod.py"
+printf '# Doc\n\nprose %s dash\n' "$EM" > "$FX/doc.md"
+stage
+out="$(why "$(fx "git commit -m \"a ${EM} b\"")")"
+for want in "4 findings" "message:" "doc.md:3:" "mod.py:2:" "mod.py:3:"; do
+  check "one block carries $want" "$want" "$out"
+done
+undo
+
+# Committing the removal of a dash must be silent, or the fix the deny reason
+# just asked for is itself blocked and the loop has no way out.
+printf 'x = 1\n# an old note %s dash\n' "$EM" > "$FX/mod.py"; stage
+git -C "$FX" commit -q -m "landed a dash" >/dev/null 2>&1
+printf 'x = 1\n' > "$FX/mod.py"; stage
+expect "removing a dash line is silent" silent "$(fx 'git commit -m "cut the dash"')"
+undo
+
+printf 'x = 1\n# a note %s dash\n' "$EM" > "$FX/mod.py"
+printf '# Doc\n\nplain line\n' > "$FX/doc.md"
+expect "a pathspec commit reads only its own paths" silent "$(fx 'git commit -m "wip" doc.md')"
+expect "and still reads the ones it names"          deny   "$(fx 'git commit -m "wip" mod.py')"
+undo
+
+FRESH="$TMP/fresh-repo"
+mkdir -p "$FRESH"
+git -C "$FRESH" init -q >/dev/null 2>&1
+git -C "$FRESH" config user.name "style fixture"
+git -C "$FRESH" config user.email "fixture@example.invalid"
+printf 'x = 1\n# a note %s dash\n' "$EM" > "$FRESH/mod.py"
+git -C "$FRESH" add -A >/dev/null 2>&1
+expect "the first commit of a repository is checked" deny \
+  "$(bash_payload 'git commit -m "first"' "$FRESH")"
+expect "and so is its -a form"                       deny \
+  "$(bash_payload 'git commit -am first' "$FRESH")"
+
+comments "$FX/mod.py" 19 'x = 1'; stage
+expect "nineteen comments is under the drift limit" silent "$(fx 'git commit -m "notes"')"
+comments "$FX/mod.py" 20 'x = 1'; stage
+check "twenty reaches it" "comments: +20/-0 in mod.py (limit +20 net)" \
+  "$(why "$(fx 'git commit -m "notes"')")"
+undo
+
+comments "$FX/mod.py" 25 'x = 1' note; stage
+git -C "$FX" commit -q -m "a page of comments" >/dev/null 2>&1
+comments "$FX/mod.py" 25 'x = 1' reworded; stage
+expect "rewriting comments is not drift" silent "$(fx 'git commit -m "reword"')"
+comments "$FX/mod.py" 50 'x = 1' reworded; stage
+check "adding more than it removes is" "comments: +50/-25" "$(why "$(fx 'git commit -m "more"')")"
+undo
+
+{ printf '# Changelog\n\n'; printf -- '- %s\n' one two three four five; } > "$FX/CHANGELOG.md"; stage
+expect "five changelog entries is under the limit" silent "$(fx 'git commit -m "release"')"
+undo
+{ printf '# Changelog\n\n- '; python3 -c "print('x' * 160)"; } > "$FX/CHANGELOG.md"; stage
+expect "an entry of exactly the limit passes" silent "$(fx 'git commit -m "release"')"
+{ printf '# Changelog\n\n- '; python3 -c "print('x' * 161)"; } > "$FX/CHANGELOG.md"; stage
+check "one character more does not" "is 161 characters, over 160" "$(why "$(fx 'git commit -m "release"')")"
+undo
+{ printf '# Changelog\n\n- '; python3 -c "print('y' * 200)"; } > "$FX/CHANGELOG.md"; stage
+out="$(why "$(fx 'git commit -m "release"')")"
+case "$out" in
+  *"$(python3 -c "print('y' * 61)")"*) bad "a long entry is quoted short" "the whole entry came back" ;;
+  *)                                   ok  "a long entry is quoted short" ;;
+esac
+undo
+{ printf '# Changelog\n\n'; printf -- '    - %s\n' one two three four five six seven; } > "$FX/CHANGELOG.md"; stage
+expect "indented continuation is not an entry" silent "$(fx 'git commit -m "release"')"
+undo
+
+mkdir -p "$FX/vendor" "$FX/dist" "$FX/target"
+for f in vendor/v.js dist/d.js target/t.js a.min.js; do
+  printf '// note %s dash\n' "$EM" > "$FX/$f"
+done
+stage
+expect "vendor, dist, target and minified paths are excluded" silent "$(fx 'git commit -m "drop"')"
+undo
+excluded="$(python3 - "$ROOT" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/hooks")
+import style
+paths = ["Cargo.lock", "package-lock.json", "t.snap", "icon.svg", "a.min.js",
+         "node_modules/p/i.js", "vendor/v.js", "dist/d.js", "target/t.js",
+         "build/b.js", ".claude/worktrees/wt/a.js"]
+print(",".join(p for p in paths if not style.excluded(p)))
+PY
+)"
+[ -z "$excluded" ] && ok "every named exclusion holds" \
+                   || bad "every named exclusion holds" "not excluded: $excluded"
+
+printf '// a note %s dash\n' "$EM" > "$FX/a.js"
+printf -- '-- a note %s dash\n' "$EM" > "$FX/b.sql"
+printf '<!-- a note %s dash -->\n' "$EM" > "$FX/c.html"
+printf '; a note %s dash\n' "$EM" > "$FX/d.el"
+stage
+out="$(why "$(fx 'git commit -m "many languages"')")"
+for want in "a.js:1:" "b.sql:1:" "c.html:1:" "d.el:1:"; do
+  check "the marker table covers $want" "$want" "$out"
+done
+undo
+
+printf '#!/usr/bin/env python3\n# a note %s dash\n' "$EM" > "$FX/s.py"; stage
+check "the line under a shebang is prose" "s.py:2:" "$(why "$(fx 'git commit -m "script"')")"
+undo
+comments "$FX/mod.py" 19 '#!/usr/bin/env python3'; stage
+expect "a shebang is not a comment it can count" silent "$(fx 'git commit -m "make it a script"')"
+undo
+printf '#!/usr/bin/env run %s dash\nx = 1\n' "$EM" > "$FX/s.py"; stage
+expect "nor is it prose" silent "$(fx 'git commit -m "script"')"
+undo
+
+printf 'x = 1\ny = 2  # a trailing %s note\n' "$EM" > "$FX/mod.py"; stage
+check "a trailing comment is prose" "mod.py:2:" "$(why "$(fx 'git commit -m "trailing"')")"
+printf 'x = 1\ny = "s"  # a trailing %s note\n' "$EM" > "$FX/mod.py"; stage
+expect "unless the line carries a quote" silent "$(fx 'git commit -m "trailing"')"
+undo
+
+printf '# Doc\n\n~~~\ncode %s dash\n~~~\n' "$EM" > "$FX/doc.md"; stage
+expect "a tilde fence is a fence" silent "$(fx 'git commit -m "docs"')"
+printf '# Doc\n\nplain line\n\n    indented code %s dash\n' "$EM" > "$FX/doc.md"; stage
+expect "an indented code block is not prose" silent "$(fx 'git commit -m "docs"')"
+undo
+
+printf 'notes %s dash\n' "$EM" > "$FX/n.txt"
+printf 'notes %s dash\n' "$EM" > "$FX/n.rst"
+stage
+out="$(why "$(fx 'git commit -m "docs"')")"
+check "txt is a document" "n.txt:1:" "$out"
+check "rst is too"        "n.rst:1:" "$out"
+undo
+
+printf '# Doc\n\nan old line %s with a dash\nplain line\n' "$EM" > "$FX/doc.md"; stage
+git -C "$FX" commit -q -m "a dash already landed" >/dev/null 2>&1
+printf '# Doc\n\nan old line %s with a dash\nplain line\nand a new one\n' "$EM" > "$FX/doc.md"; stage
+expect "a document's context lines are not prose" silent "$(fx 'git commit -m "add a line"')"
+undo
+
+# The fence restarts at each hunk, so an edit deep inside a block whose opening
+# fence is out of view reads as prose. Deliberate, and stated in the spec.
+python3 - "$FX/big.md" <<'PY'
+import sys
+lines = ["# Doc", "", "```"] + ["code line %d" % i for i in range(60)] + ["```", ""]
+open(sys.argv[1], "w").write("\n".join(lines) + "\n")
+PY
+stage; git -C "$FX" commit -q -m "a long code block" >/dev/null 2>&1
+python3 - "$FX/big.md" "$EM" <<'PY'
+import sys
+text = open(sys.argv[1]).read()
+open(sys.argv[1], "w").write(text.replace("code line 40", "code line 40 %s edited" % sys.argv[2]))
+PY
+stage
+expect "a hunk that cannot see its opening fence reads as prose" deny "$(fx 'git commit -m "docs"')"
+undo
+
+expect "a second -m is read too" deny "$(fx "git commit -m clean -m \"and a ${EM} dash\"")"
+expect "--message= is read"      deny "$(fx "git commit --message=\"a ${EM} b\"")"
+expect "a trailer can carry the override" silent \
+  "$(fx "git commit -m \"a ${EM} b\" --trailer \"Style-ack: quoting an upstream title\"")"
+expect "--short is a dry run"    silent "$(fx "git commit --short -m \"a ${EM} b\"")"
+expect "--porcelain is too"      silent "$(fx "git commit --porcelain -m \"a ${EM} b\"")"
+printf 'x = 1\n# a note %s dash\n' "$EM" > "$FX/mod.py"; stage
+expect "a cd before the commit moves the check" deny \
+  "$(bash_payload "cd $FX && git commit -m \"clean message\"" "$TMP")"
+expect "and without it there is no repository to read" silent \
+  "$(bash_payload 'git commit -m "clean message"' "$TMP")"
+undo
+expect "an absolute path to git still is" deny "$(fx "/usr/bin/git commit -m \"a ${EM} b\"")"
+
+# Named in the spec as uncaught, and worth pinning so it stays a decision.
+expect "a double hyphen is not a dash"   silent "$(fx 'git commit -m "end of options -- is not punctuation"')"
+expect "another interpreter is not read" silent "$(fx "bash -c \"git commit -m 'a ${EM} b'\"")"
+{ printf '# Changelog\n\n'; printf -- '- %s\n' one two three four five six; } > "$FX/changelog.md"; stage
+check "a lower case changelog counts" "6 entries added in one commit" "$(why "$(fx 'git commit -m "release"')")"
+undo
+
+printf 'binary\000\001 %s here\n' "$EM" > "$FX/blob.bin"; stage
+expect "a binary file has no prose" silent "$(fx 'git commit -m "blob"')"
+undo
+
+python3 - "$FX/many.py" "$EM" <<'PY'
+import sys
+open(sys.argv[1], "w").write("".join("# note %s %d\n" % (sys.argv[2], i) for i in range(45)))
+PY
+stage
+out="$(why "$(fx 'git commit -m "many"')")"
+check "past the shown cap the rest are counted" "and 5 more not shown" "$out"
+check "and the count is of all of them" "45 findings" "$out"
+undo
+
+# A commit has one drift finding and can have a file's worth of dashes, so the
+# cut is what decides whether the one is ever read. A message fills the report
+# on its own just as well.
+comments "$FX/mod.py" 45 'x = 1' "note $EM"
+stage
+out="$(why "$(fx 'git commit -m "many notes"')")"
+check "drift survives a report that is cut" "comments: +45/-0 in mod.py" "$out"
+check "and the cut says only how many"      "and 6 more not shown" "$out"
+check "and every finding is counted"        "46 findings" "$out"
+python3 - "$TMP/msg.txt" "$EM" <<'PY'
+import sys
+open(sys.argv[1], "w").write("".join("note %s line %d\n" % (sys.argv[2], i) for i in range(50)))
+PY
+out="$(why "$(fx "git commit -F $TMP/msg.txt")")"
+check "drift leads a report the message fills" "comments: +45/-0 in mod.py" "$out"
+check "and that report is still whole"         "96 findings" "$out"
+check "and it counts what it dropped"          "and 56 more not shown" "$out"
+undo
+
+# At exactly the cap nothing is hidden, so the report must not say it is.
+comments "$FX/mod.py" 39 'x = 1' "note $EM"
+stage
+out="$(why "$(fx 'git commit -m "at the cap"')")"
+check "a report of exactly the cap is whole" "40 findings" "$out"
+case "${out:-<nothing>}" in
+  *"more not shown"*|"<nothing>") bad "and says nothing is hidden" "$out" ;;
+  *)                              ok  "and says nothing is hidden" ;;
+esac
+undo
+
+quoted="$(why "$(fx "git commit -m \"first line
+second ${EM} line\"")" | grep 'message: em dash')"
+case "$quoted" in
+  *"first line second"*) ok "a multi line message is quoted on one line" ;;
+  *) bad "a multi line message is quoted on one line" "got: $quoted" ;;
+esac
+[ "$(printf '%s' "$quoted" | wc -l)" = "0" ] \
+  && ok "and the quote carries no newline of its own" \
+  || bad "and the quote carries no newline of its own" "the finding spans lines"
+
+# A heredoc body is prose, and an apostrophe in it opens a quote that never
+# closes, which takes the whole command with it.
+printf 'x = 1\n# a note %s dash\n' "$EM" > "$FX/mod.py"; stage
+expect "an apostrophe in a heredoc body" deny "$(fx "git commit -F- <<'EOF'
+the user's fix
+EOF")"
+# Check then commit is an ordinary pattern, and the dry run does not answer for
+# the commit beside it.
+expect "a dry run does not disarm the commit after it" deny \
+  "$(fx 'git commit --dry-run && git commit -m "clean"')"
+undo
+expect "every commit in the command is read" deny \
+  "$(fx "git commit -m clean && git commit --amend -m \"a ${EM} b\"")"
+
+expect "--template with a readable -m is read" deny "$(fx "git commit -t tmpl.txt -m \"a ${EM} b\"")"
+expect "and so is --squash with one"           deny "$(fx "git commit --squash=HEAD -m \"a ${EM} b\"")"
+
+mkdir -p "$FX/node_modules/p"
+python3 -c "import sys; open(sys.argv[1], 'w').write(''.join('// line %d\n' % i for i in range(6000)))" \
+  "$FX/node_modules/p/i.js"
+printf '# Doc\n\nreal prose %s dash\n' "$EM" > "$FX/doc.md"
+stage
+check "an excluded path does not spend the cap" "doc.md:3:" "$(why "$(fx 'git commit -m "npm install"')")"
+undo
+
+SUB="$TMP/sub-repo"
+mkdir -p "$SUB"
+git -C "$SUB" init -q >/dev/null 2>&1
+git -C "$SUB" config user.name "style fixture"
+git -C "$SUB" config user.email "fixture@example.invalid"
+printf 'y = 1\n' > "$SUB/seed.py"
+git -C "$SUB" add -A >/dev/null 2>&1
+git -C "$SUB" commit -q -m base >/dev/null 2>&1
+printf 'y = 1\n# a note %s dash\n' "$EM" > "$SUB/seed.py"
+git -C "$SUB" add -A >/dev/null 2>&1
+expect "a cd inside the commit's own subshell moves it" deny \
+  "$(bash_payload "(cd $SUB && git commit -m clean)" "$TMP")"
+
+UNBORN="$TMP/unborn-repo"
+mkdir -p "$UNBORN"
+git -C "$UNBORN" init -q >/dev/null 2>&1
+git -C "$UNBORN" config user.name "style fixture"
+git -C "$UNBORN" config user.email "fixture@example.invalid"
+printf 'a = 1\n' > "$UNBORN/wanted.py"
+printf '# unrelated %s dash\n' "$EM" > "$UNBORN/other.py"
+git -C "$UNBORN" add -A >/dev/null 2>&1
+expect "an unborn HEAD keeps the pathspec" silent \
+  "$(bash_payload 'git commit -m "only wanted" wanted.py' "$UNBORN")"
+printf 'a = 1\n# wanted %s dash\n' "$EM" > "$UNBORN/wanted.py"
+git -C "$UNBORN" add -A >/dev/null 2>&1
+expect "and still reads the path it names" deny \
+  "$(bash_payload 'git commit -m "only wanted" wanted.py' "$UNBORN")"
+
+expect "a directory that is not a repository is silent" silent \
+  "$(bash_payload 'git commit -m clean' "$TMP")"
+BROKEN="$TMP/broken-repo"
+mkdir -p "$BROKEN"
+git -C "$BROKEN" init -q >/dev/null 2>&1
+git -C "$BROKEN" config user.name "style fixture"
+git -C "$BROKEN" config user.email "fixture@example.invalid"
+printf 'x = 1\n' > "$BROKEN/mod.py"
+git -C "$BROKEN" add -A >/dev/null 2>&1
+git -C "$BROKEN" commit -q -m base >/dev/null 2>&1
+printf 'GARBAGE NOT AN INDEX' > "$BROKEN/.git/index"
+noted "a repository it cannot read says so" "git diff failed in a repository" \
+  "$(bash_payload 'git commit -m clean' "$BROKEN")"
+
+# A missing binary reaches the same handler a timeout does, without spending
+# ten seconds to get there.
+stub_path "$TMP/nogit" bash python3 env
+printf '%s' "$(bash_payload 'git commit -m clean' "$FX")" > "$TMP/p.json"
+nogit_err="$(PATH="$TMP/nogit" "$ROOT/hooks/style.py" < "$TMP/p.json" 2>&1 >/dev/null)"
+check "git out of reach says so" "git diff" "$nogit_err"
+
+expect "a Style-ack outside the trailers clears nothing" deny \
+  "$(fx "git commit -m \"a ${EM} b
+
+Style-ack: this paragraph is documentation, not a trailer
+
+and another paragraph follows it\"")"
+expect "and in the last paragraph it clears" silent \
+  "$(fx "git commit -m \"a ${EM} b
+
+Style-ack: quoting an upstream title\"")"
+
+printf 'not json at all' > "$TMP/p.json"
+out="$("$HOOK" < "$TMP/p.json" 2>/dev/null)"
+[ -z "$out" ] && ok "input it cannot parse is silent" || bad "input it cannot parse is silent" "$out"
+
+fi
+HOOK="$ROOT/hooks/guard.sh"
 
 # ── installer ────────────────────────────────────────────────────────────────
 echo "install.sh"
@@ -118,11 +747,23 @@ case "$(settings '.permissions.deny | join(" ")')" in
   *SendMessage*|*ListAgents*) bad "agents can still reach main" "SendMessage or ListAgents is denied" ;;
   *)                          ok "agents can still reach main" ;;
 esac
-missing=""
+# Glob and Grep are not tools this harness has, and an unknown name is dropped in
+# silence. Whole names, because BashOutput contains Bash, ListAgents contains
+# Agent, and neither searches. A duplicate key resolves to the last line.
+missing=""; unknown=""; blind=""
 for a in "$ROOT"/agents/*.md; do
-  grep -q '^tools:.*SendMessage' "$a" || missing="$missing $(basename "$a")"
+  n="$(basename "$a")"
+  names=",$(grep '^tools:' "$a" | tail -1 | sed 's/^tools://; s/[[:space:]]//g'),"
+  case "$names" in *,SendMessage,*)  ;; *) missing="$missing $n" ;; esac
+  case "$names" in *,Glob,*|*,Grep,*)  unknown="$unknown $n" ;; esac
+  case "$names" in *,Bash,*|*,Agent,*) ;; *) blind="$blind $n" ;; esac
 done
-[ -z "$missing" ] && ok "every agent carries SendMessage" || bad "every agent carries SendMessage" "missing in:$missing"
+[ -z "$missing" ] && ok "every agent carries SendMessage" \
+                  || bad "every agent carries SendMessage" "missing in:$missing"
+[ -z "$unknown" ] && ok "no agent asks for a tool the harness dropped" \
+                  || bad "no agent asks for a tool the harness dropped" "declared in:$unknown"
+[ -z "$blind" ] && ok "every agent can search a repo" \
+                || bad "every agent can search a repo" "no Bash or Agent in:$blind"
 check "foreign env kept"      "keep"          "$(settings '.env.MY_VAR')"
 check "foreign key kept"      "dark"          "$(settings '.theme')"
 check "foreign hook kept"     "/usr/bin/true" "$(settings '[.hooks.PreToolUse[].hooks[].command] | join(" ")')"
@@ -133,10 +774,28 @@ check "review plugin enabled" "true" "$(settings '.enabledPlugins["pr-review-too
 check "pointer written"       "$ROOT"         "$(readlink "$FAKE/.claude/agent-toolkit")"
 check "pointer imports CLAUDE.md" "agent-toolkit/CLAUDE.md" "$(cat "$FAKE/.claude/CLAUDE.md")"
 
-for want in "guard.sh" "reap.sh" "format.sh" "sync.sh" "taskline.py" "install.sh --sync"; do
+for want in "guard.sh" "style.py" "reap.sh" "format.sh" "sync.sh" "taskline.py" "install.sh --sync"; do
   check "wires $want" "$want" "$(settings '[.hooks[][].hooks[].command] | join(" ")')"
 done
 check "linear matcher wired" "mcp__linear.*" "$(settings '[.hooks.PreToolUse[].matcher] | join(" ")')"
+
+# The doctor speaks by printing and exiting 1, which an async entry discards. An
+# empty matcher would cover all five sources and still reads red here, because
+# nothing tells it apart from the entry having gone.
+doctor="$FAKE/.claude/agent-toolkit/install.sh --sync"
+sync_matcher="$(settings "[.hooks.SessionStart[]
+  | select(any((.hooks // [])[]; (.command // \"\") == \"$doctor\"))
+  | .matcher // \"\"] | join(\"|\")")"
+unmatched=""
+for want in startup resume clear compact fork; do
+  case "|$sync_matcher|" in *"|$want|"*) ;; *) unmatched="$unmatched $want" ;; esac
+done
+[ -z "$unmatched" ] && ok "the doctor runs on every session source" \
+                    || bad "the doctor runs on every session source" \
+                       "not matched:$unmatched (matcher: ${sync_matcher:-<none>})"
+check "the doctor is wired synchronously" "[false]" \
+  "$(settings "[.hooks.SessionStart[].hooks[]
+     | select((.command // \"\") == \"$doctor\") | (.async // false)] | tostring")"
 
 # The recorder rides four events and no trigger is load-bearing, so all four
 # have to be there — and every one of them async, or a sweep could block a turn
@@ -165,11 +824,38 @@ chmod +x "$TMP/nosqlite/python3"
 out="$(PATH="$TMP/nosqlite:$PATH" run_install)"
 check "the doctor flags a python without sqlite3" "no sqlite3 module" "$out"
 check "and the install is still green"            "all checks green"  "$out"
+
+# Which events notify is the plugin's setting and the user's decision, so the
+# doctor says the same thing either way. Asserted as identical output, which
+# holds for whichever key a view would read.
+ncfg="$FAKE/.claude/claude-notifications-go/config.json"
+mkdir -p "$(dirname "$ncfg")"
+rm -f "$ncfg"
+silent="$(run_install)"
+printf '{"notifications":{"suppressForSubagents":false,"notifyOnSubagentStop":true}}\n' > "$ncfg"
+grep -q '"suppressForSubagents":false' "$ncfg" \
+  || bad "the notifications fixture is the one a view would flag" "$(cat "$ncfg" 2>/dev/null)"
+out="$(run_install)"
+[ "$out" = "$silent" ] \
+  && check "the doctor holds no view on the notification settings" "all checks green" "$out" \
+  || bad "the doctor holds no view on the notification settings" \
+         "the plugin's config changed what the doctor said: $out"
 # An async hook's stdout is never injected as context, so an async taskline
 # would print into the void. Asserted as the whole array, which also pins that
 # exactly one entry runs it.
 check "taskline is wired synchronously" "[false]" \
   "$(settings '[.hooks.UserPromptSubmit[].hooks[] | select((.command // "") | test("taskline")) | (.async // false)] | tostring')"
+# An async PreToolUse entry decides after the tool ran, so the gate would vanish.
+check "the style gate is wired synchronously" "[false]" \
+  "$(settings '[.hooks.PreToolUse[].hooks[] | select((.command // "") | test("style")) | (.async // false)] | tostring')"
+check "the style gate is on the Bash matcher" "style.py" \
+  "$(settings '[.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[].command] | join(" ")')"
+check "and is wired exactly once" "1" \
+  "$(settings '[.hooks[][].hooks[] | select((.command // "") | test("style"))] | length | tostring')"
+# An if field is permission rule syntax, and Bash(git commit *) does not match
+# git -C <repo> commit, which is the form CLAUDE.md requires.
+check "no hook narrows itself with an if" "[]" \
+  "$(settings '[.hooks[][] | select(has("if")), (.hooks[]? | select(has("if")))] | tostring')"
 
 linked="$(find "$FAKE/.claude/skills" -maxdepth 1 -type l | wc -l | tr -d ' ')"
 have="$(find "$ROOT/skills" -name SKILL.md | wc -l | tr -d ' ')"
@@ -475,8 +1161,11 @@ echo "taskline.py"
 # The contract is: exactly one line, on stdout, only when it is true, and never
 # a failed turn. stdout and stderr are captured apart — the harness injects only
 # stdout, so a line written to stderr would kill the feature while looking fine.
-HINT='Tasks: none open — open a lane before acting. Tools are deferred: ToolSearch "select:TaskCreate,TaskUpdate,TaskGet,TaskList"'
-SPEC='Retro — spec (in_progress, arch-retro)'
+HINT='Tasks: none open. Open a lane before acting. Tools are deferred: ToolSearch "select:TaskCreate,TaskUpdate,TaskGet,TaskList"'
+SPEC='Retro: spec (in_progress, arch-retro)'
+# The whole line, because README.md publishes this one verbatim and the check at
+# the end of the suite holds the two to the same string.
+BLOCKED_LINE="Tasks: 2 open · $SPEC · Retro: build (blocked)"
 
 tl_with() { # environment assignments, payload → tl_out, tl_err, tl_rc
   tl_out="$(printf '%s' "$2" | env HOME="$FAKE" $1 python3 "$ROOT/hooks/taskline.py" 2>"$TMP/tl.err")"; tl_rc=$?
@@ -503,17 +1192,17 @@ exact() { # name, expected stdout
 quiet() { tl "$2"; exact "$1" ""; }   # name, payload
 
 OPEN="$FAKE/.claude/tasks/tl-open"
-task "$OPEN" 1.json '{"id":"1","subject":"Retro — audit","status":"completed","blocks":[],"blockedBy":[]}'
-task "$OPEN" 2.json '{"id":"2","subject":"Retro — spec","status":"in_progress","owner":"arch-retro","blocks":["3"],"blockedBy":[]}'
-task "$OPEN" 3.json '{"id":"3","subject":"Retro — build","status":"pending","blocks":[],"blockedBy":["2"]}'
+task "$OPEN" 1.json '{"id":"1","subject":"Retro: audit","status":"completed","blocks":[],"blockedBy":[]}'
+task "$OPEN" 2.json '{"id":"2","subject":"Retro: spec","status":"in_progress","owner":"arch-retro","blocks":["3"],"blockedBy":[]}'
+task "$OPEN" 3.json '{"id":"3","subject":"Retro: build","status":"pending","blocks":[],"blockedBy":["2"]}'
 tl "$(prompt tl-open)"
 is_line "an open list is one line"
-exact "names every open task with status and owner" "Tasks: 2 open · $SPEC · Retro — build (blocked)"
+exact "names every open task with status and owner" "$BLOCKED_LINE"
 
 # An ascii output encoding would raise on the first separator and lose the whole
 # line. PYTHONIOENCODING stands in for the C-locale machine that does the same.
 tl_with "PYTHONIOENCODING=ascii" "$(prompt tl-open)"
-exact "an ascii output encoding keeps the line whole" "Tasks: 2 open · $SPEC · Retro — build (blocked)"
+exact "an ascii output encoding keeps the line whole" "$BLOCKED_LINE"
 
 # The line sits in a block buffer until the process ends, so a reader that
 # closed the pipe turns the interpreter's own shutdown flush into a failed turn
@@ -547,33 +1236,33 @@ def load_tasks(_):
     return TaskList([{"id": "1", "subject": "HIJACKED", "status": "pending"}], True)
 PY
 tl_with "PYTHONPATH=$TMP/shadow" "$(prompt tl-open)"
-exact "a lib on PYTHONPATH cannot hijack the import" "Tasks: 2 open · $SPEC · Retro — build (blocked)"
+exact "a lib on PYTHONPATH cannot hijack the import" "$BLOCKED_LINE"
 
 # blocked is derived, so every way of not being blocked must read as pending: a
 # blocker that finished, one that is not in the list at all, and a field of the
 # wrong type — which must cost the derivation and not the line.
-task "$OPEN" 3.json '{"id":"3","subject":"Retro — build","status":"pending","blocks":[],"blockedBy":["1"]}'
+task "$OPEN" 3.json '{"id":"3","subject":"Retro: build","status":"pending","blocks":[],"blockedBy":["1"]}'
 tl "$(prompt tl-open)"
-exact "a finished blocker does not block" "Tasks: 2 open · $SPEC · Retro — build (pending)"
-task "$OPEN" 3.json '{"id":"3","subject":"Retro — build","status":"pending","blocks":[],"blockedBy":["99"]}'
+exact "a finished blocker does not block" "Tasks: 2 open · $SPEC · Retro: build (pending)"
+task "$OPEN" 3.json '{"id":"3","subject":"Retro: build","status":"pending","blocks":[],"blockedBy":["99"]}'
 tl "$(prompt tl-open)"
-exact "a dangling blocker does not block" "Tasks: 2 open · $SPEC · Retro — build (pending)"
-task "$OPEN" 3.json '{"id":"3","subject":"Retro — build","status":"pending","blocks":[],"blockedBy":7}'
+exact "a dangling blocker does not block" "Tasks: 2 open · $SPEC · Retro: build (pending)"
+task "$OPEN" 3.json '{"id":"3","subject":"Retro: build","status":"pending","blocks":[],"blockedBy":7}'
 tl "$(prompt tl-open)"
-exact "an unusable blockedBy costs the derivation only" "Tasks: 2 open · $SPEC · Retro — build (pending)"
+exact "an unusable blockedBy costs the derivation only" "Tasks: 2 open · $SPEC · Retro: build (pending)"
 # Ids are strings on disk today; integers must derive the same answer. Both the
 # id and the blocker are integers here, or the comparison passes on one side.
-task "$OPEN" 2.json '{"id":2,"subject":"Retro — spec","status":"in_progress","owner":"arch-retro","blocks":[3],"blockedBy":[]}'
-task "$OPEN" 3.json '{"id":3,"subject":"Retro — build","status":"pending","blocks":[],"blockedBy":[2]}'
+task "$OPEN" 2.json '{"id":2,"subject":"Retro: spec","status":"in_progress","owner":"arch-retro","blocks":[3],"blockedBy":[]}'
+task "$OPEN" 3.json '{"id":3,"subject":"Retro: build","status":"pending","blocks":[],"blockedBy":[2]}'
 tl "$(prompt tl-open)"
-exact "integer ids still derive blocked" "Tasks: 2 open · $SPEC · Retro — build (blocked)"
+exact "integer ids still derive blocked" "$BLOCKED_LINE"
 # Every field on the line is free text on the same line, so every field is cut.
-task "$OPEN" 3.json "{\"id\":\"3\",\"subject\":\"Retro — build\",\"status\":\"pending\",\"owner\":\"$(printf 'o%.0s' $(seq 40))\",\"blockedBy\":[]}"
+task "$OPEN" 3.json "{\"id\":\"3\",\"subject\":\"Retro: build\",\"status\":\"pending\",\"owner\":\"$(printf 'o%.0s' $(seq 40))\",\"blockedBy\":[]}"
 tl "$(prompt tl-open)"
-exact "a long owner is cut too" "Tasks: 2 open · $SPEC · Retro — build (pending, $(printf 'o%.0s' $(seq 23))…)"
-task "$OPEN" 3.json "{\"id\":\"3\",\"subject\":\"Retro — build\",\"status\":\"$(printf 's%.0s' $(seq 40))\",\"blockedBy\":[]}"
+exact "a long owner is cut too" "Tasks: 2 open · $SPEC · Retro: build (pending, $(printf 'o%.0s' $(seq 23))…)"
+task "$OPEN" 3.json "{\"id\":\"3\",\"subject\":\"Retro: build\",\"status\":\"$(printf 's%.0s' $(seq 40))\",\"blockedBy\":[]}"
 tl "$(prompt tl-open)"
-exact "a long status is cut too" "Tasks: 2 open · $SPEC · Retro — build ($(printf 's%.0s' $(seq 15))…)"
+exact "a long status is cut too" "Tasks: 2 open · $SPEC · Retro: build ($(printf 's%.0s' $(seq 15))…)"
 
 # The tools are deferred, so a session that never searched for their schemas
 # cannot open a task at all — which is exactly the session this line lands in.
@@ -581,7 +1270,7 @@ tl "$(prompt tl-no-such-session)"
 is_line "an empty list is one line"
 exact "no task dir names the deferred tools" "$HINT"
 
-task "$FAKE/.claude/tasks/tl-all-done" 1.json '{"id":"1","subject":"Lane — build","status":"completed","blocks":[],"blockedBy":[]}'
+task "$FAKE/.claude/tasks/tl-all-done" 1.json '{"id":"1","subject":"Lane: build","status":"completed","blocks":[],"blockedBy":[]}'
 tl "$(prompt tl-all-done)"
 exact "an all-complete list counts as none open" "$HINT"
 
@@ -589,7 +1278,7 @@ exact "an all-complete list counts as none open" "$HINT"
 # directory sits beside it. The decoy must not win, or the list goes quiet.
 mkdir -p "$FAKE/.claude/tasks/tlteam99-aaaa-bbbb"
 TEAM="$FAKE/.claude/tasks/session-tlteam99"
-task "$TEAM" 1.json '{"id":"1","subject":"Lane — spec","status":"completed","blocks":[],"blockedBy":[]}'
+task "$TEAM" 1.json '{"id":"1","subject":"Lane: spec","status":"completed","blocks":[],"blockedBy":[]}'
 task "$TEAM" 2.json '{"id":"2","status":"pending","blocks":[],"blockedBy":[]}'
 tl "$(prompt tlteam99-aaaa-bbbb)"
 exact "an empty dir does not hide the team-named list" 'Tasks: 1 open · untitled (pending)'
@@ -601,24 +1290,24 @@ MAL="$FAKE/.claude/tasks/tl-malformed"
 task "$MAL" 1.json 'not json at all'
 task "$MAL" 2.json '[1,2]'
 task "$MAL" 4.json "$(python3 -c "import sys; sys.stdout.write('[' * 200000)")"
-task "$MAL" 3.json '{"id":"3","subject":"Lane — sane\nsecond line","status":"pending","blocks":[],"blockedBy":[]}'
+task "$MAL" 3.json '{"id":"3","subject":"Lane: sane\nsecond line","status":"pending","blocks":[],"blockedBy":[]}'
 tl "$(prompt tl-malformed)"
 is_line "a partly read list is one line"
 exact "an unparsable entry marks the line partial" \
-  'Tasks: 1 open (partial list) · Lane — sane second line (pending)'
+  'Tasks: 1 open (partial list) · Lane: sane second line (pending)'
 rm -f "$MAL/3.json"
 quiet "a list that will not parse at all says nothing" "$(prompt tl-malformed)"
 
 # Root reads a chmod 000 file regardless, so the assertions that depend on the
 # read failing are skipped there rather than inverted.
 UNREAD="$FAKE/.claude/tasks/tl-unreadable"
-task "$UNREAD" 1.json '{"id":"1","subject":"Lane — build","status":"pending","blocks":[],"blockedBy":[]}'
-task "$UNREAD" 2.json '{"id":"2","subject":"Lane — hidden","status":"pending","blocks":[],"blockedBy":[]}'
+task "$UNREAD" 1.json '{"id":"1","subject":"Lane: build","status":"pending","blocks":[],"blockedBy":[]}'
+task "$UNREAD" 2.json '{"id":"2","subject":"Lane: hidden","status":"pending","blocks":[],"blockedBy":[]}'
 chmod 000 "$UNREAD/2.json"
 tl "$(prompt tl-unreadable)"
 survives "an unreadable file never fails the turn"
 [ "$(id -u)" -eq 0 ] || exact "an unreadable file marks the line partial" \
-  'Tasks: 1 open (partial list) · Lane — build (pending)'
+  'Tasks: 1 open (partial list) · Lane: build (pending)'
 chmod 644 "$UNREAD/2.json"
 
 # A task file that is already gone is not one that would not read: the platform
@@ -626,15 +1315,15 @@ chmod 644 "$UNREAD/2.json"
 # is still a whole read of what is there. A dangling symlink stands in for the
 # file that disappears between the listing and the open.
 GONE="$FAKE/.claude/tasks/tl-gone"
-task "$GONE" 1.json '{"id":"1","subject":"Lane — build","status":"pending","blocks":[],"blockedBy":[]}'
+task "$GONE" 1.json '{"id":"1","subject":"Lane: build","status":"pending","blocks":[],"blockedBy":[]}'
 ln -sfn /nonexistent-task-file "$GONE/2.json"
 tl "$(prompt tl-gone)"
-exact "a task file already gone is not an unreadable one" 'Tasks: 1 open · Lane — build (pending)'
+exact "a task file already gone is not an unreadable one" 'Tasks: 1 open · Lane: build (pending)'
 
 # A directory that will not list is not an empty one, and saying "none open"
 # there would instruct the model to open a lane that already exists.
 BLOCKED="$FAKE/.claude/tasks/tl-blocked-dir"
-task "$BLOCKED" 1.json '{"id":"1","subject":"Lane — build","status":"pending","blocks":[],"blockedBy":[]}'
+task "$BLOCKED" 1.json '{"id":"1","subject":"Lane: build","status":"pending","blocks":[],"blockedBy":[]}'
 chmod 000 "$BLOCKED"
 tl "$(prompt tl-blocked-dir)"
 survives "an unlistable task dir never fails the turn"
@@ -645,37 +1334,37 @@ chmod 755 "$BLOCKED"
 # may not be the whole list — the flag has to survive the early answer. This is
 # the agent-teams shape: a stale directory found first, the real one refusing.
 ASYM="$FAKE/.claude/tasks/tlasym01-aaaa-bbbb"
-task "$ASYM" 1.json '{"id":"1","subject":"Lane — stale","status":"pending","blocks":[],"blockedBy":[]}'
+task "$ASYM" 1.json '{"id":"1","subject":"Lane: stale","status":"pending","blocks":[],"blockedBy":[]}'
 TEAMDIR="$FAKE/.claude/tasks/session-tlasym01"
-task "$TEAMDIR" 9.json '{"id":"9","subject":"Lane — real","status":"in_progress","blocks":[],"blockedBy":[]}'
+task "$TEAMDIR" 9.json '{"id":"9","subject":"Lane: real","status":"in_progress","blocks":[],"blockedBy":[]}'
 chmod 000 "$TEAMDIR"
 tl "$(prompt tlasym01-aaaa-bbbb)"
 survives "an unlistable second layout never fails the turn"
 [ "$(id -u)" -eq 0 ] || exact "an unlistable second layout still marks the line partial" \
-  'Tasks: 1 open (partial list) · Lane — stale (pending)'
+  'Tasks: 1 open (partial list) · Lane: stale (pending)'
 chmod 755 "$TEAMDIR"
 
 # Over a partial list an unknown blocker is more likely a file that would not
 # read than a dangling reference, and "pending" is the one wrong answer that
 # gets the task picked up while something else owns it.
 PART="$FAKE/.claude/tasks/tl-part-blocker"
-task "$PART" 1.json '{"id":"1","subject":"Lane — spec","status":"in_progress","blocks":["2"],"blockedBy":[]}'
-task "$PART" 2.json '{"id":"2","subject":"Lane — build","status":"pending","blocks":[],"blockedBy":["1"]}'
+task "$PART" 1.json '{"id":"1","subject":"Lane: spec","status":"in_progress","blocks":["2"],"blockedBy":[]}'
+task "$PART" 2.json '{"id":"2","subject":"Lane: build","status":"pending","blocks":[],"blockedBy":["1"]}'
 chmod 000 "$PART/1.json"
 tl "$(prompt tl-part-blocker)"
 [ "$(id -u)" -eq 0 ] || exact "a blocker that would not read still blocks" \
-  'Tasks: 1 open (partial list) · Lane — build (blocked)'
+  'Tasks: 1 open (partial list) · Lane: build (blocked)'
 chmod 644 "$PART/1.json"
 
 # Sizing. At the cap every task is named and nothing is elided; past it the
 # count stays true to every open task and what was dropped is stated.
 MANY="$FAKE/.claude/tasks/tl-many"
 for i in 1 2 3 4; do
-  task "$MANY" "$i.json" "{\"id\":\"$i\",\"subject\":\"Lane — step $i\",\"status\":\"pending\",\"blocks\":[],\"blockedBy\":[]}"
+  task "$MANY" "$i.json" "{\"id\":\"$i\",\"subject\":\"Lane: step $i\",\"status\":\"pending\",\"blocks\":[],\"blockedBy\":[]}"
 done
 tl "$(prompt tl-many)"
 exact "at the cap nothing is elided" \
-  'Tasks: 4 open · Lane — step 1 (pending) · Lane — step 2 (pending) · Lane — step 3 (pending) · Lane — step 4 (pending)'
+  'Tasks: 4 open · Lane: step 1 (pending) · Lane: step 2 (pending) · Lane: step 3 (pending) · Lane: step 4 (pending)'
 case "$tl_out" in
   *ToolSearch*) bad "no tool hint while tasks are open" "printed: $tl_out" ;;
   *)            ok "no tool hint while tasks are open" ;;
@@ -684,20 +1373,20 @@ esac
 # Ids are numbers written as text, and a lane is past 9 quickly: a string sort
 # would name 1, 10, 11, 2 and drop the steps actually in front of the user.
 for i in 10 11; do
-  task "$MANY" "$i.json" "{\"id\":\"$i\",\"subject\":\"Lane — step $i\",\"status\":\"pending\",\"blocks\":[],\"blockedBy\":[]}"
+  task "$MANY" "$i.json" "{\"id\":\"$i\",\"subject\":\"Lane: step $i\",\"status\":\"pending\",\"blocks\":[],\"blockedBy\":[]}"
 done
 tl "$(prompt tl-many)"
 exact "ids sort as numbers, not as text" \
-  'Tasks: 6 open · Lane — step 1 (pending) · Lane — step 2 (pending) · Lane — step 3 (pending) · Lane — step 4 (pending) · +2 more'
+  'Tasks: 6 open · Lane: step 1 (pending) · Lane: step 2 (pending) · Lane: step 3 (pending) · Lane: step 4 (pending) · +2 more'
 
 # One line for the rest of the sizing contract: the running work is named first
 # however late its id, a subject is cut to a fixed width with the cut visible,
 # and the elided count covers everything that did not fit.
-task "$MANY" 12.json "{\"id\":\"12\",\"subject\":\"Lane — $(printf 'x%.0s' $(seq 70))\",\"status\":\"in_progress\",\"owner\":\"dev-x\",\"blocks\":[],\"blockedBy\":[]}"
+task "$MANY" 12.json "{\"id\":\"12\",\"subject\":\"Lane: $(printf 'x%.0s' $(seq 70))\",\"status\":\"in_progress\",\"owner\":\"dev-x\",\"blocks\":[],\"blockedBy\":[]}"
 tl "$(prompt tl-many)"
 is_line "a long list is still one line"
 exact "running work first, subject cut, remainder counted" \
-  "Tasks: 7 open · Lane — $(printf 'x%.0s' $(seq 52))… (in_progress, dev-x) · Lane — step 1 (pending) · Lane — step 2 (pending) · Lane — step 3 (pending) · +3 more"
+  "Tasks: 7 open · Lane: $(printf 'x%.0s' $(seq 53))… (in_progress, dev-x) · Lane: step 1 (pending) · Lane: step 2 (pending) · Lane: step 3 (pending) · +3 more"
 
 # Nothing to say beats a guess: without a session there is no list to speak for.
 quiet "no session id prints nothing"    '{"hook_event_name":"UserPromptSubmit","prompt":"go"}'
@@ -1806,6 +2495,64 @@ for a in "$ROOT"/agents/*.md; do
   grep -q '`Retro: none`' "$a" || missing="$missing $(basename "$a")"
 done
 [ -z "$missing" ] && ok "every agent must answer Retro" || bad "every agent must answer Retro" "missing in:$missing"
+
+# One wording in both homes, no dash in it, and every line already written
+# matching: a dash there would ask for an override on every append.
+published="$(template "$ROOT/CLAUDE.md")"
+{ [ -n "$published" ] && [ "$published" = "$(template "$ROOT/RETRO.md")" ]; } \
+  && ok "the retro format is one wording in both homes" \
+  || bad "the retro format is one wording in both homes" \
+         "CLAUDE.md has '${published:-<nothing>}', RETRO.md has '$(template "$ROOT/RETRO.md")'"
+case "$published" in
+  *"$EM"*|*"$EN"*|*--*) bad "and carries no dash of its own" "$published" ;;
+  *)                    ok  "and carries no dash of its own" ;;
+esac
+
+# A lane's steps are named many times a session, and only the example teaches
+# the separator, so a dash there is the rule breaking itself all day.
+lanes="$(grep 'Payments rework' "$ROOT/CLAUDE.md")"
+steps="$(printf '%s\n' "$lanes" | grep -c 'Payments rework: [a-z]')"
+[ "${steps:-0}" -ge 2 ] && ok "a lane's steps are named with a colon" \
+  || bad "a lane's steps are named with a colon" "${steps:-0} lines in CLAUDE.md carry the form"
+case "${lanes:-<nothing>}" in
+  *"$EM"*|*"$EN"*|*--*|"<nothing>") bad "and the example carries no dash" "$lanes" ;;
+  *)                                ok  "and the example carries no dash" ;;
+esac
+
+# README.md quotes the task line verbatim, and nothing else holds the two to the
+# same wording. An empty expected string would match any file, so it is refused.
+for want in "$BLOCKED_LINE" "${HINT%%. Tools*}"; do
+  case "$want" in "") bad "README publishes the task line" "the expected string is empty"; continue ;; esac
+  grep -qF "$want" "$ROOT/README.md" && ok "README publishes: $want" \
+    || bad "README publishes: $want" "README.md does not carry it"
+done
+written="$(grep -c '^- [0-9]' "$ROOT/RETRO.md")"
+shaped="$(grep -cE '^- [0-9-]+ · [^ ·]+ · [^ ·]+: ' "$ROOT/RETRO.md")"
+{ [ "${written:-0}" -gt 0 ] && [ "$written" = "$shaped" ]; } \
+  && ok "every line in the log carries it" \
+  || bad "every line in the log carries it" "${shaped:-0} of ${written:-0} lines match"
+
+# Each threshold is a judgement the spec argues for, so the two must not drift.
+drifted="$(python3 - "$ROOT" <<'PY'
+import re
+import sys
+
+root = sys.argv[1]
+code = open(root + "/hooks/style.py", encoding="utf-8").read()
+spec = open(root + "/documentation/specs/style-checks.md", encoding="utf-8").read()
+rows = re.findall(r"^\| `([A-Z_]+)` \| (\S+) \|", spec, re.M)
+said = []
+for name, documented in rows:
+    found = re.search(r"^%s = (\S+)$" % name, code, re.M)
+    if not found:
+        said.append("%s is documented but not in the hook" % name)
+    elif found.group(1) != documented:
+        said.append("%s is %s in the hook and %s in the spec" % (name, found.group(1), documented))
+print("; ".join(said) if said else ("" if rows else "the spec states no thresholds at all"))
+PY
+)"
+[ -z "$drifted" ] && ok "the spec's thresholds are the hook's" \
+                  || bad "the spec's thresholds are the hook's" "$drifted"
 
 # ── bg + reap ────────────────────────────────────────────────────────────────
 echo "bg.sh + reap.sh"
