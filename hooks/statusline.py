@@ -349,42 +349,31 @@ def segment_git(data, cwd):
 
 
 def segment_toolkit():
-    """The "are my changes applied?" light. install.sh stamps v<count>·<sha>;
-    a ⚠ means the repo has moved past that stamp and needs a re-install.
+    """The "are my changes applied?" light. install.sh stamps the installed
+    version; a ⚠ means the version directory has moved past that stamp.
 
     Freshness fails safe: only a positively verified match shows a clean stamp.
-    A timeout or error shows a dim ? rather than asserting changes are live.
+    A timeout, an error, or a directory with no version shows a dim ? rather
+    than asserting changes are live.
     """
     try:
-        with open(os.path.join(HOME, ".claude", "agent-toolkit-version")) as f:
+        with open(os.path.join(HOME, ".claude", "agent-toolkit-version"), encoding="utf-8") as f:
             label = f.read().strip()
-    except OSError:
+    except (OSError, ValueError):
         return None
     if not label:
         return None
     marker = f"{DIM}?{RESET}"
-    m = re.search(r"·([0-9a-f]+)", label)
-    if m:
-        try:
-            cur = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    os.path.join(HOME, ".claude", "agent-toolkit"),
-                    "rev-parse",
-                    "--short",
-                    "HEAD",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=0.2,
-            ).stdout.strip()
-            if cur == m.group(1):
-                marker = ""
-            elif cur:
-                marker = f"{COLORS['yellow']}⚠{RESET}"
-        except Exception:
-            pass
+    try:
+        from lib.version import of_root, same
+
+        current = of_root(os.path.join(HOME, ".claude", "agent-toolkit"), timeout=0.2)
+        if same(label, current):
+            marker = ""
+        elif current:
+            marker = f"{COLORS['yellow']}⚠{RESET}"
+    except Exception:
+        pass
     return f"{DIM}⬡ {label}{RESET}{marker}"
 
 

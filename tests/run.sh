@@ -80,216 +80,7 @@ out="$(env -i PATH="$TMP/nojq" HOME="$TMP" "$ROOT/hooks/guard.sh" < "$TMP/p.json
 [ -z "$out" ] && ok "fails open without jq" || bad "fails open without jq" "emitted a verdict: $out"
 
 # ── installer ────────────────────────────────────────────────────────────────
-echo "install.sh"
-
-FAKE="$TMP/home"
-mkdir -p "$FAKE/.claude"
-run_install() { HOME="$FAKE" "$ROOT/install.sh" "$@" 2>&1; }
-settings() { jq -r "$1" "$FAKE/.claude/settings.json" 2>/dev/null; }
-
-# A foreign hook and a foreign key must survive every merge.
-cat > "$FAKE/.claude/settings.json" <<'JSON'
-{
-  "theme": "dark",
-  "env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1", "CLAUDE_CODE_ENABLE_TASKS": "false", "MY_VAR": "keep"},
-  "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "/usr/bin/true"}]}]},
-  "permissions": {"additionalDirectories": ["/my/own/dir"]}
-}
-JSON
-
-out="$(run_install --dry-run)"
-check "dry-run previews the settings change" "would change" "$out"
-check "dry-run writes nothing" "1" "$(jq -r '.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS' "$FAKE/.claude/settings.json")"
-
-out="$(run_install)"
-check "install reports green" "all checks green" "$out"
-check "statusline wired"      "statusline.py" "$(settings '.statusLine.command')"
-check "auto mode set"         "auto"          "$(settings '.permissions.defaultMode')"
-check "spawn depth set"       "2"             "$(settings '.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH')"
-check "todo tools enabled"    "1"             "$(settings '.env.CLAUDE_CODE_ENABLE_TODO_TOOLS')"
-check "tasks opt-out kept"    "false"         "$(settings '.env.CLAUDE_CODE_ENABLE_TASKS')"
-check "co-authored-by off"    "false"         "$(settings '.includeCoAuthoredBy')"
-check "agent teams removed"   "null"          "$(settings '.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS')"
-check "peer inbox refused"    "refuse"        "$(settings '.crossSessionInbound')"
-check "cross-machine gated"   "true"          "$(settings '.isolatePeerMachines')"
-# SendMessage must stay out of the deny list: denying it would also cut off an
-# agent messaging main, which is how it asks a question mid-run.
-case "$(settings '.permissions.deny | join(" ")')" in
-  *SendMessage*|*ListAgents*) bad "agents can still reach main" "SendMessage or ListAgents is denied" ;;
-  *)                          ok "agents can still reach main" ;;
-esac
-missing=""
-for a in "$ROOT"/agents/*.md; do
-  grep -q '^tools:.*SendMessage' "$a" || missing="$missing $(basename "$a")"
-done
-[ -z "$missing" ] && ok "every agent carries SendMessage" || bad "every agent carries SendMessage" "missing in:$missing"
-check "foreign env kept"      "keep"          "$(settings '.env.MY_VAR')"
-check "foreign key kept"      "dark"          "$(settings '.theme')"
-check "foreign hook kept"     "/usr/bin/true" "$(settings '[.hooks.PreToolUse[].hooks[].command] | join(" ")')"
-check "foreign dir kept"      "/my/own/dir"   "$(settings '.permissions.additionalDirectories | join(" ")')"
-check "checkout approved"     "$ROOT"         "$(settings '.permissions.additionalDirectories | join(" ")')"
-check "credentials denied"    ".credentials.json" "$(settings '.permissions.deny | join(" ")')"
-check "review plugin enabled" "true" "$(settings '.enabledPlugins["pr-review-toolkit@claude-plugins-official"]')"
-check "pointer written"       "$ROOT"         "$(readlink "$FAKE/.claude/agent-toolkit")"
-check "pointer imports CLAUDE.md" "agent-toolkit/CLAUDE.md" "$(cat "$FAKE/.claude/CLAUDE.md")"
-
-for want in "guard.sh" "reap.sh" "format.sh" "sync.sh" "taskline.py" "install.sh --sync"; do
-  check "wires $want" "$want" "$(settings '[.hooks[][].hooks[].command] | join(" ")')"
-done
-check "linear matcher wired" "mcp__linear.*" "$(settings '[.hooks.PreToolUse[].matcher] | join(" ")')"
-
-# The recorder rides four events and no trigger is load-bearing, so all four
-# have to be there — and every one of them async, or a sweep could block a turn
-# or inject its stdout as context.
-for want in SessionStart PreCompact UserPromptSubmit SessionEnd; do
-  check "retro records on $want" "retro.py record" \
-    "$(settings "[.hooks.$want[].hooks[] | select((.command // \"\") | test(\"retro\")) | .command] | join(\" \")")"
-done
-check "the retro sweep is asynchronous everywhere" "[true,true,true,true]" \
-  "$(settings '[.hooks[][].hooks[] | select((.command // "") | test("retro")) | (.async // false)] | tostring')"
-check "the prompt trigger carries an interval" "--interval 900" \
-  "$(settings '[.hooks.UserPromptSubmit[].hooks[].command] | join(" ")')"
-[ -s "$FAKE/.claude/retro/since" ] && ok "install stamps the since marker" \
-                                   || bad "install stamps the since marker" "no ~/.claude/retro/since"
-# Rewriting it would let the whole pre-toolkit corpus in.
-marker="$(cat "$FAKE/.claude/retro/since")"
-run_install >/dev/null
-check "a re-install leaves the marker alone" "$marker" "$(cat "$FAKE/.claude/retro/since")"
-
-# Without sqlite3 the recorder is inert and everything else is unaffected, so
-# the doctor says so without failing the install.
-mkdir -p "$TMP/nosqlite"
-{ printf '#!/bin/sh\ncase "$*" in *"import sqlite3"*) exit 1 ;; esac\nexec %s "$@"\n' \
-    "$(command -v python3)"; } > "$TMP/nosqlite/python3"
-chmod +x "$TMP/nosqlite/python3"
-out="$(PATH="$TMP/nosqlite:$PATH" run_install)"
-check "the doctor flags a python without sqlite3" "no sqlite3 module" "$out"
-check "and the install is still green"            "all checks green"  "$out"
-# An async hook's stdout is never injected as context, so an async taskline
-# would print into the void. Asserted as the whole array, which also pins that
-# exactly one entry runs it.
-check "taskline is wired synchronously" "[false]" \
-  "$(settings '[.hooks.UserPromptSubmit[].hooks[] | select((.command // "") | test("taskline")) | (.async // false)] | tostring')"
-
-linked="$(find "$FAKE/.claude/skills" -maxdepth 1 -type l | wc -l | tr -d ' ')"
-have="$(find "$ROOT/skills" -name SKILL.md | wc -l | tr -d ' ')"
-[ "$linked" = "$have" ] && ok "all $have skills linked" || bad "skills linked" "$linked of $have"
-
-copied="$(ls "$FAKE/.claude/agents"/*.md 2>/dev/null | wc -l | tr -d ' ')"
-agents="$(ls "$ROOT/agents"/*.md | wc -l | tr -d ' ')"
-[ "$copied" = "$agents" ] && ok "all $agents agents copied" || bad "agents copied" "$copied of $agents"
-
-out="$(run_install)"
-check "re-install is idempotent" "already current" "$out"
-
-# Replacing the checkout: links into the one we replaced still resolve, so they
-# survive the broken-link prune and would keep firing retired skills.
-OLD="$TMP/old-checkout"
-mkdir -p "$OLD/skills/retired" "$OLD/agents" "$OLD/hooks"
-touch "$OLD/skills/retired/SKILL.md"
-mkdir -p "$TMP/my-skills/mine-too"
-touch "$TMP/my-skills/mine-too/SKILL.md"
-ln -sfn "$OLD/skills/retired" "$FAKE/.claude/skills/retired"
-ln -sfn "$TMP/my-skills/mine-too" "$FAKE/.claude/skills/mine-too"   # the user's own, unrelated
-ln -sfn "$OLD" "$FAKE/.claude/agent-toolkit"
-run_install >/dev/null
-[ ! -e "$FAKE/.claude/skills/retired" ] && ok "stale checkout skill unlinked" || bad "stale checkout skill unlinked" "still linked"
-[ -L "$FAKE/.claude/skills/mine-too" ] && ok "unrelated skill link kept" || bad "unrelated skill link kept" "removed"
-rm -f "$FAKE/.claude/skills/mine-too"
-
-# A retired agent is pruned; one the user wrote is left alone.
-touch "$FAKE/.claude/agents/mine.md"
-echo "stale.md" >> "$FAKE/.claude/agents/.toolkit-agents"
-touch "$FAKE/.claude/agents/stale.md"
-run_install >/dev/null
-[ ! -e "$FAKE/.claude/agents/stale.md" ] && ok "retired agent pruned" || bad "retired agent pruned" "still there"
-[ -e "$FAKE/.claude/agents/mine.md" ] && ok "user agent untouched" || bad "user agent untouched" "deleted"
-
-# The doctor must notice its own wiring going missing, not just bad paths.
-jq 'del(.hooks.PreToolUse)' "$FAKE/.claude/settings.json" > "$TMP/s" && mv "$TMP/s" "$FAKE/.claude/settings.json"
-out="$(run_install --sync)"
-check "sync flags stale settings" "stale" "$out"
-run_install >/dev/null
-
-# ── switching off the previous generation ────────────────────────────────────
-# The whole point of the cutover: after installing over a v1 machine, nothing v1
-# may still be wired. A leftover skill or agent keeps instructing sessions from
-# a generation whose rules no longer hold.
-echo "switch from v1"
-
-# Names deliberately share no prefix: an assertion that matched one inside the
-# other would pass or fail for the wrong reason.
-V1="$TMP/old-checkout-v1"; V1HOME="$TMP/machine-on-v1"
-mkdir -p "$V1"/{hooks,agents} "$V1HOME/.claude"/{skills,agents}
-for s in orchestrating-subagents develop feature-spec linear-sync retro chore; do
-  mkdir -p "$V1/skills/group/$s" && touch "$V1/skills/group/$s/SKILL.md"
-done
-for a in architect-designer lead developer project-manager researcher reviewer; do
-  printf 'v1 agent\n' > "$V1/agents/$a.md"
-done
-for h in guard-git guard-config guard-linear format-on-edit sync-on-skill-edit reap-managed spawn-managed; do
-  printf '#!/bin/sh\n' > "$V1/hooks/$h.sh" && chmod +x "$V1/hooks/$h.sh"
-done
-printf '#!/bin/sh\n' > "$V1/install-skills.sh" && chmod +x "$V1/install-skills.sh"
-
-# Wire the fake home exactly as a v1 install leaves it.
-ln -sfn "$V1" "$V1HOME/.claude/agent-toolkit"
-for d in "$V1"/skills/group/*/; do ln -sfn "${d%/}" "$V1HOME/.claude/skills/$(basename "${d%/}")"; done
-for a in "$V1"/agents/*.md; do cp "$a" "$V1HOME/.claude/agents/"; basename "$a"; done > "$V1HOME/.claude/agents/.toolkit-agents"
-# ...plus things that are the user's, which must survive untouched.
-mkdir -p "$TMP/user-skill/my-skill" && touch "$TMP/user-skill/my-skill/SKILL.md"
-ln -sfn "$TMP/user-skill/my-skill" "$V1HOME/.claude/skills/my-skill"
-printf 'mine\n' > "$V1HOME/.claude/agents/my-agent.md"
-cat > "$V1HOME/.claude/settings.json" <<JSON
-{
-  "env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "3"},
-  "statusLine": {"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/statusline.py"},
-  "permissions": {"additionalDirectories": ["$V1"]},
-  "hooks": {
-    "SessionStart": [{"matcher": "startup", "hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/install.sh --sync"}]}],
-    "PreToolUse": [
-      {"matcher": "Bash", "hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/guard-git.sh"}]},
-      {"matcher": "Write|Edit|NotebookEdit", "hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/guard-config.sh"}]},
-      {"matcher": "mcp__linear.*", "hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/guard-linear.sh"}]}
-    ],
-    "SubagentStop": [{"hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/reap-managed.sh"}]}]
-  }
-}
-JSON
-printf '@%s/.claude/agent-toolkit/CLAUDE.md\n' "$V1HOME" > "$V1HOME/.claude/CLAUDE.md"
-
-HOME="$V1HOME" "$ROOT/install.sh" >/dev/null 2>&1
-v1s() { jq -r "$1" "$V1HOME/.claude/settings.json" 2>/dev/null; }
-
-left="$(ls -1 "$V1HOME/.claude/skills" | grep -Ex 'orchestrating-subagents|develop|feature-spec|linear-sync|retro|chore' | tr '\n' ' ')"
-[ -z "$left" ] && ok "v1 skills unlinked" || bad "v1 skills unlinked" "still present: $left"
-
-left="$(ls -1 "$V1HOME/.claude/agents" | grep -Ex 'architect-designer.md|lead.md' | tr '\n' ' ')"
-[ -z "$left" ] && ok "retired v1 agents pruned" || bad "retired v1 agents pruned" "still present: $left"
-
-grep -q 'v1 agent' "$V1HOME/.claude/agents/developer.md" \
-  && bad "shared agent names overwritten" "developer.md is still the v1 file" \
-  || ok "shared agent names overwritten"
-
-wired="$(v1s '[.hooks[][].hooks[].command] + [.statusLine.command] | join(" ")')"
-left=""
-for h in guard-git guard-config guard-linear format-on-edit sync-on-skill-edit reap-managed install-skills; do
-  case "$wired" in *"$h"*) left="$left $h" ;; esac
-done
-[ -z "$left" ] && ok "no v1 hook still wired" || bad "no v1 hook still wired" "wired:$left"
-
-check "v1 SubagentStop entry dropped" "null" "$(v1s '.hooks.SubagentStop')"
-check "v1 agent-teams flag dropped"   "null" "$(v1s '.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS')"
-check "v1 spawn depth replaced"       "2"    "$(v1s '.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH')"
-
-jq -e --arg v "$V1" '(.permissions.additionalDirectories | index($v)) == null' \
-  "$V1HOME/.claude/settings.json" >/dev/null 2>&1 \
-  && ok "old checkout dropped from approved dirs" \
-  || bad "old checkout dropped from approved dirs" "$V1 is still approved"
-
-[ -L "$V1HOME/.claude/skills/my-skill" ] && ok "user's own skill survives" || bad "user's own skill survives" "removed"
-grep -q mine "$V1HOME/.claude/agents/my-agent.md" 2>/dev/null && ok "user's own agent survives" || bad "user's own agent survives" "removed"
-check "pointer re-aimed at v2" "$ROOT" "$(readlink "$V1HOME/.claude/agent-toolkit")"
+. "$ROOT/tests/install.sh"
 
 # ── statusline ───────────────────────────────────────────────────────────────
 echo "statusline.py"
@@ -1734,7 +1525,7 @@ retro record >/dev/null; rc=$?
   && ok "an unreadable marker is left exactly as it is" \
   || bad "an unreadable marker is left exactly as it is" "exit $rc, now: $(cat "$RH/.claude/retro/since")"
 check "and the doctor is what says so" "retro/since is not a timestamp" \
-  "$(HOME="$RH" "$ROOT/install.sh" --sync 2>&1)"
+  "$(HOME="$RH" "$ROOT/install.sh" --dry-run 2>&1)"
 
 # Put the fixtures back inside the window; the marker it wrote is now, which
 # would make every one of them older than the store.
@@ -1826,6 +1617,7 @@ kill -0 "$pid" 2>/dev/null && ok "another session does not reap it" || bad "anot
 # Its own session ending does.
 sess="$(jq -r '.session' "$reg/$pid.json")"
 printf '{"hook_event_name":"SessionEnd","session_id":"%s"}' "$sess" | HOME="$FAKE" "$ROOT/hooks/reap.sh"
+for _ in $(seq 50); do [ -f "$reg/$pid.json" ] || break; sleep 0.1; done
 kill -0 "$pid" 2>/dev/null && bad "own session reaps it" "pid $pid survived" || ok "own session reaps it"
 [ ! -f "$reg/$pid.json" ] && ok "registry entry cleared" || bad "registry entry cleared" "still there"
 

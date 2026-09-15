@@ -1,26 +1,54 @@
 #!/usr/bin/env bash
-# Reaper for bg.sh processes. Wired at SessionEnd, SessionStart and SubagentStop
-# — the safety net under each agent's own cleanup.
+# Reaper for bg.sh processes: the safety net under each agent's own cleanup.
 #
 # Two triggers, because neither alone is enough:
-#   SessionEnd    reaps the ending session's own processes. It passes its
-#                 session id, and at that moment the CLI is still alive by
-#                 construction, so a dead-owner test would never fire.
-#   SessionStart  catches what a crashed or kill -9'd session left behind.
+#   SessionEnd    wired directly. It reaps the ending session's own processes:
+#                 it passes its session id, and at that moment the CLI is still
+#                 alive by construction, so a dead-owner test would never fire.
+#   install.sh    started at every session start and every install, it catches
+#                 what a crashed or kill -9'd session left behind.
 #
 # Only entries owned by the ending session or by a CLI that is provably gone are
 # touched, so one session never kills another's work. Everywhere it cannot be
 # sure, it leaks a process rather than killing live work.
+#
+# SessionEnd hooks share a 1.5 second budget, so this signals and returns. The
+# wait for exit, and the kill for whatever ignored the signal, run detached:
+#
+#   reap.sh --finish <pid> <start> <entry> ...
 set -uo pipefail
 
 reg="$HOME/.claude/bg-procs"
+start_of() { sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; }
+
+# A process is still the one that was signalled only while its start time
+# matches, so a pid recycled during the wait is never killed.
+if [ "${1:-}" = "--finish" ]; then
+  shift
+  for _ in 1 2 3 4 5 6; do
+    alive=0
+    for ((i = 1; i <= $#; i += 3)); do
+      [ "$(start_of "${!i}")" = "${@:i+1:1}" ] && alive=1
+    done
+    [ "$alive" -eq 1 ] || break
+    sleep 0.5
+  done
+  for ((i = 1; i <= $#; i += 3)); do
+    pid="${!i}"
+    if [ "$(start_of "$pid")" = "${@:i+1:1}" ]; then
+      kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+    fi
+    rm -f "${@:i+2:1}"
+  done
+  exit 0
+fi
+
 input="$(cat 2>/dev/null || true)"
 [ -d "$reg" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 
-start_of() { sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; }
-
 ending=""
+signalled=()
 if [ "$(printf '%s' "$input" | jq -r '.hook_event_name // empty' 2>/dev/null)" = "SessionEnd" ]; then
   ending="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)"
 fi
@@ -54,11 +82,9 @@ for e in "$reg"/*.json; do
   [ "$reap" -eq 1 ] || continue
 
   kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
-  for _ in 1 2 3; do
-    kill -0 "$pid" 2>/dev/null || break
-    sleep 1
-  done
-  kill -0 "$pid" 2>/dev/null && { kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null; }
-  rm -f "$e"
+  signalled+=("$pid" "$start" "$e")
 done
+
+[ "${#signalled[@]}" -gt 0 ] || exit 0
+setsid "${BASH_SOURCE[0]}" --finish "${signalled[@]}" </dev/null >/dev/null 2>&1 &
 exit 0
