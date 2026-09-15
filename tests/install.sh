@@ -24,9 +24,10 @@ case "$*" in
     [ "${CLAUDE_STUB_FAIL:-}" = version ] && exit 1
     echo "${CLAUDE_STUB_VERSION:-2.1.272} (Claude Code)" ;;
   "plugin marketplace list --json")
-    [ "${CLAUDE_STUB_FAIL:-}" = list ] && exit 1
+    [ "${CLAUDE_STUB_FAIL:-}" = list ] && { echo "the stub would not list marketplaces" >&2; exit 1; }
     jq -Rn '[inputs | split(" ") | {name: .[0], source: "github", repo: .[1]}]' <"$state/markets" ;;
   "plugin list --json")
+    [ "${CLAUDE_STUB_FAIL:-}" = pluginlist ] && { echo "the stub would not list plugins" >&2; exit 1; }
     jq -Rn --arg dir "$state/cache" \
       '[inputs | split(" ") | {id: .[0], enabled: (.[1] == "on"), scope: "user", installPath: ($dir + "/" + .[0])}]' <"$state/plugins" ;;
   "plugin marketplace add "*)
@@ -54,6 +55,9 @@ printf '#!/bin/sh\necho "ssh $*" >>"$SSH_CALLS"\nexit 255\n' >"$STUBS/ssh"
 chmod +x "$STUBS"/* "$NOTIFY_STUB"
 
 # A machine with nothing to advise about, so a case sees only what it caused.
+# CLAUDE_CODE_EXECPATH names the real Claude Code when the suite runs inside a
+# session, and install prefers it over PATH: unset, every case gets the stub.
+unset CLAUDE_CODE_EXECPATH
 export PATH="$STUBS:$PATH" SSH_AUTH_SOCK="$TMP/agent.sock" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="$TMP/gitconfig"
 printf '[user]\n\tname = Test\n\temail = test@example.invalid\n' >"$GIT_CONFIG_GLOBAL"
 
@@ -304,7 +308,37 @@ ln -sfn "$OLD" "$FAKE/.claude/agent-toolkit"
 inst "$ROOT" "$FAKE"
 [ ! -e "$FAKE/.claude/skills/retired" ] && ok "a skill of the replaced version directory is unlinked" || bad "stale skill unlinked" "still linked"
 [ -L "$FAKE/.claude/skills/mine-too" ] && ok "an unrelated skill link is kept" || bad "unrelated skill link kept" "removed"
+# A link of the user's own that dangles is still theirs, and the toolkit's own
+# dangling link is a deletion the hook report names.
+mv "$TMP/my-skills/mine-too" "$TMP/my-skills/moved-away"
+ln -s "$ROOT/skills/never-existed" "$FAKE/.claude/skills/never-existed"
+hook "$FAKE" "$(command_for "$FAKE" SessionStart install.sh)" '{"hook_event_name":"SessionStart"}'
+[ -L "$FAKE/.claude/skills/mine-too" ] && ok "a user's skill link whose target moved away is left alone" \
+  || bad "a user's dangling skill link is left alone" "removed"
+[ ! -L "$FAKE/.claude/skills/never-existed" ] && ok "while one into the version directory is unlinked" \
+  || bad "a dangling toolkit link is unlinked" "still there"
+json_is "and the removal is reported, with a skill rescan" \
+  '.hookSpecificOutput.reloadSkills == true and (.hookSpecificOutput.additionalContext | test("unlink dangling skill never-existed"))'
 rm -f "$FAKE/.claude/skills/mine-too"
+
+# A skill directory install cannot read would go missing in silence: find walks
+# straight past it.
+UNREADABLE="$TMP/unreadable-root"
+copy_root "$UNREADABLE"
+chmod 000 "$UNREADABLE/skills/toolkit"
+chmod 000 "$UNREADABLE/agents/developer.md"
+H="$(home unreadable)"
+if [ "$(id -u)" -ne 0 ]; then
+  inst "$UNREADABLE" "$H"
+  exit_is "a version directory holding a file install cannot read exits 1" 1
+  check "naming the skill under Toolkit" "✗ skills/toolkit cannot be read" "$(block Toolkit)"
+  check "and the agent it did not copy" "✗ agents/developer.md cannot be read, so it was not copied" "$(block Toolkit)"
+  [ ! -e "$H/.claude/agents/developer.md" ] && ok "which is not installed" || bad "an unreadable agent is not installed" "copied anyway"
+else
+  skip "a version directory holding a file install cannot read" "running as root, which reads anything"
+fi
+chmod 755 "$UNREADABLE/skills/toolkit"
+chmod 644 "$UNREADABLE/agents/developer.md"
 
 touch "$FAKE/.claude/agents/mine.md" "$FAKE/.claude/agents/stale.md"
 echo "stale.md" >>"$FAKE/.claude/agents/.toolkit-agents"
@@ -342,9 +376,30 @@ hook "$H" "$(command_for "$H" PostToolUse sync.sh)" \
 [ -z "$out" ] && ok "an edit elsewhere runs nothing" || bad "an edit elsewhere runs nothing" "$out"
 
 inst "$ROOT" "$H"
-out="$(printf '{"hook_event_name":"SessionStart"}' | HOME="$H" SSH_AUTH_SOCK= sh -c "$SYNC" 2>/dev/null)"
-json_is "advisories alone reach the model and not the user" \
-  '(has("systemMessage") | not) and (.hookSpecificOutput.additionalContext | test("ssh-agent"))'
+out="$(printf '{"hook_event_name":"SessionStart"}' | HOME="$H" SSH_AUTH_SOCK= GIT_CONFIG_GLOBAL="$TMP/empty-gitconfig" sh -c "$SYNC" 2>/dev/null)"
+[ -z "$out" ] && ok "a session start says nothing about the checks only a terminal can fix" \
+  || bad "a session start skips the checks only a terminal can fix" "$out"
+out="$(HOME="$H" SSH_AUTH_SOCK= "$ROOT/install.sh" 2>&1)"
+check "while a full install still reports them" "no ssh-agent holding a key" "$out"
+# Two processes a session start no longer pays for: the token check and the
+# version check, neither of which decides anything it does.
+rm -f "$NET_CALLS"
+: >"$CLAUDE_CALLS"
+hook "$H" "$SYNC" '{"hook_event_name":"SessionStart"}'
+[ ! -s "$NET_CALLS" ] && ok "and a session start asks gh for nothing" || bad "a session start asks gh for nothing" "$(cat "$NET_CALLS")"
+[ "$(wc -l <"$CLAUDE_CALLS")" -eq 1 ] && ok "and calls claude once" || bad "a session start calls claude once" "$(cat "$CLAUDE_CALLS")"
+
+# The executable the running Claude Code names is the one whose plugins these
+# are, whatever PATH answers.
+mkdir -p "$TMP/execpath-bin"
+printf '#!/bin/sh\necho "$*" >>"%s"\nexec "%s" "$@"\n' "$TMP/execpath.calls" "$STUBS/claude" >"$TMP/execpath-bin/claude"
+chmod +x "$TMP/execpath-bin/claude"
+rm -f "$TMP/execpath.calls"
+out="$(HOME="$(home execpath)" CLAUDE_CODE_EXECPATH="$TMP/execpath-bin/claude" "$ROOT/install.sh" 2>&1)"
+rc=$?
+exit_is "an install that finds claude through CLAUDE_CODE_EXECPATH goes green" 0
+grep -q -- '--version' "$TMP/execpath.calls" 2>/dev/null && ok "and runs the executable it names, ahead of PATH" \
+  || bad "CLAUDE_CODE_EXECPATH is preferred over PATH" "$(cat "$TMP/execpath.calls" 2>/dev/null)"
 rm "$H/.claude/skills/backlog"
 hook "$H" "$SYNC" '{"hook_event_name":"SessionStart","source":"startup"}'
 json_is "a skill link changed at session start asks for a skill rescan, and tells the user nothing" \
@@ -569,7 +624,14 @@ hook "$H" "$SYNC" '{"hook_event_name":"SessionStart"}'
 kill "$holder" 2>/dev/null
 wait "$holder" 2>/dev/null
 same "a session start that cannot take the lock writes nothing" "$id_before" "$(file_id "$H/.claude/settings.json")"
-json_is "and still reports" '.hookSpecificOutput.additionalContext | test("held the lock")'
+json_is "and still reports" '.hookSpecificOutput.additionalContext | test("held the lock for 5 seconds, so this session start applied nothing")'
+lock_holder "$H"
+hook "$H" "$(command_for "$H" PostToolUse sync.sh)" \
+  "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$ROOT/skills/toolkit/SKILL.md\"}}"
+kill "$holder" 2>/dev/null
+wait "$holder" 2>/dev/null
+json_is "and an edit that cannot take it says so as an edit" \
+  '.hookSpecificOutput.additionalContext | test("held the lock for 5 seconds, so this edit applied nothing")'
 
 cat >"$TMP/reread.py" <<'PY'
 import json
@@ -1004,6 +1066,18 @@ exit_is "a real directory at the stable path stops an install run from elsewhere
 same "which writes nothing" "$before" "$(snapshot "$H")"
 [ -z "$(grep -F '|plugin' "$CLAUDE_CALLS")" ] && ok "and fetches no plugin" || bad "and fetches no plugin" "$(cat "$CLAUDE_CALLS")"
 
+H="$(home stable-path-file)"
+printf 'not a link\n' >"$H/.claude/agent-toolkit"
+before="$(snapshot "$H")"
+inst "$ROOT" "$H"
+exit_is "a file at the stable path exits 1" 1
+same "and writes nothing" "$before" "$(snapshot "$H")"
+check "calling it a file, not a directory" "✗ ~/.claude/agent-toolkit is a file, not a link to a version directory" "$(block 'Needs you')"
+fix="$(block 'Needs you' | sed -n 3p | sed 's/^ *//')"
+HOME="$H" bash -c "$fix" >/dev/null 2>&1
+inst "$ROOT" "$H"
+exit_is "and its fix, run as printed, installs green" 0
+
 H="$(home user-skill-link)"
 mkdir -p "$H/.claude/skills" "$TMP/their-backlog"
 ln -s "$TMP/their-backlog" "$H/.claude/skills/backlog"
@@ -1255,8 +1329,8 @@ lock_holder "$H"
 printf '{"hook_event_name":"SessionStart"}' >"$TMP/queued.payload"
 HOME="$H" "$QUEUED_X/install.sh" --sync <"$TMP/queued.payload" >"$TMP/queued.out" 2>&1 &
 queued=$!
-for _ in $(seq 100); do pgrep -f 'python3 - 5' >/dev/null && break; sleep 0.1; done
-pgrep -f 'python3 - 5' >/dev/null && ok "(the queued session start is waiting on the lock)" || bad "the queued session start reached the lock" "it never waited"
+for _ in $(seq 100); do pgrep -f 'flock -w 5' >/dev/null && break; sleep 0.1; done
+pgrep -f 'flock -w 5' >/dev/null && ok "(the queued session start is waiting on the lock)" || bad "the queued session start reached the lock" "it never waited"
 ln -sfn "$QUEUED_Y" "$H/.claude/agent-toolkit"
 before="$(snapshot "$H")"
 kill "$holder" 2>/dev/null
@@ -1462,7 +1536,12 @@ H="$(home list-fails)"
 : >"$CLAUDE_CALLS"
 out="$(HOME="$H" CLAUDE_STUB_FAIL=list "$ROOT/install.sh" 2>&1)"
 check "a plugin listing that does not answer is a finding" "claude plugin marketplace list --json did not answer" "$out"
+check "carrying what Claude Code said about it" "could not be checked: the stub would not list marketplaces" "$out"
 grep -q '|plugin marketplace add' "$CLAUDE_CALLS" && bad "and nothing is fetched on a guess" "$(cat "$CLAUDE_CALLS")" || ok "and nothing is fetched on a guess"
+H="$(home plugin-list-fails)"
+out="$(HOME="$H" CLAUDE_STUB_FAIL=pluginlist "$ROOT/install.sh" 2>&1)"
+[ "$(grep -c 'claude plugin list --json did not answer' <<<"$out")" -eq 1 ] \
+  && ok "a listing asked for twice in a run is reported once" || bad "a failed listing is reported once" "$out"
 
 H="$(home claude-crashes)"
 out="$(HOME="$H" CLAUDE_STUB_FAIL=version "$ROOT/install.sh" 2>&1)"
@@ -1514,25 +1593,23 @@ PY
 check "every value a fresh install ledgers is one a later install can retire" "[]" \
   "$(python3 "$TMP/retirable.py" "$ROOT/hooks" "$H/.claude/agent-toolkit-applied.json")"
 
-# The stamp is written under the lock: an install whose version read was
-# overtaken by another install leaves that install's stamp alone.
-H="$(home stamp-race)"
-inst "$ROOT" "$H"
-RACER="$TMP/racer-root"
-copy_root "$RACER"
-printf 'v9·abc1234\n' >"$RACER/VERSION"
-mkdir -p "$TMP/slow-git"
-rm -f "$TMP/git-paused" "$TMP/git-go"
-printf '#!/bin/sh\ncase "$*" in *rev-list*) touch "%s"; while [ ! -e "%s" ]; do sleep 0.1; done ;; esac\nexec %s "$@"\n' \
-  "$TMP/git-paused" "$TMP/git-go" "$(command -v git)" >"$TMP/slow-git/git"
-chmod +x "$TMP/slow-git/git"
-HOME="$H" PATH="$TMP/slow-git:$PATH" "$ROOT/install.sh" >/dev/null 2>&1 &
-racing=$!
-for _ in $(seq 100); do [ -e "$TMP/git-paused" ] && break; sleep 0.1; done
-inst "$RACER" "$H"
-touch "$TMP/git-go"
-wait "$racing"
-check "an install overtaken while reading its version leaves the newer install's stamp" "v9·abc1234" "$(cat "$H/.claude/agent-toolkit-version")"
+# A VERSION file that will not read is not the same answer as no version: a
+# stamp that is right must not be removed on the strength of it.
+if [ "$(id -u)" -ne 0 ]; then
+  H="$(home version-unreadable)"
+  UNREADABLE_VERSION="$TMP/unreadable-version-root"
+  copy_root "$UNREADABLE_VERSION"
+  printf 'v9·abc1234\n' >"$UNREADABLE_VERSION/VERSION"
+  inst "$UNREADABLE_VERSION" "$H"
+  chmod 000 "$UNREADABLE_VERSION/VERSION"
+  inst "$UNREADABLE_VERSION" "$H"
+  chmod 644 "$UNREADABLE_VERSION/VERSION"
+  same "a VERSION that cannot be read keeps the stamp it had" "v9·abc1234" "$(cat "$H/.claude/agent-toolkit-version" 2>/dev/null)"
+  check "and says why" "the version directory's VERSION file cannot be read, so the version stamp was left as it was: Permission denied" "$out"
+  exit_is "as an advisory" 0
+else
+  skip "a VERSION that cannot be read keeps the stamp" "running as root, which reads anything"
+fi
 
 # A session start that gave up on the lock after the link moved still says nothing.
 H="$(home queued-timeout)"
@@ -1665,7 +1742,7 @@ for mode in "" --dry-run --sync; do
 done
 same "install, a dry run and a session start write nothing outside ~/.claude" "$before" "$(outside "$H")"
 same "and ask gh for nothing but a local token, calling neither curl nor wget" \
-  "$(printf 'gh auth token --hostname github.com\n%.0s' 1 2 3)" "$(cat "$NET_CALLS")"
+  "$(printf 'gh auth token --hostname github.com\n%.0s' 1 2)" "$(cat "$NET_CALLS")"
 other_git="$(grep -vE '^(-C [^ ]+ )?(rev-parse|rev-list|config --get) ' "$TMP/git.calls")"
 [ -z "$other_git" ] && ok "and run git only to read a version or an identity" || bad "and run git only to read" "$other_git"
 

@@ -144,6 +144,7 @@ EOF
 F_SEV=() F_WHO=() F_TEXT=() F_FIX=()
 CHANGES=()   # what changed, or in a dry run what would
 WROTE=()     # settings and pointer writes, which a hook report names
+REMOVED=()   # deletions, which a hook report names as well
 RESTART=()   # what changed that Claude Code reads only at start
 SKILLS_CHANGED=0
 
@@ -252,8 +253,8 @@ package_name() { # manager, requirement
     pacman:gh) echo github-cli ;;
     apt-get:sqlite3) echo libpython3-stdlib ;;
     dnf:sqlite3) echo python3-libs ;;
-    dnf:setsid) echo util-linux-core ;;
-    *:setsid) echo util-linux ;;
+    dnf:setsid | dnf:flock) echo util-linux-core ;;
+    *:setsid | *:flock) echo util-linux ;;
     *) echo "$2" ;;
   esac
 }
@@ -278,14 +279,14 @@ GH_LOGIN="gh auth login --hostname github.com --git-protocol ssh --web"
 # Returns 1 when jq or python3 is missing.
 check_tools() {
   local missing=() stop=() rest=() t line
-  for t in jq python3 git setsid gh; do have "$t" || missing+=("$t"); done
+  for t in jq python3 git setsid flock gh; do have "$t" || missing+=("$t"); done
   have python3 && ! python3 -c 'import sqlite3' >/dev/null 2>&1 && missing+=(sqlite3)
   [ ${#missing[@]} -gt 0 ] || return 0
   line="$(package_line "${missing[@]}")"
   for t in "${missing[@]}"; do
     case "$t" in
       jq | python3) stop+=("$t") ;;
-      git | setsid) rest+=("$t") ;;
+      git | setsid | flock) rest+=("$t") ;;
     esac
   done
   [ ${#stop[@]} -eq 0 ] || finding required user "not on PATH: ${stop[*]}. Nothing can be merged or verified without it, so nothing was changed" "$line"
@@ -299,15 +300,29 @@ version_at_least() { # version, minimum
   [[ "$1" =~ ^[0-9]+(\.[0-9]+)*$ ]] && [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]
 }
 
-# Local reads only, so no timeout.
-claude_cli() { (cd "$HOME" && claude "$@" </dev/null 2>/dev/null); }
+# The running Claude Code names its own executable, which is the one whose
+# plugins these are. PATH answers for a terminal, where there is no session.
+CLAUDE=""
+claude_bin() {
+  if [ -z "$CLAUDE" ]; then
+    CLAUDE="${CLAUDE_CODE_EXECPATH:-}"
+    [ -n "$CLAUDE" ] && [ -x "$CLAUDE" ] || CLAUDE="$(command -v claude)" || return 1
+  fi
+  [ -n "$CLAUDE" ]
+}
 
+# Local reads only, so no timeout.
+claude_cli() { (cd "$HOME" && "$CLAUDE" "$@" </dev/null 2>/dev/null); }
+
+# The version gates the plugin step alone, and --sync never fetches, so it is
+# read only where it decides something.
 check_claude() {
   local version
-  if ! have claude; then
+  if ! claude_bin; then
     finding required user "claude is not on PATH, so the plugins are not installed" "curl -fsSL https://claude.ai/install.sh | bash"
     return 1
   fi
+  [ "$MODE" != sync ] || return 0
   if ! version="$(claude_cli --version)"; then
     finding required user "claude --version failed, so the plugins are not installed" "curl -fsSL https://claude.ai/install.sh | bash"
     return 1
@@ -319,6 +334,9 @@ check_claude() {
   fi
 }
 
+# What the user can only fix in their own terminal, and only a full install
+# reports: at every session start these cost a process each and say the same
+# thing, which nothing inside Claude Code can act on.
 check_access() {
   # Bounded, because the token can sit behind a keyring that waits to be unlocked.
   if have gh && ! timeout 10 gh auth token --hostname github.com >/dev/null 2>&1; then
@@ -425,8 +443,6 @@ check_root() {
       finding required toolkit "$entry is missing from the version directory" "$ROOT/$entry"
     elif [ ! -x "$ROOT/$entry" ]; then
       finding required toolkit "$entry is not executable" "$ROOT/$entry"
-    elif reason="$(cannot_start "$ROOT/$entry")" && [ -n "$reason" ]; then
-      finding required toolkit "$entry cannot start: $reason" "$ROOT/$entry"
     fi
   done <<<"$entries"
   for entry in hooks/launcher.sh hooks/lib/settings.py hooks/lib/version.py; do
@@ -448,7 +464,9 @@ check_root() {
 
 # The approval gate, run before it goes live: the launcher must ask when the
 # toolkit is unreachable, and the guard must ask before a push. HOME points
-# nowhere, so neither can find or write anything.
+# nowhere, so neither can find or write anything. These two are the only entry
+# points whose #! line is probed: a hook that cannot start is a hook that let
+# the call through, and for the rest the failure is visible where it happens.
 check_gate() {
   local ask='"permissionDecision":"ask"' payload='{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' reason
   if [ -f "$ROOT/hooks/launcher.sh" ]; then
@@ -459,8 +477,13 @@ check_gate() {
       finding required toolkit "hooks/launcher.sh does not ask when the toolkit is unreachable" "$ROOT/hooks/launcher.sh"
     fi
   fi
-  if [ -x "$ROOT/hooks/guard.sh" ] && [[ "$(HOME=/nonexistent/agent-toolkit "$ROOT/hooks/guard.sh" <<<"$payload" 2>/dev/null)" != *"$ask"* ]]; then
-    finding required toolkit "hooks/guard.sh does not ask before a push" "$ROOT/hooks/guard.sh"
+  if [ -x "$ROOT/hooks/guard.sh" ]; then
+    reason="$(cannot_start "$ROOT/hooks/guard.sh")"
+    if [ -n "$reason" ]; then
+      finding required toolkit "hooks/guard.sh cannot start: $reason" "$ROOT/hooks/guard.sh"
+    elif [[ "$(HOME=/nonexistent/agent-toolkit "$ROOT/hooks/guard.sh" <<<"$payload" 2>/dev/null)" != *"$ask"* ]]; then
+      finding required toolkit "hooks/guard.sh does not ask before a push" "$ROOT/hooks/guard.sh"
+    fi
   fi
 }
 
@@ -521,8 +544,13 @@ PY
 # directory. Returns 1 when it is not, and nothing may be written.
 check_layout() {
   [ -e "$STABLE" ] && [ ! -L "$STABLE" ] || return 0
-  finding required user "~/.claude/agent-toolkit is a real directory, not a link, so nothing was changed" \
-    "mkdir -p ~/Documents/git-repo && mv -T ~/.claude/agent-toolkit ~/Documents/git-repo/agent-toolkit-v2 && ~/Documents/git-repo/agent-toolkit-v2/install.sh"
+  if [ -d "$STABLE" ]; then
+    finding required user "~/.claude/agent-toolkit is a real directory, not a link, so nothing was changed" \
+      "mkdir -p ~/Documents/git-repo && mv -T ~/.claude/agent-toolkit ~/Documents/git-repo/agent-toolkit-v2 && ~/Documents/git-repo/agent-toolkit-v2/install.sh"
+  else
+    finding required user "~/.claude/agent-toolkit is a file, not a link to a version directory, so nothing was changed" \
+      "mv ~/.claude/agent-toolkit ~/.claude/agent-toolkit.not-a-link && $(install_command)"
+  fi
   return 1
 }
 
@@ -530,33 +558,25 @@ resolve() { (cd "$1" 2>/dev/null && pwd -P) || readlink "$1" 2>/dev/null || true
 
 # ── applying ─────────────────────────────────────────────────────────────────
 # Held on ~/.claude itself, so serialising applies writes no file of its own.
-# The lock belongs to fd 9, which outlives the python that took it. Returns 1
+# The lock belongs to fd 9, which outlives the flock that took it. Returns 1
 # when another apply held it past the deadline, 2 with LOCK_ERROR otherwise.
 take_lock() { # seconds
   LOCK_FIX=""
+  if ! have flock; then
+    LOCK_ERROR="flock is not on PATH" LOCK_FIX="$(package_line flock)"
+    return 2
+  fi
   if ! { exec 9<"$CLAUDE_DIR"; } 2>/dev/null; then
     LOCK_ERROR="~/.claude cannot be opened" LOCK_FIX="chmod u+rwx ~/.claude"
     return 2
   fi
-  LOCK_ERROR="$(python3 - "$1" 2>&1 <<'PY'
-import fcntl
-import sys
-import time
-
-deadline = time.monotonic() + float(sys.argv[1])
-while True:
-    try:
-        fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        sys.exit(0)
-    except BlockingIOError:
-        if time.monotonic() >= deadline:
-            sys.exit(1)
-        time.sleep(0.05)
-    except OSError as e:
-        print(e.strerror or e)
-        sys.exit(2)
-PY
-  )"
+  # -E separates the deadline from flock's own failures, which exit 1.
+  LOCK_ERROR="$(flock -w "$1" -E 4 9 2>&1)"
+  case $? in
+    0) return 0 ;;
+    4) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 apply_link() {
@@ -584,6 +604,11 @@ apply_skills() {
   if [ ! -d "$SKILLS_DST" ]; then
     act "create ~/.claude/skills" mkdir -p "$SKILLS_DST" && RESTART+=("~/.claude/skills was created")
   fi
+  # find walks past what it cannot read, so a skill would go missing with the
+  # report saying nothing.
+  while IFS= read -r -d '' f; do
+    finding required toolkit "skills/${f#"$ROOT"/skills/} cannot be read, so its skill may not be installed" "$f"
+  done < <(find "$ROOT/skills" ! -readable -print0 2>/dev/null | sort -z)
   while IFS= read -r -d '' f; do
     dir="$(dirname "$f")" name="$(basename "$(dirname "$f")")" dst="$SKILLS_DST/$name"
     linked[$name]=1
@@ -601,15 +626,26 @@ apply_skills() {
     act "link skill $name" link_atomic "$dir" "$dst" && SKILLS_CHANGED=1
   done < <(find "$ROOT/skills" -name SKILL.md -print0 2>/dev/null | sort -z)
 
+  # Only a link into a version directory is the toolkit's to remove. One the
+  # user made whose target moved away is theirs, dangling or not.
   for dst in "$SKILLS_DST"/*; do
     [ -L "$dst" ] && [ -z "${linked[$(basename "$dst")]:-}" ] || continue
     target="$(readlink "$dst")"
+    toolkit_link "$target" || continue
     if [ ! -e "$dst" ]; then
-      act "unlink dangling skill $(basename "$dst")" rm -f "$dst" && SKILLS_CHANGED=1
+      unlink_skill "unlink dangling skill $(basename "$dst")" "$dst"
     elif [ -n "$PREV_ROOT" ] && [ "$PREV_ROOT" != "$ROOT" ] && [[ "$target" == "$PREV_ROOT"/skills/* ]]; then
-      act "unlink skill $(basename "$dst") of the replaced version directory" rm -f "$dst" && SKILLS_CHANGED=1
+      unlink_skill "unlink skill $(basename "$dst") of the replaced version directory" "$dst"
     fi
   done
+}
+
+# A deletion the user never asked for, so a hook report names it even though it
+# applied without a problem.
+unlink_skill() { # description, path
+  act "$1" rm -f "$2" || return 1
+  SKILLS_CHANGED=1
+  REMOVED+=("$1")
 }
 
 skill_held() { # name
@@ -636,6 +672,10 @@ apply_agents() {
   fi
   for n in "${names[@]}"; do
     cmp -s "$ROOT/agents/$n" "$AGENTS_DST/$n" && continue
+    if [ ! -r "$ROOT/agents/$n" ]; then
+      finding required toolkit "agents/$n cannot be read, so it was not copied" "$ROOT/agents/$n"
+      continue
+    fi
     if [ -e "$AGENTS_DST/$n" ] && ! grep -qxF "$n" "$MANIFEST" 2>/dev/null; then
       saved="$(backup_name "$BACKUPS/agents/$n")"
       act "back up your agents/$n to $(home_path "$saved")" backup_to "$AGENTS_DST/$n" "$saved" || continue
@@ -759,7 +799,7 @@ apply_local() {
 # Both sources are public, so HTTPS needs no credentials, while the default SSH
 # clone needs a key in an agent this shell may not have.
 claude_fetch() {
-  (cd "$HOME" && CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1 GIT_TERMINAL_PROMPT=0 timeout 600 claude "$@" </dev/null)
+  (cd "$HOME" && CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1 GIT_TERMINAL_PROMPT=0 timeout 600 "$CLAUDE" "$@" </dev/null)
 }
 
 FAILED_PLUGINS=" "
@@ -772,12 +812,20 @@ fetch_failure() { # exit status, output → Claude Code's own message
 }
 
 LISTING=""
+FAILED_LISTINGS=" "
 listing() { # [marketplace] → the JSON array in LISTING, or a finding and status 1
-  local args=(plugin "$@" list --json)
+  local args=(plugin "$@" list --json) said
+  # Asking again after it failed once would fetch the same answer and report it
+  # a second time.
+  [[ "$FAILED_LISTINGS" == *" ${*:-plugin} "* ]] && return 1
   if LISTING="$(claude_cli "${args[@]}")" && jq -e 'type == "array"' <<<"$LISTING" >/dev/null 2>&1; then
     return 0
   fi
-  finding required install "claude ${args[*]} did not answer, so the plugins could not be checked" "$(install_command)"
+  # Run again for what it said, which the call above sends to stderr: on the
+  # success path a word of stderr in the listing would break the JSON.
+  said="$( (cd "$HOME" && "$CLAUDE" "${args[@]}" </dev/null 2>&1 >/dev/null) | one_line)"
+  FAILED_LISTINGS+="${*:-plugin} "
+  finding required install "claude ${args[*]} did not answer, so the plugins could not be checked${said:+: $said}" "$(install_command)"
   return 1
 }
 
@@ -855,9 +903,8 @@ check_notifications() { # plugin listing
 
 # ── version stamp ────────────────────────────────────────────────────────────
 # Written only while no required finding stands, so the status line never shows
-# a version as applied when it is not. Written under the lock, and left alone
-# when the link no longer points here or another apply holds the lock: that
-# apply owns the stamp.
+# a version as applied when it is not, and only while this directory is the one
+# the stable link points at.
 apply_stamp() {
   local out rc
   [ "$MODE" = dry ] || [ "$(resolve "$STABLE")" = "$ROOT" ] || return 0
@@ -868,17 +915,15 @@ apply_stamp() {
     3) finding advisory install "git did not report the version in time, so the version stamp was left as it was" "$(install_command)" && return ;;
     4) finding advisory user "git cannot read the version directory's history, so the version stamp was left as it was: $(printf '%s' "$out" | one_line)" \
       "git -C $(home_path "$ROOT") status" && return ;;
+    5) finding advisory user "the version directory's VERSION file cannot be read, so the version stamp was left as it was: $(printf '%s' "$out" | one_line)" \
+      "ls -l $(home_path "$ROOT")/VERSION" && return ;;
     *) finding advisory toolkit "hooks/lib/version.py failed, so the version stamp was left as it was" "$ROOT/hooks/lib/version.py"$'\n'"$(printf '%s' "$out" | tail -1)" && return ;;
   esac
-  if [ "$MODE" != dry ]; then
-    take_lock 5 && [ "$(resolve "$STABLE")" = "$ROOT" ] || { exec 9<&-; return 0; }
-  fi
   if [ -z "$out" ]; then
     [ ! -e "$STAMP" ] || act "version stamp removed: this version directory has no version" rm -f "$STAMP"
   elif [ "$(count required)" -eq 0 ] && [ "$(cat "$STAMP" 2>/dev/null)" != "$out" ]; then
     act "version stamp $out" write_atomic "$STAMP" 644 <<<"$out"
   fi
-  exec 9<&-
 }
 
 # ── reports ──────────────────────────────────────────────────────────────────
@@ -942,7 +987,7 @@ report_hook() {
   local i required context="" message=() fixes names=() reload=0
   required="$(count required)"
   [ "$EVENT" = SessionStart ] && [ "$SKILLS_CHANGED" -eq 1 ] && reload=1
-  if [ ${#F_SEV[@]} -eq 0 ] && [ ${#WROTE[@]} -eq 0 ] && [ ${#RESTART[@]} -eq 0 ]; then
+  if [ ${#F_SEV[@]} -eq 0 ] && [ ${#WROTE[@]} -eq 0 ] && [ ${#REMOVED[@]} -eq 0 ] && [ ${#RESTART[@]} -eq 0 ]; then
     [ "$reload" -eq 1 ] && printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","reloadSkills":true}}\n'
     return 0
   fi
@@ -959,6 +1004,7 @@ report_hook() {
     context+=$'\n'"wrote $i"
     names+=("${i%% *}")
   done
+  for i in "${REMOVED[@]}"; do context+=$'\n'"$i"; done
   [ "$required" -eq 0 ] || message+=("$(plural "$required" problem). Ask Claude to fix it, or run ~/.claude/agent-toolkit/install.sh")
   [ ${#WROTE[@]} -eq 0 ] || message+=("Updated $(join ", " "${names[@]}")")
   if [ ${#RESTART[@]} -gt 0 ]; then
@@ -990,6 +1036,9 @@ finish() {
   done
   exit 0
 }
+
+# What a --sync run is, in the report's words.
+occasion() { [ "${EVENT:-}" = PostToolUse ] && echo "this edit" || echo "this session start"; }
 
 # Read without jq, which may be the very thing missing.
 hook_event() {
@@ -1053,7 +1102,7 @@ main() {
         1)
           [ "$MODE" != sync ] || [ "$(resolve "$STABLE")" = "$ROOT" ] || exit 0
           if [ "$MODE" = sync ]; then
-            finding advisory install "another install held the lock for 5 seconds, so this session start applied nothing" "$(install_command)"
+            finding advisory install "another install held the lock for 5 seconds, so $(occasion) applied nothing" "$(install_command)"
           else
             finding required install "another install held the lock for a minute, so nothing was applied" "$(install_command)"
           fi
@@ -1071,7 +1120,7 @@ main() {
     [ "$MODE" = sync ] || fetch_plugins
     check_plugins
   fi
-  check_access
+  [ "$MODE" = sync ] || check_access
   check_retro
   [ "$ready" -eq 1 ] && apply_stamp
   finish

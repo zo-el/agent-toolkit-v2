@@ -6,6 +6,7 @@ here. Contract: documentation/specs/install.md, Version identity.
     python3 hooks/lib/version.py <root>    prints the version, or nothing
 
 Exit 3: git did not answer in time. Exit 4: git failed, with its message.
+Exit 5: the VERSION file is there and will not read, with the reason.
 """
 
 import os
@@ -22,6 +23,11 @@ GIT_ENV_OVERRIDES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FI
 class Unknown(Exception):
     """git could not say, which is not the same answer as no version: a caller
     that treated it as one would remove a stamp that is right."""
+
+
+class Unreadable(Exception):
+    """The VERSION file is there and will not read, which is not no version
+    either."""
 
 
 def parse(label):
@@ -72,8 +78,10 @@ def _from_file(root):
     try:
         with open(os.path.join(root, "VERSION"), encoding="utf-8") as f:
             content = f.read(256)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return None
+    except (OSError, ValueError) as e:
+        raise Unreadable(getattr(e, "strerror", None) or e)
     line = content[:-1] if content.endswith("\n") else content
     return line if parse(line) else None
 
@@ -81,8 +89,9 @@ def _from_file(root):
 def of_root(root, timeout=5.0):
     """The root's version, or None when it has none.
 
-    Raises subprocess.TimeoutExpired when git does not answer in time, and
-    Unknown when git fails on a directory that holds a repository."""
+    Raises subprocess.TimeoutExpired when git does not answer in time, Unknown
+    when git fails on a directory that holds a repository, and Unreadable when
+    a VERSION file is there and will not read."""
     root = os.path.realpath(root)
     return _from_git(root, timeout) or _from_file(root)
 
@@ -95,5 +104,8 @@ if __name__ == "__main__":
     except Unknown as e:
         print(e)
         sys.exit(4)
+    except Unreadable as e:
+        print(e)
+        sys.exit(5)
     if found:
         print(found)
