@@ -170,7 +170,7 @@ A release the machine will not install is announced at most once, and the record
 
 | What | Severity | Who | Fix |
 | ---- | -------- | --- | --- |
-| a release went live | not a finding: the change line, and install's restart line when one is due | | |
+| a release went live | not a finding: the change line, install's own report, and the restart line, which going live always warrants | | |
 | a release did not go live | required | user | `hooks/update.sh now`, once install's own reason is dealt with |
 | the last check failed | advisory | user | that failure's own fix |
 | no check has succeeded in seven days | advisory | user | `hooks/update.sh now` |
