@@ -239,7 +239,7 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 | --------------- | ------------ |
 | `gh` is missing, or holds no token | nothing is checked. The record carries it, and the next `apply` reports it |
 | GitHub 404s the release and the repository | the token cannot see the repository. Reported as an access failure, never as "no release" |
-| GitHub 404s the release but the repository reads | no release has been published. Nothing is reported |
+| GitHub 404s `latest` but the repository reads | no release has been published. Nothing is reported |
 | the download is truncated, or will not decompress | nothing is staged, the reason is recorded, the next `apply` reports it |
 | the archive is not the commit the release names | nothing is staged. Required finding |
 | the release's commit is not on `main` | nothing is staged. Required finding naming the release |
@@ -248,7 +248,7 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 | `~/.claude/agent-toolkit-releases` cannot be created, written, or holds no room | nothing is staged, the reason is recorded, and the next `apply` reports it with its own fix |
 | install from the staged folder does not go live | nothing on the machine changed. The version is marked bad and the report carries install's reason |
 | install goes live and a later write fails | install's own contract: the new version is live and the report names what did not apply |
-| an activation is killed partway | the stable link may already have moved, so the release is live and the rest of the install is not done. The session's own `--sync`, which runs from the new root, applies the remainder and stamps it. The report was lost with the process, so the next `apply` finds a live version the record never reported and says so then |
+| an activation is killed partway | the stable link may already have moved, so the release is live and the rest of the install is not done. A `--sync` from the new root, in that session or the next, applies the remainder and stamps it. The report was lost with the process, so the next `apply` finds a live version the record never reported and says so then |
 | two sessions start at once | one activates and both are told. The one that cannot take the activation lock installs nothing and waits on nothing |
 | the track holds something the updater does not accept | the updater stops and reports. Nothing is checked, downloaded or applied |
 | the track names a release nobody published | nothing is staged. Required finding naming the track's line, rather than the silence a missing `latest` earns |
