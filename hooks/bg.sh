@@ -44,10 +44,12 @@ if command -v jq >/dev/null 2>&1; then
         --arg owner "$owner" --arg owner_start "${owner:+$(start_of "$owner")}" \
         --arg session "${CLAUDE_CODE_SESSION_ID:-unknown}" --args \
         '{pid:$pid, start:$start, owner:$owner, owner_start:$owner_start,
-          session:$session, cmd:$ARGS.positional}' "$@" > "$reg/$pid.json"
+          session:$session, cmd:$ARGS.positional}' "$@" > "$reg/.$pid.json.tmp"
 else
   printf '{"pid":%d,"start":"%s","owner":"%s","owner_start":"%s"}\n' \
-    "$pid" "$(start_of "$pid")" "$owner" "${owner:+$(start_of "$owner")}" > "$reg/$pid.json"
+    "$pid" "$(start_of "$pid")" "$owner" "${owner:+$(start_of "$owner")}" > "$reg/.$pid.json.tmp"
 fi
+# Renamed into place, so the reaper never reads an entry half written.
+mv -f "$reg/.$pid.json.tmp" "$reg/$pid.json"
 
 echo "background pid $pid (owner CLI ${owner:-unknown}, log $log)"

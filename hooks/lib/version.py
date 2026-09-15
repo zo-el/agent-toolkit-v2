@@ -5,8 +5,7 @@ here. Contract: documentation/specs/install.md, Version identity.
 
     python3 hooks/lib/version.py <root>    prints the version, or nothing
 
-Exit 3 from the command means the version could not be read in time, which is
-not the same answer as a root with no version.
+Exit 3: git did not answer in time. Exit 4: git failed, with its message.
 """
 
 import os
@@ -18,6 +17,11 @@ LABEL = re.compile(r"v([0-9]+)·([0-9a-f]{4,40})")
 
 # A variable naming another repository would answer for that one instead.
 GIT_ENV_OVERRIDES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")
+
+
+class Unknown(Exception):
+    """git could not say, which is not the same answer as no version: a caller
+    that treated it as one would remove a stamp that is right."""
 
 
 def parse(label):
@@ -36,24 +40,31 @@ def same(a, b):
 
 
 def _from_git(root, timeout):
+    """The top level of a work tree is the directory holding .git, so a root
+    without one is never read from a repository in a parent directory."""
+    if not os.path.lexists(os.path.join(root, ".git")):
+        return None
     env = {k: v for k, v in os.environ.items() if k not in GIT_ENV_OVERRIDES}
 
     def git(*args):
-        done = subprocess.run(
-            ["git", "-C", root, *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-            stdin=subprocess.DEVNULL,
-        )
-        return done.stdout.strip() if done.returncode == 0 else ""
+        try:
+            done = subprocess.run(
+                ["git", "-C", root, *args],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+                stdin=subprocess.DEVNULL,
+            )
+        except OSError as e:
+            raise Unknown("git cannot run: %s" % e.strerror)
+        if done.returncode != 0:
+            raise Unknown((done.stderr.strip().splitlines() or ["git %s failed" % args[0]])[-1])
+        return done.stdout.strip()
 
-    top = git("rev-parse", "--show-toplevel")
-    if not top or os.path.realpath(top) != root:
+    if os.path.realpath(git("rev-parse", "--show-toplevel")) != root:
         return None
-    count, sha = git("rev-list", "--count", "HEAD"), git("rev-parse", "--short", "HEAD")
-    label = f"v{count}·{sha}"
+    label = "v%s·%s" % (git("rev-list", "--count", "HEAD"), git("rev-parse", "--short", "HEAD"))
     return label if parse(label) else None
 
 
@@ -70,15 +81,10 @@ def _from_file(root):
 def of_root(root, timeout=5.0):
     """The root's version, or None when it has none.
 
-    Raises subprocess.TimeoutExpired when git does not answer in time: a caller
-    that cannot tell that from "no version" would remove a stamp that is right.
-    """
+    Raises subprocess.TimeoutExpired when git does not answer in time, and
+    Unknown when git fails on a directory that holds a repository."""
     root = os.path.realpath(root)
-    try:
-        label = _from_git(root, timeout)
-    except OSError:
-        label = None
-    return label or _from_file(root)
+    return _from_git(root, timeout) or _from_file(root)
 
 
 if __name__ == "__main__":
@@ -86,5 +92,8 @@ if __name__ == "__main__":
         found = of_root(sys.argv[1])
     except subprocess.TimeoutExpired:
         sys.exit(3)
+    except Unknown as e:
+        print(e)
+        sys.exit(4)
     if found:
         print(found)

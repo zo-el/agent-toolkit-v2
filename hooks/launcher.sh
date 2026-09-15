@@ -9,29 +9,34 @@
 # or async for a handler nobody waits on. It decides how the command fails.
 # POSIX sh, so it runs where nothing else the toolkit needs is installed.
 
-[ $# -ge 2 ] || exit 0
-caller=$1
-entry=$2
-shift 2
+caller=${1-}
+entry=${2-}
+if [ $# -ge 2 ]; then shift 2; else set --; fi
 link="$HOME/.claude/agent-toolkit"
 
-if [ -f "$link/$entry" ] && [ -x "$link/$entry" ]; then
-  exec "$link/$entry" "$@"
+if [ -n "$entry" ] && [ -f "$link/$entry" ] && [ -x "$link/$entry" ]; then
+  [ "$caller" = PreToolUse ] || exec "$link/$entry" "$@"
+  # Claude Code lets the call through on any exit but 0 and 2, which is what a
+  # guard that cannot start, or crashes, exits with.
+  "$link/$entry" "$@"
+  status=$?
+  if [ "$status" -eq 0 ] || [ "$status" -eq 2 ]; then exit "$status"; fi
+  problem="$entry gave no verdict (exit $status)"
+else
+  target=$(readlink "$link" 2>/dev/null)
+  if [ -z "$target" ]; then
+    problem="~/.claude/agent-toolkit is not a link to a toolkit"
+  elif [ ! -e "$link" ]; then
+    problem="~/.claude/agent-toolkit points at $target, which is gone"
+  else
+    problem="${entry:-the entry point} is missing or not executable in $target"
+  fi
 fi
+fix="cd <toolkit directory> && ./install.sh"
 
 esc() {
   printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
-
-target=$(readlink "$link" 2>/dev/null)
-if [ -z "$target" ]; then
-  problem="~/.claude/agent-toolkit is not a link to a toolkit"
-elif [ ! -e "$link" ]; then
-  problem="~/.claude/agent-toolkit points at $target, which is gone"
-else
-  problem="$entry is missing or not executable in $target"
-fi
-fix="cd <toolkit directory> && ./install.sh"
 
 case "$caller" in
   PreToolUse)

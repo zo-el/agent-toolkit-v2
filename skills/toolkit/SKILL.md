@@ -43,7 +43,7 @@ An `incomplete:` line in the window means the recorder could not read something,
 - **Skill added or renamed** — `ls -l ~/.claude/skills/<name>` shows the symlink. The session-start and on-edit hooks sync it automatically.
 - **Agent added or renamed** — agents are copied, not linked. Run `./install.sh`, then `ls ~/.claude/agents/`.
 - **Hook changed** — add the case to `tests/run.sh` and run the suite. All green before committing.
-- **Wiring changed** — `./install.sh --dry-run` shows the exact device-config diff. Then `./install.sh`.
+- **Wiring changed**: add the command's case to the launcher loop in `tests/install.sh`, which fails on any wired command it does not check. `./install.sh --dry-run` shows the exact device-config diff. Then `./install.sh`.
 - **Anything renamed** — grep the whole repo for the old name. README and `CLAUDE.md` are the usual stragglers.
 
 ## Probing a guard by hand

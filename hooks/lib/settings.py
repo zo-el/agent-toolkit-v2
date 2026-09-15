@@ -2,10 +2,8 @@
 
     python3 hooks/lib/settings.py apply|plan < request.json
 
-install.sh declares the values and serialises applies across the machine. This
-file owns the rest of the contract in documentation/specs/install.md, Settings:
-what a merge changes, when a file is current, the ledger of values this
-machine's installs wrote, and the re-read that keeps Claude Code's own writes.
+install.sh declares the values and holds the lock. This file does the rest of
+the Settings contract in documentation/specs/install.md.
 
 The request carries: settings, ledger and backups paths; desired, a fragment
 shaped like settings.json; absent, key paths the toolkit keeps unset; home,
@@ -15,9 +13,11 @@ is one JSON object on stdout.
 
 import copy
 import difflib
+import errno
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -30,14 +30,22 @@ ATTEMPTS = 5
 OWNED_BY_COMMAND = ("hooks", "statusLine")
 TOOLKIT_COMMAND = re.compile(r"agent-toolkit-run|\.claude/agent-toolkit/|install-skills")
 
+# The only places a ledger entry may retire a value from. A ledger naming any
+# other path, such as a permissions.allow rule or a hook, is ignored.
+RETIRABLE_MEMBERS = {("permissions", "deny"), ("permissions", "additionalDirectories")}
+NOT_TOP_LEVEL_VALUES = {"hooks", "statusLine", "permissions", "sandbox", "env", "enabledPlugins"}
+
+# Errors a second run cannot clear, so the user has to act on them.
+USER_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC, errno.EEXIST, errno.ENOTDIR, errno.EISDIR}
+
 
 class SettingsError(Exception):
-    """kind is who can fix it: "user" for the file's content, "install" for a
-    write that did not land."""
+    """kind is who can fix it: "user" or "install". fix is a command for them."""
 
-    def __init__(self, kind, reason):
+    def __init__(self, kind, reason, fix=""):
         super().__init__(reason)
         self.kind = kind
+        self.fix = fix
 
 
 def fingerprint(node):
@@ -77,7 +85,7 @@ def drop(node, path):
 
 
 def same(a, b):
-    """JSON equality. Python's own == says 1 == True."""
+    """Equal by fingerprint. Python's own == says 1 == True."""
     return a is not MISSING and b is not MISSING and fingerprint(a) == fingerprint(b)
 
 
@@ -85,6 +93,12 @@ def ours(handler):
     return isinstance(handler, dict) and bool(
         TOOLKIT_COMMAND.search(str(handler.get("command") or ""))
     )
+
+
+def retirable(path):
+    if len(path) == 1:
+        return path[0] not in NOT_TOP_LEVEL_VALUES
+    return (len(path) == 2 and path[0] in ("env", "enabledPlugins")) or path == ("permissions", "defaultMode")
 
 
 def owned(desired):
@@ -131,18 +145,37 @@ def earlier_forms(item, request):
     return {fingerprint(f) for f in forms}
 
 
+def shell_path(path, home):
+    if home and path.startswith(home + "/"):
+        return "~/" + shlex.quote(path[len(home) + 1 :])
+    return shlex.quote(path)
+
+
 def read_ledger(request, current, values, members):
     """The ledger on disk, or on a machine whose install predates it, every
-    toolkit-owned value present now, in whichever form it was written."""
+    toolkit-owned value present now, in whichever form it was written.
+
+    A ledger that is there but will not read is not a machine that predates it:
+    rebuilding it would claim values the user set as the toolkit's."""
+    path = request["ledger"]
     try:
-        with open(request["ledger"], encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return (
-            {tuple(e["path"]): e["value"] for e in data["values"]},
-            {(tuple(e["path"]), fingerprint(e["value"])) for e in data["members"]},
+            {tuple(e["path"]): e["value"] for e in data["values"] if retirable(tuple(e["path"]))},
+            {(tuple(e["path"]), fingerprint(e["value"])) for e in data["members"] if tuple(e["path"]) in RETIRABLE_MEMBERS},
         )
-    except (OSError, ValueError, KeyError, TypeError):
+    except FileNotFoundError:
         pass
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        aside = os.path.join(request["backups"], "agent-toolkit-applied.json.unreadable-" + time.strftime("%Y%m%d-%H%M%S"))
+        home = request.get("home", "")
+        raise SettingsError(
+            "user",
+            "the ledger %s cannot be read (%s). Moving it aside lets the next install rebuild it"
+            % (shell_path(path, home), e),
+            "mkdir -p %s && mv %s %s" % (shell_path(request["backups"], home), shell_path(path, home), shell_path(aside, home)),
+        )
     if not (request.get("prev_root") or has_toolkit_wiring(current)):
         return {}, set()
     found_values = {p: get(current, p) for p in values if get(current, p) is not MISSING}
@@ -211,8 +244,8 @@ def merge(current, request):
 def merge_hooks(merged, wiring):
     """The toolkit's handlers are taken out of every event, including events it
     no longer wires, then its groups are appended. A foreign handler sharing a
-    group with one of ours keeps its group. An event that is not a list is left
-    alone rather than failing the whole merge."""
+    group with one of ours keeps its group. An event the toolkit does not wire is
+    left alone when it is not a list; one it wires fails the merge."""
     hooks = merged.get("hooks", MISSING)
     if hooks is MISSING:
         if not wiring:
@@ -244,7 +277,19 @@ def merge_hooks(merged, wiring):
 
 
 def render(settings):
-    return json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+    """allow_nan=False: Claude Code's parser rejects NaN, so a file holding it
+    would load no settings at all."""
+    return json.dumps(settings, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+
+
+def redacted(settings, desired):
+    """For a diff that is printed: env values carry tokens. The toolkit's own
+    stay readable."""
+    env = settings.get("env")
+    if not isinstance(env, dict):
+        return settings
+    own = desired.get("env", {})
+    return {**settings, "env": {k: (v if k in own else "<redacted>") for k, v in env.items()}}
 
 
 def read_bytes(path):
@@ -257,18 +302,33 @@ def read_bytes(path):
         raise SettingsError("user", "cannot read %s: %s" % (path, e.strerror))
 
 
-def parse(raw):
+def reject_constant(name):
+    raise ValueError("%s is not JSON" % name)
+
+
+def parse(raw, request):
     if raw is None or not raw.strip():
         return {}
     try:
-        return json.loads(raw)
+        return json.loads(raw, parse_constant=reject_constant)
     except ValueError as e:
-        raise SettingsError("user", "settings.json does not parse: %s" % e)
+        home, backups = request.get("home", ""), request["backups"]
+        newest = newest_backup(backups)
+        settings = shell_path(request["settings"], home)
+        if not newest:
+            raise SettingsError("user", "settings.json does not parse: %s" % e, "python3 -m json.tool %s" % settings)
+        broken = os.path.join(backups, "settings.json.broken-" + time.strftime("%Y%m%d-%H%M%S"))
+        raise SettingsError(
+            "user",
+            "settings.json does not parse: %s. The newest backup is from %s"
+            % (e, time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(newest)))),
+            "mv %s %s && cp %s %s" % (settings, shell_path(broken, home), shell_path(newest, home), settings),
+        )
 
 
 def newest_backup(backups):
     try:
-        names = [n for n in os.listdir(backups) if n.startswith("settings.json.")]
+        names = [n for n in os.listdir(backups) if n.startswith("settings.json.") and ".broken-" not in n]
     except OSError:
         return ""
     paths = [os.path.join(backups, n) for n in names]
@@ -276,8 +336,7 @@ def newest_backup(backups):
 
 
 def write_new(path, data, mode):
-    """A file that did not exist, created whole, so a backup never overwrites
-    another and a reader never sees half of one."""
+    """Created with O_EXCL, so a backup never overwrites another."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     with os.fdopen(fd, "wb") as f:
         f.write(data)
@@ -293,22 +352,24 @@ def backup(backups, raw):
             return path
         except FileExistsError:
             continue
-    raise OSError("no free backup name at " + base)
+    raise OSError(errno.EEXIST, "no free backup name", base)
 
 
-def stage(path, data):
+def stage(path, data, new_mode=None):
     """data in a temporary file beside path, carrying path's mode, ready to be
-    renamed over it."""
+    renamed over it. The temporary name keeps path's extension, so a deny rule
+    written for settings*.json covers it too."""
     directory = os.path.dirname(path)
     os.makedirs(directory, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", dir=directory)
+    stem, ext = os.path.splitext(os.path.basename(path))
+    fd, tmp = tempfile.mkstemp(prefix=stem + ".", suffix=ext, dir=directory)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         try:
             mode = os.stat(path).st_mode & 0o7777
         except OSError:
-            mode = 0o666 & ~current_umask()
+            mode = new_mode if new_mode is not None else 0o666 & ~current_umask()
         os.chmod(tmp, mode)
     except BaseException:
         os.unlink(tmp)
@@ -326,49 +387,70 @@ def replace(path, data):
     os.replace(stage(path, data), path)
 
 
+def write_failure(error, request):
+    target = error.filename or request["settings"]
+    kind = "user" if error.errno in USER_ERRNOS else "install"
+    return SettingsError(kind, "cannot write %s: %s" % (shell_path(target, request.get("home", "")), error.strerror or error))
+
+
 def run(request, write, read=read_bytes):
-    """One apply or plan. read is the only way this touches settings.json
-    before the rename, so a test can change the file between the merge and the
-    re-read, which is the one window a concurrent writer can land in."""
+    """One apply or plan. read is the only way this reads settings.json, so a
+    test can change the file between the merge and the re-read."""
     path = request["settings"]
     result = {"settings": "current", "ledger": "current", "restart": []}
     for _ in range(ATTEMPTS):
         before = read(path)
-        current = parse(before)
+        current = parse(before, request)
         merged, ledger, restart = merge(current, request)
+        try:
+            text = render(merged).encode("utf-8")
+        except ValueError as e:
+            raise SettingsError("user", "settings.json holds a value JSON cannot carry: %s" % e)
         changed = before is None or fingerprint(merged) != fingerprint(current)
         if not write:
             if changed:
-                old = render(current).splitlines(True) if before is not None else []
-                result.update(settings="would-write", restart=restart)
-                result["diff"] = "".join(difflib.unified_diff(old, render(merged).splitlines(True), path, path))
+                old = render(redacted(current, request["desired"])).splitlines(True) if before is not None else []
+                new = render(redacted(merged, request["desired"])).splitlines(True)
+                result.update(settings="would-write", restart=restart, diff="".join(difflib.unified_diff(old, new, path, path)))
+            if ledger_bytes(ledger) != read_bytes(request["ledger"]):
+                result["ledger"] = "would-write"
             return result
         if changed:
+            saved = staged = ""
             try:
-                staged = stage(path, render(merged).encode("utf-8"))
                 saved = backup(request["backups"], before) if before is not None else ""
+                staged = stage(path, text, new_mode=0o600)
             except OSError as e:
-                raise SettingsError("install", "cannot write %s: %s" % (path, e.strerror or e))
+                if saved:
+                    os.unlink(saved)
+                raise write_failure(e, request)
             if read(path) != before:
                 os.unlink(staged)
                 if saved:
                     os.unlink(saved)
                 continue
+            link = os.readlink(path) if os.path.islink(path) else ""
             try:
                 # A settings.json that is a symlink becomes a file: writing
                 # through the link would write outside ~/.claude.
                 os.replace(staged, path)
             except OSError as e:
                 os.unlink(staged)
-                raise SettingsError("install", "cannot write %s: %s" % (path, e.strerror))
+                raise write_failure(e, request)
             result.update(settings="written", backup=saved, restart=restart)
+            if link:
+                result["replaced_link"] = link
         write_ledger(request["ledger"], ledger, result)
         return result
     raise SettingsError("install", "settings.json changed on every re-read, so nothing was applied")
 
 
+def ledger_bytes(ledger):
+    return (json.dumps(ledger, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
 def write_ledger(path, ledger, result):
-    data = (json.dumps(ledger, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    data = ledger_bytes(ledger)
     try:
         if read_bytes(path) == data:
             return
@@ -384,9 +466,7 @@ def main():
     try:
         result = run(request, write=(mode == "apply"))
     except SettingsError as e:
-        result = {"settings": "failed", "kind": e.kind, "reason": str(e)}
-        if e.kind == "user":
-            result["backup"] = newest_backup(request["backups"])
+        result = {"settings": "failed", "kind": e.kind, "reason": str(e), "fix": e.fix}
     print(json.dumps(result, ensure_ascii=False))
 
 

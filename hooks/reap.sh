@@ -55,11 +55,16 @@ fi
 
 for e in "$reg"/*.json; do
   [ -e "$e" ] || continue
-  # Cleared first: an unreadable entry leaves eval a no-op, and the previous
-  # iteration's values would then be used to judge — and kill — this one.
+  # Cleared first, so a previous entry's values never judge this one.
   pid=""; start=""; owner=""; owner_start=""; session=""
-  eval "$(jq -r '@sh "pid=\(.pid // "") start=\(.start // "") owner=\(.owner // "")
-                     owner_start=\(.owner_start // "") session=\(.session // "")"' "$e" 2>/dev/null)" || continue
+  # An entry that will not parse may still be being written, so it is only
+  # dropped once it is a minute old.
+  if ! fields="$(jq -r '@sh "pid=\(.pid // "") start=\(.start // "") owner=\(.owner // "")
+                     owner_start=\(.owner_start // "") session=\(.session // "")"' "$e" 2>/dev/null)"; then
+    [ -n "$(find "$e" -mmin +1 2>/dev/null)" ] && rm -f "$e"
+    continue
+  fi
+  eval "$fields"
 
   # Gone, or the pid was recycled and now belongs to someone else: drop the
   # record, never signal.

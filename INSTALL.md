@@ -25,7 +25,7 @@ From the repo:
 
 ## 3. Do what it lists under Needs you
 
-Each fix is printed on a line of its own, to be copied whole. A person runs them. An agent hands them to the user exactly as printed and runs none of them.
+A person runs them. An agent hands them to the user exactly as printed and runs none of them.
 
 ## 4. Run it again
 
@@ -39,10 +39,10 @@ Or restart it, when the report says so. Sign in if asked.
 
 Only `~/.claude`, and Claude Code's plugins, which it fetches:
 
-- `~/.claude/agent-toolkit`, a link to the repo, and `~/.claude/agent-toolkit-run`, which every hook runs through
+- `~/.claude/agent-toolkit`, a link to the repo, and `~/.claude/agent-toolkit-run`, which every toolkit command in settings runs through
 - a link per skill in `~/.claude/skills`, and a copy per agent in `~/.claude/agents`
 - the toolkit's values in `~/.claude/settings.json`, with everything else kept and a backup in `~/.claude/backups` before each write
-- `~/.claude/CLAUDE.md`, which imports the repo's `CLAUDE.md`
+- `~/.claude/CLAUDE.md`, replaced after a backup by one that imports the repo's `CLAUDE.md`
 
 It never runs `sudo`, installs a system package, or sets your git identity. `./install.sh --dry-run` prints every change it would make and writes nothing.
 
@@ -50,13 +50,13 @@ It never runs `sudo`, installs a system package, or sets your git identity. `./i
 
 | Exit | `./install.sh` | `./install.sh --dry-run` |
 | ---- | -------------- | ------------------------ |
-| `0` | no required finding remains | a full install can finish on its own |
+| `0` | no required finding remains | a full install can end with no required finding on its own |
 | `1` | a required finding remains | a check of the repo fails, or a step needs you |
-| `2` | an unknown argument | an unknown argument |
+| `2` | arguments it does not accept | arguments it does not accept |
 
 ## Updating
 
-Once a new version is in the repo, such as after `git pull`, the next session start on the machine applies it and says when to restart. `./install.sh` applies it immediately.
+Once a new version is in the repo, the next session start on the machine applies it and says when to restart. `./install.sh` applies it immediately.
 
 ## Moving the repo
 

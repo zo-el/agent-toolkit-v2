@@ -2,14 +2,11 @@
 # Install the toolkit from the version directory this file sits in, and keep the
 # machine in step with it.
 #
-#   ./install.sh            apply everything, fetch plugins, print a report
-#   ./install.sh --dry-run  print every change a full install would make
-#   ./install.sh --sync     session start and on-edit: apply local state, print a
-#                           hook report
-#
-# Contract: documentation/specs/install.md. INSTALL.md is the guide.
+# Contract: documentation/specs/install.md.
 set -uo pipefail
-export PYTHONDONTWRITEBYTECODE=1
+# Hooks run in the session's project directory, and python puts the working
+# directory first on its import path: a project's own ast.py would run here.
+export PYTHONDONTWRITEBYTECODE=1 PYTHONSAFEPATH=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 CLAUDE_DIR="$HOME/.claude"
@@ -36,7 +33,7 @@ PLUGINS=(
 )
 
 # Every hook the toolkit wires, relative to the version directory. Each becomes a
-# launcher command; matcher "" means the event takes none.
+# launcher command; matcher "" writes the group with no matcher.
 #
 # Notification events (Notification, Stop) are deliberately absent: the
 # claude-notifications-go plugin owns them.
@@ -45,8 +42,7 @@ PLUGINS=(
 # has its stdout injected as context.
 #
 # The retro recorder is the mirror image: async on every event, so it can neither
-# block a turn nor inject its stdout. No single trigger is load-bearing, and
-# --interval is the whole scheduling mechanism.
+# block a turn nor inject its stdout.
 WIRING='[
   {"event":"SessionStart","matcher":"startup|resume|clear",
    "hooks":[{"entry":"install.sh --sync"}]},
@@ -84,9 +80,9 @@ def run($caller; $entry): "\"$HOME/.claude/agent-toolkit-run\" \($caller) \($ent
     # the task list this toolkit runs on cannot exist without them.
     CLAUDE_CODE_ENABLE_TODO_TOOLS: "1"
   },
-  # Sessions on this machine work on different projects. Cross-session
-  # messaging is on by default and governs the peer socket only, so an agent
-  # still messages main over SendMessage.
+  # Sessions on this machine work on different projects, and cross-session
+  # messaging is on by default. Both settings govern the peer socket only, so an
+  # agent still messages main over SendMessage.
   crossSessionInbound: "refuse",
   isolatePeerMachines: true,
   permissions: {
@@ -178,7 +174,6 @@ restart_reasons() {
   join ", " "${reasons[@]}"
 }
 
-# A path as a user would type it: under ~/ where it can be, quoted where needed.
 shq() {
   case "$1" in
     "" | *[!A-Za-z0-9_./+:@%=-]*) printf "'%s'" "${1//\'/\'\\\'\'}" ;;
@@ -197,19 +192,17 @@ install_command() {
 }
 
 # A write, or in a dry run only its description. A failed write is a finding
-# naming what did not apply. An empty description writes without reporting.
-act() { # description, command...
-  local what="$1" err
+# naming what did not apply. -q keeps a successful write out of the change list.
+act() { # [-q] description, command...
+  local quiet=0 what err
+  [ "$1" = -q ] && quiet=1 && shift
+  what="$1"
   shift
-  if [ "$MODE" = dry ]; then
-    [ -z "$what" ] || CHANGES+=("$what")
+  if [ "$MODE" = dry ] || err="$("$@" 2>&1)"; then
+    [ "$quiet" -eq 1 ] || CHANGES+=("$what")
     return 0
   fi
-  if err="$("$@" 2>&1)"; then
-    [ -z "$what" ] || CHANGES+=("$what")
-    return 0
-  fi
-  finding required install "did not apply: ${what:-a write inside ~/.claude}: $(printf '%s' "$err" | one_line)" "$(install_command)"
+  finding required install "did not apply: $what: $(printf '%s' "$err" | one_line)" "$(install_command)"
   return 1
 }
 
@@ -227,7 +220,7 @@ link_atomic() { # target, path
   local tmp
   tmp="$(dirname "$2")/.$(basename "$2").$$.link"
   rm -f "$tmp"
-  if ln -s "$1" "$tmp" && mv -T "$tmp" "$2"; then return 0; fi
+  if ln -sT "$1" "$tmp" && mv -T "$tmp" "$2"; then return 0; fi
   rm -f "$tmp"
   return 1
 }
@@ -282,7 +275,7 @@ package_line() { # requirements
 
 GH_LOGIN="gh auth login --hostname github.com --git-protocol ssh --web"
 
-# Returns 1 when jq or python3 is missing: nothing can be merged or verified.
+# Returns 1 when jq or python3 is missing.
 check_tools() {
   local missing=() stop=() rest=() t line
   for t in jq python3 git setsid gh; do have "$t" || missing+=("$t"); done
@@ -306,7 +299,7 @@ version_at_least() { # version, minimum
   [[ "$1" =~ ^[0-9]+(\.[0-9]+)*$ ]] && [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]
 }
 
-# Local reads only, so no timeout: the one here costs a tenth of a second a call.
+# Local reads only, so no timeout.
 claude_cli() { (cd "$HOME" && claude "$@" </dev/null 2>/dev/null); }
 
 check_claude() {
@@ -315,7 +308,11 @@ check_claude() {
     finding required user "claude is not on PATH, so the plugins are not installed" "curl -fsSL https://claude.ai/install.sh | bash"
     return 1
   fi
-  version="$(claude_cli --version | awk '{print $1; exit}')"
+  if ! version="$(claude_cli --version)"; then
+    finding required user "claude --version failed, so the plugins are not installed" "curl -fsSL https://claude.ai/install.sh | bash"
+    return 1
+  fi
+  version="$(awk '{print $1; exit}' <<<"$version")"
   if ! version_at_least "$version" "$MIN_CLAUDE"; then
     finding required user "claude ${version:-of an unknown version} is older than $MIN_CLAUDE, so the plugins are not installed" "claude update"
     return 1
@@ -345,12 +342,8 @@ git_identity() { (cd / && env -u GIT_DIR -u GIT_WORK_TREE git config --get "$1")
 # works. retro.py owns where the store lives and what a marker looks like, and a
 # second copy of either here would drift from it.
 check_retro() {
-  local problem
-  while IFS= read -r problem; do
-    [ -n "$problem" ] || continue
-    case "$MODE:$problem" in dry:*"since is missing"*) continue ;; esac
-    finding advisory user "the retro recorder: $problem"
-  done < <(python3 - "$ROOT/hooks" <<'PY' 2>/dev/null
+  local out problem
+  if ! out="$(python3 - "$ROOT/hooks" 2>&1 <<'PY'
 import os
 import sys
 
@@ -362,19 +355,29 @@ exec(compile(source.replace('if __name__ == "__main__":', "if False:"), "retro",
 try:
     with open(recorder["SINCE_PATH"]) as f:
         raw = f.read(64).strip()
-except OSError:
-    raw = None
-if raw is None:
+except FileNotFoundError:
     print("retro/since is missing, so nothing will be recorded until it is stamped")
-elif recorder["parse_iso"](raw) is None:
-    print("retro/since is not a timestamp (%r), so nothing is being recorded" % raw[:32])
+except (OSError, ValueError) as e:
+    print("retro/since cannot be read (%s), so nothing is being recorded" % e)
+else:
+    if recorder["parse_iso"](raw) is None:
+        print("retro/since is not a timestamp (%r), so nothing is being recorded" % raw[:32])
 
 if os.path.exists(recorder["DB_PATH"]):
     problem = recorder["store_problem"]()
     if recorder["open_store"](create=False) is None:
         print(problem)
 PY
-  )
+  )"; then
+    finding advisory toolkit "the retro recorder check did not run" "$ROOT/hooks/retro.py"$'\n'"$(printf '%s' "$out" | tail -1)"
+    return
+  fi
+  while IFS= read -r problem; do
+    [ -n "$problem" ] || continue
+    # A dry run already lists the marker it would stamp.
+    case "$MODE:$problem" in dry:*"since is missing"*) continue ;; esac
+    finding advisory user "the retro recorder is not recording" "$problem"
+  done <<<"$out"
 }
 
 # ── the version directory ────────────────────────────────────────────────────
@@ -383,31 +386,73 @@ wiring_entries() {
     '[.[].hooks[].entry | split(" ")[0]] + ["install.sh", $statusline] | unique[]' <<<"$WIRING"
 }
 
-# Root checks: nothing from this directory reaches the device unless they pass.
+# A script whose #! line cannot run exits 127 before doing anything, which
+# Claude Code treats as a hook that let the call through.
+cannot_start() { # path → the reason on stdout, or nothing
+  local first prog arg
+  IFS= read -r first <"$1" || true
+  case "$first" in
+    "#!"*) ;;
+    *) echo "it has no #! line" && return ;;
+  esac
+  [[ "$first" != *$'\r'* ]] || { echo "its #! line ends in a carriage return" && return; }
+  read -r prog arg _ <<<"${first#\#!}"
+  if [ "$prog" = /usr/bin/env ]; then
+    have "$arg" || echo "$arg, named on its #! line, is not on PATH"
+  else
+    [ -x "$prog" ] || echo "$prog, named on its #! line, is not executable"
+  fi
+}
+
+# Root checks: install writes nothing derived from this directory unless they pass.
 check_root() {
-  local before=${#F_SEV[@]} entry
+  local before=${#F_SEV[@]} entries entry reason out detail
+  if ! entries="$(wiring_entries)"; then
+    finding required toolkit "install.sh cannot read its own wiring" "$ROOT/install.sh"
+  fi
   while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
     if [ ! -f "$ROOT/$entry" ]; then
       finding required toolkit "$entry is missing from the version directory" "$ROOT/$entry"
     elif [ ! -x "$ROOT/$entry" ]; then
       finding required toolkit "$entry is not executable" "$ROOT/$entry"
+    elif reason="$(cannot_start "$ROOT/$entry")" && [ -n "$reason" ]; then
+      finding required toolkit "$entry cannot start: $reason" "$ROOT/$entry"
     fi
-  done < <(wiring_entries)
+  done <<<"$entries"
   for entry in hooks/launcher.sh hooks/lib/settings.py hooks/lib/version.py; do
     [ -f "$ROOT/$entry" ] || finding required toolkit "$entry is missing from the version directory" "$ROOT/$entry"
   done
-  local out detail
+  # A partly unpacked directory would otherwise retire every skill and agent.
+  [ -n "$(find "$ROOT/skills" -name SKILL.md -print -quit 2>/dev/null)" ] \
+    || finding required toolkit "skills/ holds no skill" "$ROOT/skills"
+  compgen -G "$ROOT/agents/*.md" >/dev/null || finding required toolkit "agents/ holds no agent" "$ROOT/agents"
+  check_gate
   if ! out="$(python_problems 2>&1)"; then
     finding required toolkit "the python checks did not run: $(printf '%s' "$out" | tail -1)" "$ROOT/install.sh"
   fi
-  while IFS=$'\t' read -r entry problem detail; do
-    [ -n "$detail" ] && finding required toolkit "$problem: $entry" "$ROOT/$entry"$'\n'"$detail"
+  while IFS=$'\t' read -r entry reason detail; do
+    [ -n "$detail" ] && finding required toolkit "$reason: $entry" "$ROOT/$entry"$'\n'"$detail"
   done <<<"$out"
   [ ${#F_SEV[@]} -eq "$before" ]
 }
 
-# Compiled in memory and imported with bytecode off, so a read-only directory is
-# checked exactly like a checkout and gains no __pycache__.
+# The approval gate, run before it goes live: the launcher must ask when the
+# toolkit is unreachable, and the guard must ask before a push. HOME points
+# nowhere, so neither can find or write anything.
+check_gate() {
+  local ask='"permissionDecision":"ask"' payload='{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}'
+  if [ -f "$ROOT/hooks/launcher.sh" ] && { ! sh -n "$ROOT/hooks/launcher.sh" 2>/dev/null ||
+    [[ "$(HOME=/nonexistent/agent-toolkit sh "$ROOT/hooks/launcher.sh" PreToolUse hooks/guard.sh </dev/null 2>/dev/null)" != *"$ask"* ]]; }; then
+    finding required toolkit "hooks/launcher.sh does not ask when the toolkit is unreachable" "$ROOT/hooks/launcher.sh"
+  fi
+  if [ -x "$ROOT/hooks/guard.sh" ] && [[ "$(HOME=/nonexistent/agent-toolkit "$ROOT/hooks/guard.sh" <<<"$payload" 2>/dev/null)" != *"$ask"* ]]; then
+    finding required toolkit "hooks/guard.sh does not ask before a push" "$ROOT/hooks/guard.sh"
+  fi
+}
+
+# Compiled in memory and imported with bytecode off, so the check writes nothing
+# into the root.
 python_problems() {
   python3 - "$ROOT" <<'PY'
 import ast
@@ -472,10 +517,14 @@ resolve() { (cd "$1" 2>/dev/null && pwd -P) || readlink "$1" 2>/dev/null || true
 
 # ── applying ─────────────────────────────────────────────────────────────────
 # Held on ~/.claude itself, so serialising applies writes no file of its own.
-# The lock belongs to fd 9, which outlives the python that took it.
+# The lock belongs to fd 9, which outlives the python that took it. Returns 1
+# when another apply held it past the deadline, 2 with LOCK_ERROR otherwise.
 take_lock() { # seconds
-  exec 9<"$CLAUDE_DIR" || return 1
-  python3 - "$1" <<'PY'
+  if ! { exec 9<"$CLAUDE_DIR"; } 2>/dev/null; then
+    LOCK_ERROR="~/.claude cannot be opened"
+    return 2
+  fi
+  LOCK_ERROR="$(python3 - "$1" 2>&1 <<'PY'
 import fcntl
 import sys
 import time
@@ -484,16 +533,20 @@ deadline = time.monotonic() + float(sys.argv[1])
 while True:
     try:
         fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        break
+        sys.exit(0)
     except BlockingIOError:
         if time.monotonic() >= deadline:
             sys.exit(1)
         time.sleep(0.05)
+    except OSError as e:
+        print(e.strerror or e)
+        sys.exit(2)
 PY
+  )"
 }
 
 apply_link() {
-  [ "$MODE" = full ] && [ "$PREV_ROOT" != "$ROOT" ] || return 0
+  [ "$MODE" != sync ] && [ "$PREV_ROOT" != "$ROOT" ] || return 0
   act "~/.claude/agent-toolkit → $ROOT${PREV_ROOT:+ (was $PREV_ROOT)}" link_atomic "$ROOT" "$STABLE"
 }
 
@@ -502,8 +555,7 @@ apply_launcher() {
   act "launcher ~/.claude/agent-toolkit-run" write_atomic "$LAUNCHER" 755 <"$ROOT/hooks/launcher.sh"
 }
 
-# Links the toolkit owns: into this version directory, the one it replaces, or
-# through the stable link. Anything else at a skill's name is the user's.
+# Anything else at a skill's name is the user's.
 toolkit_link() {
   case "$1" in
     "$ROOT"/skills/* | "$STABLE"/skills/*) return 0 ;;
@@ -547,15 +599,17 @@ apply_skills() {
 }
 
 skill_held() { # name
+  local saved
+  saved="$(home_path "$(backup_name "$BACKUPS/skills/$1")")"
   finding required user "skill $1 is not installed: ~/.claude/skills/$1 is not the toolkit's, and was left untouched" \
-    "mkdir -p ~/.claude/backups/skills && mv -T ~/.claude/skills/$(shq "$1") ~/.claude/backups/skills/$(shq "$1")"
+    "mkdir -p ~/.claude/backups/skills && mv -T ~/.claude/skills/$(shq "$1") $saved"
 }
 
 # Copied rather than linked, because the agents file watcher does not reliably
 # follow symlinks. The manifest names what the toolkit owns, so a retired agent
 # is removed without touching agents the user wrote.
 apply_agents() {
-  local a n names=() saved
+  local a n names=() owned=() saved
   for a in "$ROOT"/agents/*.md; do [ -f "$a" ] && names+=("$(basename "$a")"); done
   if [ ! -d "$AGENTS_DST" ]; then
     act "create ~/.claude/agents" mkdir -p "$AGENTS_DST" && RESTART+=("~/.claude/agents was created")
@@ -574,8 +628,13 @@ apply_agents() {
     fi
     act "copy agent $n" write_atomic "$AGENTS_DST/$n" 644 <"$ROOT/agents/$n"
   done
-  printf '%s\n' "${names[@]}" | cmp -s - "$MANIFEST" \
-    || act "" write_atomic "$MANIFEST" 644 < <(printf '%s\n' "${names[@]}")
+  # A name is the toolkit's once its copy landed, so a file whose backup failed
+  # stays the user's and is backed up on the next run.
+  for n in "${names[@]}"; do
+    if cmp -s "$ROOT/agents/$n" "$AGENTS_DST/$n" || grep -qxF "$n" "$MANIFEST" 2>/dev/null; then owned+=("$n"); fi
+  done
+  printf '%s\n' "${owned[@]}" | cmp -s - "$MANIFEST" \
+    || act -q "agent manifest ~/.claude/agents/.toolkit-agents" write_atomic "$MANIFEST" 644 < <(printf '%s\n' "${owned[@]}")
 }
 
 settings_request() {
@@ -592,7 +651,7 @@ settings_request() {
 }
 
 apply_settings() {
-  local request result state reason saved
+  local request result state reason fix saved shown lines
   if ! request="$(settings_request)"; then
     finding required toolkit "install.sh does not build its own settings" "$ROOT/install.sh"
     return
@@ -603,6 +662,7 @@ apply_settings() {
     return
   fi
   reason="$(jq -r '.reason // ""' <<<"$result")"
+  fix="$(jq -r '.fix // ""' <<<"$result")"
   saved="$(jq -r '.backup // ""' <<<"$result")"
   case "$state" in
     written)
@@ -610,52 +670,61 @@ apply_settings() {
       WROTE+=("settings.json${saved:+ (backup: $(home_path "$saved"))}")
       ;;
     would-write)
-      CHANGES+=("settings.json:"$'\n'"$(jq -r '.diff' <<<"$result" | sed 's/^/  /' | head -200)")
+      lines="$(jq -r '.diff' <<<"$result" | wc -l)"
+      shown="$(jq -r '.diff' <<<"$result" | head -200 | sed 's/^/  /')"
+      [ "$lines" -le 200 ] || shown+=$'\n'"  … $((lines - 200)) more lines"
+      CHANGES+=("settings.json:"$'\n'"$shown")
       ;;
     failed)
-      if [ "$(jq -r '.kind' <<<"$result")" = user ]; then
-        finding required user "settings.json was left untouched: $reason" \
-          "$([ -n "$saved" ] && echo "cp $(home_path "$saved") ~/.claude/settings.json" || echo "python3 -m json.tool ~/.claude/settings.json")"
-      else
-        finding required install "settings.json was not applied: $reason" "$(install_command)"
-      fi
+      case "$(jq -r '.kind' <<<"$result")" in
+        user) finding required user "settings.json was left untouched: $reason" "$fix" ;;
+        *) finding required install "settings.json was not applied: $reason" "${fix:-$(install_command)}" ;;
+      esac
       ;;
   esac
+  if [ "$(jq -r '.replaced_link // ""' <<<"$result")" != "" ]; then
+    finding advisory user "settings.json was a link to $(jq -r '.replaced_link' <<<"$result") and is now a file, so the link's target no longer receives changes"
+  fi
   while IFS= read -r reason; do
     case "$reason" in
       env) RESTART+=("env changed") ;;
       enabledPlugins) RESTART+=("plugins changed") ;;
     esac
   done < <(jq -r '.restart[]? // empty' <<<"$result")
-  if [ "$(jq -r '.ledger // ""' <<<"$result")" = failed ]; then
-    finding required install "the ledger was not written: $(jq -r '.ledger_reason' <<<"$result")" "$(install_command)"
-  fi
+  case "$(jq -r '.ledger // ""' <<<"$result")" in
+    failed) finding required install "the ledger was not written: $(jq -r '.ledger_reason' <<<"$result")" "$(install_command)" ;;
+    would-write) CHANGES+=("ledger ~/.claude/agent-toolkit-applied.json") ;;
+  esac
 }
 
 apply_pointer() {
-  local saved=""
+  local saved="" link=""
   pointer_content | cmp -s - "$POINTER" && return 0
   if [ -e "$POINTER" ]; then
     saved="$(backup_name "$BACKUPS/CLAUDE.md")"
-    act "" backup_to "$POINTER" "$saved" || return 0
+    act -q "back up ~/.claude/CLAUDE.md to $(home_path "$saved")" backup_to "$POINTER" "$saved" || return 0
   fi
+  [ -L "$POINTER" ] && link="$(readlink "$POINTER")"
   local what="~/.claude/CLAUDE.md imports ~/.claude/agent-toolkit/CLAUDE.md${saved:+ (backup: $(home_path "$saved"))}"
   if act "$what" write_atomic "$POINTER" 644 < <(pointer_content); then
     WROTE+=("$what")
     RESTART+=("~/.claude/CLAUDE.md changed")
+    [ -z "$link" ] || [ "$MODE" = dry ] \
+      || finding advisory user "~/.claude/CLAUDE.md was a link to $link and is now a file, so the link's target no longer receives changes"
   fi
 }
 
-# Stamped once, at the first install, and never rewritten: it is what keeps
-# every transcript written before this toolkit out of the retro data.
+# Stamped only when absent, never rewritten: it is what keeps every transcript
+# written before this toolkit out of the retro data.
 apply_retro_marker() {
   [ -f "$CLAUDE_DIR/retro/since" ] && return 0
   act "retro marker ~/.claude/retro/since" write_atomic "$CLAUDE_DIR/retro/since" 644 < <(date -u +%Y-%m-%dT%H:%M:%SZ)
 }
 
+# Settings name the launcher, so they wait on it.
 apply_local() {
   apply_link || return
-  apply_launcher
+  apply_launcher || return
   apply_skills
   apply_agents
   apply_settings
@@ -672,58 +741,81 @@ claude_fetch() {
 
 FAILED_PLUGINS=" "
 
+fetch_failure() { # exit status, output → Claude Code's own message
+  local message
+  [ "$1" -eq 124 ] && echo "it timed out after 600 seconds" && return
+  message="$(grep '^{' <<<"$2" | jq -r '.message // empty' 2>/dev/null)"
+  printf '%s' "${message:-$2}" | one_line
+}
+
+LISTING=""
+listing() { # [marketplace] → the JSON array in LISTING, or a finding and status 1
+  local args=(plugin "$@" list --json)
+  if LISTING="$(claude_cli "${args[@]}")" && jq -e 'type == "array"' <<<"$LISTING" >/dev/null 2>&1; then
+    return 0
+  fi
+  finding required install "claude ${args[*]} did not answer, so the plugins could not be checked" "$(install_command)"
+  return 1
+}
+
 fetch_plugins() {
-  local marketplaces spec id source market out message
-  marketplaces="$(claude_cli plugin marketplace list --json)"
+  local marketplaces plugins spec id source market out rc
+  listing marketplace || return
+  marketplaces="$LISTING"
   for spec in "${PLUGINS[@]}"; do
     id="${spec%% *}" source="${spec#* }" market="${spec%% *}"
     market="${market#*@}"
-    jq -e --arg m "$market" 'any(.[]; .name == $m)' <<<"$marketplaces" >/dev/null 2>&1 && continue
+    jq -e --arg m "$market" 'any(.[]; .name == $m)' <<<"$marketplaces" >/dev/null && continue
     if [ "$MODE" = dry ]; then
       CHANGES+=("register plugin marketplace $market from $source")
-    elif out="$(claude_fetch plugin marketplace add "$source" 2>&1)"; then
+      continue
+    fi
+    out="$(claude_fetch plugin marketplace add "$source" 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
       CHANGES+=("registered plugin marketplace $market")
     else
-      finding required install "plugin marketplace $market was not registered: $(printf '%s' "$out" | one_line)" "$(install_command)"
+      finding required install "plugin marketplace $market was not registered: $(fetch_failure "$rc" "$out")" "$(install_command)"
       FAILED_PLUGINS+="$id "
     fi
   done
-  local listing
-  listing="$(claude_cli plugin list --json)"
+  listing || return
+  plugins="$LISTING"
   for spec in "${PLUGINS[@]}"; do
     id="${spec%% *}"
     [[ "$FAILED_PLUGINS" == *" $id "* ]] && continue
-    jq -e --arg id "$id" 'any(.[]; .id == $id)' <<<"$listing" >/dev/null 2>&1 && continue
+    jq -e --arg id "$id" 'any(.[]; .id == $id)' <<<"$plugins" >/dev/null && continue
     if [ "$MODE" = dry ]; then
       CHANGES+=("install plugin $id")
-    elif out="$(claude_fetch plugin install "$id" --scope user --json 2>&1)"; then
+      continue
+    fi
+    out="$(claude_fetch plugin install "$id" --scope user --json 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
       CHANGES+=("installed plugin $id")
       RESTART+=("plugins changed")
     else
-      message="$(grep '^{' <<<"$out" | jq -r '.message // empty' 2>/dev/null)"
-      finding required install "plugin $id was not installed: $(printf '%s' "${message:-$out}" | one_line)" "$(install_command)"
+      finding required install "plugin $id was not installed: $(fetch_failure "$rc" "$out")" "$(install_command)"
       FAILED_PLUGINS+="$id "
     fi
   done
 }
 
 check_plugins() {
-  local listing spec id state
-  if ! listing="$(claude_cli plugin list --json)" || ! jq -e 'type == "array"' <<<"$listing" >/dev/null 2>&1; then
-    finding required install "claude plugin list --json did not answer, so the plugins could not be checked" "$(install_command)"
-    return
-  fi
+  local plugins spec id state
+  listing || return
+  plugins="$LISTING"
   for spec in "${PLUGINS[@]}"; do
     id="${spec%% *}"
     [[ "$FAILED_PLUGINS" == *" $id "* ]] && continue
-    state="$(jq -r --arg id "$id" 'first(.[] | select(.id == $id) | if .enabled then "enabled" else "disabled" end) // "missing"' <<<"$listing")"
+    state="$(jq -r --arg id "$id" 'first(.[] | select(.id == $id) | if .enabled then "enabled" else "disabled" end) // "missing"' <<<"$plugins")"
     case "$MODE:$state" in
       *:missing) finding required install "plugin $id is not installed" "$(install_command)" ;;
       dry:disabled | *:enabled) ;;
       *:disabled) finding required install "plugin $id is installed but not enabled" "$(install_command)" ;;
     esac
   done
-  check_notifications "$listing"
+  check_notifications "$plugins"
 }
 
 # The plugin picks its own config file, and says which through its own CLI. An
@@ -739,14 +831,24 @@ check_notifications() { # plugin listing
 }
 
 # ── version stamp ────────────────────────────────────────────────────────────
+# Written only while no required finding stands, so the status line never shows
+# a version as applied when it is not. Left alone when the link no longer points
+# here, since another install then owns it.
 apply_stamp() {
-  local version
-  [ "$MODE" != dry ] && [ "$(count required)" -eq 0 ] || return 0
-  version="$(python3 "$ROOT/hooks/lib/version.py" "$ROOT")" || return 0
-  if [ -n "$version" ]; then
-    [ "$(cat "$STAMP" 2>/dev/null)" = "$version" ] || act "version stamp $version" write_atomic "$STAMP" 644 <<<"$version"
-  elif [ -e "$STAMP" ]; then
-    act "version stamp removed: this version directory has no version" rm -f "$STAMP"
+  local out rc
+  [ "$MODE" = dry ] || [ "$(resolve "$STABLE")" = "$ROOT" ] || return 0
+  out="$(python3 "$ROOT/hooks/lib/version.py" "$ROOT" 2>&1)"
+  rc=$?
+  case "$rc" in
+    0) ;;
+    3) finding advisory install "git did not report the version in time, so the version stamp was left as it was" "$(install_command)" && return ;;
+    4) finding advisory user "git cannot read the version directory's history, so the version stamp was left as it was: $(printf '%s' "$out" | one_line)" && return ;;
+    *) finding advisory toolkit "hooks/lib/version.py failed, so the version stamp was left as it was" "$ROOT/hooks/lib/version.py"$'\n'"$(printf '%s' "$out" | tail -1)" && return ;;
+  esac
+  if [ -z "$out" ]; then
+    [ ! -e "$STAMP" ] || act "version stamp removed: this version directory has no version" rm -f "$STAMP"
+  elif [ "$(count required)" -eq 0 ] && [ "$(cat "$STAMP" 2>/dev/null)" != "$out" ]; then
+    act "version stamp $out" write_atomic "$STAMP" 644 <<<"$out"
   fi
 }
 
@@ -755,8 +857,8 @@ mark() { [ "$1" = required ] && printf '✗' || printf '!'; }
 
 plural() { [ "$1" -eq 1 ] && echo "$1 $2" || echo "$1 ${2}s"; }
 
-# Required findings first, then advisories. A fix shared by consecutive
-# findings, or a fix line already printed under the heading, is printed once.
+# A fix shared by consecutive findings, or a fix line already printed under the
+# heading, is printed once.
 report_group() { # who, heading
   local order=() i j sev line next seen=$'\n'
   for sev in required advisory; do
@@ -805,9 +907,8 @@ json_str() {
   printf '"%s"' "$s"
 }
 
-# Exactly one JSON object, or nothing when there is nothing to say. Claude Code
-# drops the plain stdout of a hook that exits non-zero, so this always exits 0.
-# A skill link applied cleanly is not reported, but still asks for a rescan.
+# Exactly one JSON object, or nothing when there is nothing to say. A skill link
+# applied cleanly is not reported, but at session start still asks for a rescan.
 report_hook() {
   local i required context="" message=() fixes names=() reload=0
   required="$(count required)"
@@ -819,7 +920,11 @@ report_hook() {
   context="agent-toolkit doctor:"
   for i in "${!F_SEV[@]}"; do
     mapfile -t fixes <<<"${F_FIX[i]}"
-    context+=$'\n'"$(mark "${F_SEV[i]}") ${F_TEXT[i]}.${F_FIX[i]:+ Fix (${F_WHO[i]}): $(join "; then " "${fixes[@]}")}"
+    if [ -n "${F_FIX[i]}" ]; then
+      context+=$'\n'"$(mark "${F_SEV[i]}") ${F_TEXT[i]}. Fix (${F_WHO[i]}): $(join "; then " "${fixes[@]}")"
+    else
+      context+=$'\n'"$(mark "${F_SEV[i]}") ${F_TEXT[i]}. Who acts: ${F_WHO[i]}"
+    fi
   done
   for i in "${WROTE[@]}"; do
     context+=$'\n'"wrote $i"
@@ -840,6 +945,8 @@ report_hook() {
   printf '}}\n'
 }
 
+# Claude Code drops the plain stdout of a hook that exits non-zero, so --sync
+# always exits 0.
 finish() {
   if [ "$MODE" = sync ]; then
     report_hook
@@ -855,8 +962,7 @@ finish() {
   exit 0
 }
 
-# The event a hook ran for, from its payload. Read without jq, which may be the
-# very thing missing.
+# Read without jq, which may be the very thing missing.
 hook_event() {
   local payload=""
   [ -t 0 ] || IFS= read -r -d '' -t 2 payload
@@ -881,6 +987,7 @@ main() {
     usage >&2
     exit 2
   fi
+  cd / || exit 1
 
   if [ "$MODE" = sync ]; then
     [ "$(resolve "$STABLE")" = "$ROOT" ] || exit 0
@@ -889,26 +996,38 @@ main() {
 
   check_tools || finish
   PREV_ROOT="$(resolve "$STABLE")"
-  local ready=0
+  local ready=0 err
   check_layout && check_root && ready=1
 
   if [ "$ready" -eq 1 ] && [ "$MODE" = dry ]; then
     apply_local
   elif [ "$ready" -eq 1 ]; then
-    if ! mkdir -p "$CLAUDE_DIR" 2>/dev/null; then
-      finding required install "~/.claude could not be created" "mkdir -p ~/.claude"
-      ready=0
-    elif ! take_lock "$([ "$MODE" = sync ] && echo 5 || echo 60)"; then
-      if [ "$MODE" = sync ]; then
-        finding advisory install "another install held the lock for 5 seconds, so this session start applied nothing" "$(install_command)"
-      else
-        finding required install "another install held the lock for a minute, so nothing was applied" "$(install_command)"
-      fi
-      ready=0
+    ready=0
+    if ! err="$(mkdir -p "$CLAUDE_DIR" 2>&1)"; then
+      finding required user "~/.claude cannot be created: $(printf '%s' "$err" | one_line)"
     else
-      apply_local
+      take_lock "$([ "$MODE" = sync ] && echo 5 || echo 60)"
+      case $? in
+        0)
+          # A full install may have moved the link while this waited for the lock.
+          PREV_ROOT="$(resolve "$STABLE")"
+          if [ "$MODE" = sync ] && [ "$PREV_ROOT" != "$ROOT" ]; then
+            exit 0
+          fi
+          ready=1
+          apply_local
+          ;;
+        1)
+          if [ "$MODE" = sync ]; then
+            finding advisory install "another install held the lock for 5 seconds, so this session start applied nothing" "$(install_command)"
+          else
+            finding required install "another install held the lock for a minute, so nothing was applied" "$(install_command)"
+          fi
+          ;;
+        *) finding required user "the apply lock on ~/.claude could not be taken, so nothing was applied: $LOCK_ERROR" ;;
+      esac
+      exec 9<&-
     fi
-    exec 9<&-
     have setsid && setsid "$ROOT/hooks/reap.sh" </dev/null >/dev/null 2>&1 &
   fi
 

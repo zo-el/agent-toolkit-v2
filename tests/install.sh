@@ -1,9 +1,8 @@
-# Installer cases, sourced by tests/run.sh after its helpers.
+# Installer cases, sourced by tests/run.sh after its helpers. tests/run.sh keeps
+# using $FAKE after this file.
 #
-# Every install runs against a fake HOME. claude, gh, ssh and ssh-add are stubs
-# that record their calls: a real claude would fetch plugins over the network
-# into the fake home. Each case builds the home it needs, so none depends on
-# what an earlier one left behind.
+# Every install runs against a fake HOME, with claude, gh, ssh and ssh-add
+# stubbed: a real claude would fetch plugins over the network into the fake home.
 
 echo "install.sh"
 
@@ -16,13 +15,16 @@ cat >"$STUBS/claude" <<'SH'
 #!/usr/bin/env bash
 # Plugin state lives outside the fake home, keyed by it, so a snapshot of a
 # home sees only what install wrote.
-state="$STUB_STATE/$(printf '%s' "$HOME" | md5sum | cut -c1-12)"
+state="$STUB_STATE/$(printf '%s' "$HOME" | cksum | cut -d' ' -f1)"
 mkdir -p "$state"
 touch "$state/markets" "$state/plugins"
 printf '%s|%s\n' "${CLAUDE_CODE_PLUGIN_PREFER_HTTPS:-}" "$*" >>"$CLAUDE_CALLS"
 case "$*" in
-  --version) echo "${CLAUDE_STUB_VERSION:-2.1.272} (Claude Code)" ;;
+  --version)
+    [ "${CLAUDE_STUB_FAIL:-}" = version ] && exit 1
+    echo "${CLAUDE_STUB_VERSION:-2.1.272} (Claude Code)" ;;
   "plugin marketplace list --json")
+    [ "${CLAUDE_STUB_FAIL:-}" = list ] && exit 1
     jq -Rn '[inputs | split(" ") | {name: .[0], source: "github", repo: .[1]}]' <"$state/markets" ;;
   "plugin list --json")
     jq -Rn --arg dir "$state/cache" \
@@ -161,8 +163,8 @@ inst "$ROOT" "$H"
 exit_is "a required finding for the user exits 1" 1
 same "a report of one user finding is its text and its fix" "$(printf '%s\n' 'Needs you' \
   "  ✗ skill toolkit is not installed: ~/.claude/skills/toolkit is not the toolkit's, and was left untouched" \
-  '    mkdir -p ~/.claude/backups/skills && mv -T ~/.claude/skills/toolkit ~/.claude/backups/skills/toolkit' '')" \
-  "$(block 'Needs you')" "got: $(block 'Needs you')"
+  '    mkdir -p ~/.claude/backups/skills && mv -T ~/.claude/skills/toolkit ~/.claude/backups/skills/toolkit.<time>' '')" \
+  "$(block 'Needs you' | sed -E 's/(skills\/toolkit)\.[0-9]{8}-[0-9]{6}(\.[0-9]+)?$/\1.<time>/')" "got: $(block 'Needs you')"
 check "the result line counts it" "✗ 1 required finding, 0 advisory" "$out"
 same "and a skill name the toolkit does not hold is left untouched" "$held_before" "$(snapshot "$H/.claude/skills/toolkit")"
 inst "$ROOT" "$H" --dry-run
@@ -229,8 +231,6 @@ check "linear matcher wired" "mcp__linear.*" "$(settings '[.hooks.PreToolUse[].m
 [ -z "$(settings '[.hooks[][].hooks[].command, .statusLine.command] | map(select(test("agent-toolkit-run") | not)) | .[] | select(. != "/usr/bin/true")')" ] \
   && ok "every toolkit command runs the launcher" || bad "every toolkit command runs the launcher" "$(settings .hooks)"
 
-# The recorder rides four events and no trigger is load-bearing, so all four
-# have to be there, and every one of them async.
 for want in SessionStart PreCompact UserPromptSubmit SessionEnd; do
   check "retro records on $want" "retro.py record" \
     "$(settings "[.hooks.$want[].hooks[] | select((.command // \"\") | test(\"retro\")) | .command] | join(\" \")")"
@@ -255,7 +255,6 @@ copied="$(ls "$FAKE/.claude/agents"/*.md 2>/dev/null | wc -l | tr -d ' ')"
 agents="$(ls "$ROOT/agents"/*.md | wc -l | tr -d ' ')"
 [ "$copied" = "$agents" ] && ok "all $agents agents copied" || bad "agents copied" "$copied of $agents"
 
-# Without sqlite3 the recorder is inert and everything else is unaffected.
 mkdir -p "$TMP/nosqlite"
 { printf '#!/bin/sh\ncase "$*" in *"import sqlite3"*) exit 1 ;; esac\nexec %s "$@"\n' \
   "$(command -v python3)"; } >"$TMP/nosqlite/python3"
@@ -278,8 +277,6 @@ inst "$ROOT" "$FAKE"
 [ -L "$FAKE/.claude/skills/mine-too" ] && ok "an unrelated skill link is kept" || bad "unrelated skill link kept" "removed"
 rm -f "$FAKE/.claude/skills/mine-too"
 
-# A retired agent is removed; one the user wrote is left alone; a file at a
-# toolkit agent's name that the manifest does not list is backed up, then replaced.
 touch "$FAKE/.claude/agents/mine.md" "$FAKE/.claude/agents/stale.md"
 echo "stale.md" >>"$FAKE/.claude/agents/.toolkit-agents"
 grep -vx developer.md "$FAKE/.claude/agents/.toolkit-agents" >"$TMP/manifest" && cp "$TMP/manifest" "$FAKE/.claude/agents/.toolkit-agents"
@@ -297,7 +294,7 @@ SYNC="$(command_for "$H" SessionStart install.sh)"
 hook "$H" "$SYNC" '{"hook_event_name":"SessionStart","source":"startup"}'
 [ "$rc" = 0 ] && [ -z "$out" ] && ok "a clean session start prints nothing" || bad "a clean session start prints nothing" "exit $rc: $out"
 
-rm -f "$STUB_STATE/$(printf '%s' "$H" | md5sum | cut -c1-12)/plugins"
+rm -f "$STUB_STATE/$(printf '%s' "$H" | cksum | cut -d' ' -f1)/plugins"
 hook "$H" "$SYNC" '{"hook_event_name":"SessionStart","source":"startup"}'
 exit_is "a required finding at session start still exits 0" 0
 json_is "and prints one SessionStart object with a message for the user" \
@@ -458,9 +455,10 @@ H="$(home sync)"
 inst "$ROOT" "$H"
 SYNC="$(command_for "$H" SessionStart install.sh)"
 jq 'del(.hooks.PreToolUse)' "$H/.claude/settings.json" >"$TMP/s" && cp "$TMP/s" "$H/.claude/settings.json"
-backups="$(ls "$H/.claude/backups" | wc -l)"
+backups="$(ls "$H/.claude/backups" | wc -l)" inode="$(stat -c %i "$H/.claude/settings.json")"
 hook "$H" "$SYNC" '{"hook_event_name":"SessionStart"}'
 check "session start restores deleted wiring" "hooks/guard.sh" "$(js "$H" '[.hooks.PreToolUse[].hooks[].command] | join(" ")')"
+[ "$(stat -c %i "$H/.claude/settings.json")" != "$inode" ] && ok "by a rename, not a rewrite in place" || bad "by a rename, not a rewrite in place" "same inode"
 [ "$(ls "$H/.claude/backups" | wc -l)" -gt "$backups" ] && ok "with a backup" || bad "with a backup" "no new backup"
 json_is "and tells the user" '.systemMessage == "agent-toolkit: Updated settings.json"'
 
@@ -495,8 +493,8 @@ second=$!
 wait "$first" "$second"
 jq -e '.hooks.PreToolUse | length == 2' "$H/.claude/settings.json" >/dev/null 2>&1 \
   && ok "two concurrent session starts end in one valid, current settings.json" || bad "two concurrent syncs" "$(cat "$H/.claude/settings.json")"
-[ -z "$(find "$H/.claude" -maxdepth 1 -name '.*' ! -name .claude)" ] \
-  && ok "and leave no temporary file behind" || bad "and leave no temporary file behind" "$(find "$H/.claude" -maxdepth 1 -name '.*')"
+[ -z "$(find "$H/.claude" -maxdepth 1 \( -name '.*' -o -name 'settings.*.json' \) ! -name .claude)" ] \
+  && ok "and leave no temporary file behind" || bad "and leave no temporary file behind" "$(ls -a "$H/.claude")"
 
 jq 'del(.hooks.PreToolUse)' "$H/.claude/settings.json" >"$TMP/s" && cp "$TMP/s" "$H/.claude/settings.json"
 id_before="$(file_id "$H/.claude/settings.json")"
@@ -550,7 +548,42 @@ inst "$ROOT" "$H"
 exit_is "a settings.json that does not parse exits 1" 1
 same "and is never written" "$id_before" "$(file_id "$H/.claude/settings.json")"
 check "the finding gives the reason and the newest backup" "settings.json does not parse" "$(block 'Needs you')"
-check "as a command" "cp ~/.claude/backups/settings.json." "$(block 'Needs you')"
+check "as a command that keeps the broken file" "mv ~/.claude/settings.json ~/.claude/backups/settings.json.broken-" "$(block 'Needs you')"
+check "before restoring the backup" "&& cp ~/.claude/backups/settings.json." "$(block 'Needs you')"
+
+printf '{"z": 1, "env": "not an object", "a": 2}\n' >"$H/.claude/settings.json"
+id_before="$(file_id "$H/.claude/settings.json")"
+inst "$ROOT" "$H"
+exit_is "a settings.json the merge cannot apply to exits 1" 1
+same "and is never written" "$id_before" "$(file_id "$H/.claude/settings.json")"
+check "the finding gives the reason" "settings.json was left untouched: env is not an object" "$out"
+[[ "$out" != *"cp ~/.claude/backups"* ]] && ok "and offers no restore that would discard the file" || bad "and offers no restore" "$out"
+
+printf '{"zebra": 1, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "/bin/true"}]}]}, "apple": 2, "mango": {"b": 1, "a": 2}}\n' >"$H/.claude/settings.json"
+inst "$ROOT" "$H"
+check "a write keeps foreign keys in the order they had" '["zebra","apple","mango"]' \
+  "$(js "$H" '[keys_unsorted[] | select(. == "zebra" or . == "apple" or . == "mango")] | tostring')"
+check "and the order inside a foreign value" '["b","a"]' "$(js "$H" '.mango | keys_unsorted | tostring')"
+check "and a foreign event ahead of the toolkit's" "Stop" "$(js "$H" '.hooks | keys_unsorted[0]')"
+
+cat >"$TMP/backups.py" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from lib.settings import backup
+
+first, second = backup(sys.argv[2], b"first"), backup(sys.argv[2], b"second")
+print(first != second, open(first, "rb").read() == b"first", open(second, "rb").read() == b"second")
+PY
+check "two settings backups in the same second never overwrite each other" "True True True" \
+  "$(python3 "$TMP/backups.py" "$ROOT/hooks" "$TMP/backup-race")"
+eval "$(sed -n '/^backup_name() {/,/^}/p' "$ROOT/install.sh")"
+mkdir -p "$TMP/backup-names"
+for second in 0 1; do touch "$TMP/backup-names/CLAUDE.md.$(date -d "+$second seconds" +%Y%m%d-%H%M%S)"; done
+case "$(backup_name "$TMP/backup-names/CLAUDE.md")" in
+  *.1) ok "a pointer or agent backup takes the next free name" ;;
+  *) bad "a pointer or agent backup takes the next free name" "$(backup_name "$TMP/backup-names/CLAUDE.md")" ;;
+esac
 
 # ── retiring what the toolkit stops setting ──────────────────────────────────
 EXTRA="$TMP/root-with-extras"
@@ -565,6 +598,8 @@ inst "$EXTRA" "$H"
 check "a version directory can add five kinds of toolkit-owned value" "[true,true,true,true,true]" "$(js "$H" "$five | tostring")"
 inst "$ROOT" "$H"
 check "and the next install from one without them removes all five" "[false,false,false,false,false]" "$(js "$H" "$five | tostring")"
+grep -q '|plugin uninstall' "$CLAUDE_CALLS" 2>/dev/null && bad "retiring a plugin entry uninstalls nothing" "$(cat "$CLAUDE_CALLS")" \
+  || ok "retiring a plugin entry uninstalls nothing"
 check "including the replaced version directory from the approved directories" "null" \
   "$(jq --arg x "$EXTRA" '.permissions.additionalDirectories | index($x)' "$H/.claude/settings.json")"
 
@@ -622,7 +657,8 @@ check "a value present when the ledger was bootstrapped counts as the toolkit's"
 # ── the previous generation ──────────────────────────────────────────────────
 # After installing over a v1 machine nothing v1 may still be wired. A leftover
 # skill or agent keeps instructing sessions from a generation whose rules no
-# longer hold. Names share no prefix, so no assertion matches one inside another.
+# longer hold. No v1 hook name appears inside a v2 command, so the substring
+# check cannot match the wrong one.
 V1="$TMP/old-checkout-v1"
 V1HOME="$(home machine-on-v1)"
 mkdir -p "$V1"/{hooks,agents} "$V1HOME/.claude"/{skills,agents}
@@ -764,6 +800,13 @@ hook "$H" "$(command_for "$H" SessionEnd reap.sh)" '{"hook_event_name":"SessionE
 [ "$rc" = 0 ] && [ -z "$out" ] && ok "any other event exits 0 with no output" || bad "any other event exits 0 with no output" "exit $rc: $out"
 inst "$TMP/moved-root" "$H"
 exit_is "a full install from the new location goes green" 0
+printf '{}' >"$TMP/hook.payload"
+HOME="$H" "$H/.claude/agent-toolkit-run" PreToolUse install.sh --dryrun <"$TMP/hook.payload" >/dev/null 2>&1
+rc=$?
+exit_is "the launcher passes the entry point's exit status through" 2
+hook "$H" '"$HOME/.claude/agent-toolkit-run" PreToolUse hooks/no-such-hook.sh' "$(bash_payload 'ls')"
+check "an entry point missing behind a good link is asked too" "ask" "$(decision "$out")"
+json_is "naming the entry point" '.hookSpecificOutput.permissionDecisionReason | test("hooks/no-such-hook.sh is missing or not executable")'
 check "and re-points the link" "$TMP/moved-root" "$(readlink "$H/.claude/agent-toolkit")"
 check "and drops the old location from the approved directories" "null" \
   "$(jq --arg v "$MOVABLE" '.permissions.additionalDirectories | index($v)' "$H/.claude/settings.json")"
@@ -792,6 +835,30 @@ kill -0 "$pid" 2>/dev/null && ok "install returns while the reaper is still wait
 for _ in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
 kill -0 "$pid" 2>/dev/null && { bad "and that process is gone within 5s" "pid $pid survived"; kill -KILL -- "-$pid"; } || ok "and that process is gone within 5s"
 
+# ── a write that fails ───────────────────────────────────────────────────────
+# Root writes into a read-only directory regardless, so this is skipped there.
+if [ "$(id -u)" -ne 0 ]; then
+  H="$(home write-fails)"
+  inst "$ROOT" "$H"
+  rm -f "$H/.claude/agent-toolkit-version" "$H/.claude/skills/toolkit"
+  printf 'edited\n' >"$H/.claude/agents/developer.md"
+  chmod a-w "$H/.claude/agents"
+  inst "$ROOT" "$H"
+  chmod u+w "$H/.claude/agents"
+  exit_is "a write inside ~/.claude that fails exits 1" 1
+  check "and the report names what did not apply" "✗ did not apply: copy agent developer.md" "$(block 'Run install again')"
+  [ -L "$H/.claude/skills/toolkit" ] && ok "while the steps before it stay applied" || bad "while the steps before it stay applied" "the skill link was not restored"
+  [ ! -e "$H/.claude/agent-toolkit-version" ] && ok "and no version stamp is written" || bad "and no version stamp is written" "stamped"
+fi
+
+H="$(home stamp-with-finding)"
+UNVERSIONED="$TMP/unversioned-root"
+copy_root "$UNVERSIONED"
+printf 'v3·abc1234\n' >"$H/.claude/agent-toolkit-version"
+out="$(HOME="$H" CLAUDE_STUB_VERSION=2.1.1 "$UNVERSIONED/install.sh" 2>&1)"
+[ ! -e "$H/.claude/agent-toolkit-version" ] && ok "a root with no version removes the stamp even while a required finding stands" \
+  || bad "a root with no version removes the stamp even while a required finding stands" "$(cat "$H/.claude/agent-toolkit-version")"
+
 # ── layout ───────────────────────────────────────────────────────────────────
 H="$(home at-stable-path)"
 copy_root "$H/.claude/agent-toolkit"
@@ -810,14 +877,15 @@ check "and is left pointing where it did" "$TMP/their-backlog" "$(readlink "$H/.
 check "while the other skills still install" "$ROOT/skills/toolkit" "$(readlink "$H/.claude/skills/toolkit")"
 
 # ── requirements ─────────────────────────────────────────────────────────────
-# A PATH holding every tool on this one except the ones a case takes away.
-FARM="$TMP/farm"
-python3 - "$FARM" "$PATH" "$STUBS" <<'PY'
+# A PATH holding every tool on this one except jq, the package managers, sudo,
+# claude, gh, ssh, ssh-add and any named here. A scenario adds tools back.
+make_farm() { # directory, further tools to leave out
+  python3 - "$1" "$PATH" "$STUBS" "${@:2}" <<'PY'
 import os
 import sys
 
-farm, path, stubs = sys.argv[1:]
-taken = {"jq", "apt-get", "dnf", "pacman", "sudo", "claude", "gh", "ssh", "ssh-add"}
+farm, path, stubs = sys.argv[1:4]
+taken = {"jq", "apt-get", "dnf", "pacman", "sudo", "claude", "gh", "ssh", "ssh-add", *sys.argv[4:]}
 os.makedirs(farm, exist_ok=True)
 for folder in path.split(os.pathsep):
     if not os.path.isdir(folder) or os.path.realpath(folder) == os.path.realpath(stubs):
@@ -828,7 +896,10 @@ for folder in path.split(os.pathsep):
             continue
         os.symlink(source, target)
 PY
-scenario() { # name, tools… → a PATH over the farm: a recording stub per tool, the real one for =tool
+}
+FARM="$TMP/farm"
+make_farm "$FARM"
+scenario() { # name, tools… → a PATH over the farm: a recording stub per tool, the test PATH's own for =tool
   local dir="$TMP/scenario-$1" tool
   rm -rf "$dir"
   mkdir -p "$dir"
@@ -841,7 +912,7 @@ scenario() { # name, tools… → a PATH over the farm: a recording stub per too
         ;;
     esac
   done
-  printf '%s:%s' "$dir" "$FARM"
+  printf '%s:%s' "$dir" "${SCENARIO_FARM:-$FARM}"
 }
 H="$(home no-jq)"
 before="$(snapshot "$H")"
@@ -890,6 +961,20 @@ check "with no ssh-agent the advisory gives the fix" "$(printf '! no ssh-agent h
 exit_is "without changing the exit code" 0
 grep -q '^ssh ' "$SSH_CALLS" 2>/dev/null && bad "and nothing touches the network" "$(cat "$SSH_CALLS")" || ok "and nothing touches the network"
 
+H="$(home no-git)"
+make_farm "$TMP/farm-no-git" git
+out="$(HOME="$H" PATH="$(SCENARIO_FARM="$TMP/farm-no-git" scenario no-git apt-get =claude =jq =gh =ssh-add)" "$ROOT/install.sh" 2>&1)"
+rc=$?
+check "without git the finding is required, with the package line" "$(printf '✗ not on PATH: git\n    sudo apt-get install -y git')" "$out"
+exit_is "and exits 1" 1
+check "while everything local still applies" "agent-toolkit-run" "$(js "$H" '.statusLine.command')"
+
+H="$(home gh-no-token)"
+out="$(HOME="$H" GH_STUB_RC=1 "$ROOT/install.sh" 2>&1)"
+rc=$?
+check "a gh with no token for github.com gets the login line" "$(printf '! gh holds no token for github.com, so PR and release flows fail\n    gh auth login --hostname github.com --git-protocol ssh --web')" "$out"
+exit_is "as an advisory" 0
+
 H="$(home no-gh)"
 out="$(HOME="$H" PATH="$(scenario no-gh apt-get =claude =jq =ssh-add)" "$ROOT/install.sh" 2>&1)"
 check "without gh the package line comes before the login" "$(printf '    sudo apt-get install -y gh\n    gh auth login --hostname github.com --git-protocol ssh --web')" "$out"
@@ -908,7 +993,7 @@ inst "$ROOT" "$H" --dry-run
 [ -z "$(grep -E '\|plugin (marketplace add|install) ' "$CLAUDE_CALLS")" ] && ok "--sync and --dry-run fetch nothing" || bad "--sync and --dry-run fetch nothing" "$(cat "$CLAUDE_CALLS")"
 
 H="$(home old-source)"
-state="$STUB_STATE/$(printf '%s' "$H" | md5sum | cut -c1-12)"
+state="$STUB_STATE/$(printf '%s' "$H" | cksum | cut -d' ' -f1)"
 mkdir -p "$state"
 echo "claude-notifications-go 777genius/claude-notifications-go" >"$state/markets"
 : >"$CLAUDE_CALLS"
@@ -935,3 +1020,225 @@ inst "$ROOT" "$H"
 check "a config that notifies for subagents is an advisory naming the file" \
   "notifications.suppressForSubagents is false in ~/.config/agent-notifications/config.json" "$out"
 exit_is "and does not fail the install" 0
+
+# ── failure paths ────────────────────────────────────────────────────────────
+# A version directory whose gate would not hold never goes live.
+GATELESS="$TMP/gateless-root"
+copy_root "$GATELESS"
+: >"$GATELESS/hooks/launcher.sh"
+H="$(home gateless)"
+inst "$GATELESS" "$H"
+exit_is "a launcher that would not ask fails the root checks" 1
+check "naming it" "✗ hooks/launcher.sh does not ask when the toolkit is unreachable" "$out"
+copy_root "$GATELESS"
+sed -i '0,/^set -uo pipefail$/s//set -uo pipefail\nexit 0/' "$GATELESS/hooks/guard.sh"
+inst "$GATELESS" "$H"
+check "a guard that would not ask before a push fails them too" "✗ hooks/guard.sh does not ask before a push" "$out"
+copy_root "$GATELESS"
+sed -i '1s/$/\r/' "$GATELESS/hooks/guard.sh"
+inst "$GATELESS" "$H"
+check "an entry point whose #! line cannot run fails them" "✗ hooks/guard.sh cannot start: its #! line ends in a carriage return" "$out"
+copy_root "$GATELESS"
+rm -f "$GATELESS"/agents/*.md
+H="$(home no-agents)"
+inst "$ROOT" "$H"
+before="$(snapshot "$H")"
+inst "$GATELESS" "$H"
+exit_is "a version directory holding no agent fails them" 1
+same "rather than retiring every agent" "$before" "$(snapshot "$H")"
+
+# The launcher never lets a call through unasked, whatever the guard does.
+H="$(home unstartable)"
+mkdir -p "$TMP/unstartable/hooks"
+printf '#!/nonexistent/interpreter\n' >"$TMP/unstartable/hooks/guard.sh"
+printf '#!/bin/sh\nexit 1\n' >"$TMP/unstartable/hooks/crash.sh"
+chmod +x "$TMP/unstartable/hooks/guard.sh" "$TMP/unstartable/hooks/crash.sh"
+ln -s "$TMP/unstartable" "$H/.claude/agent-toolkit"
+install -m 755 "$ROOT/hooks/launcher.sh" "$H/.claude/agent-toolkit-run"
+hook "$H" '"$HOME/.claude/agent-toolkit-run" PreToolUse hooks/guard.sh' "$(bash_payload 'ls')"
+check "a guard that cannot start is asked" "ask" "$(decision "$out")"
+hook "$H" '"$HOME/.claude/agent-toolkit-run" PreToolUse hooks/crash.sh' "$(bash_payload 'ls')"
+check "and so is a guard that crashes" "ask" "$(decision "$out")"
+hook "$H" '"$HOME/.claude/agent-toolkit-run" PreToolUse' "$(bash_payload 'ls')"
+check "and a command that names no entry point" "ask" "$(decision "$out")"
+
+# Settings name the launcher, so a launcher that did not land holds them back.
+H="$(home launcher-blocked)"
+inst "$ROOT" "$H"
+rm -f "$H/.claude/agent-toolkit-run"
+mkdir "$H/.claude/agent-toolkit-run"
+jq 'del(.hooks.PreToolUse)' "$H/.claude/settings.json" >"$TMP/s" && cp "$TMP/s" "$H/.claude/settings.json"
+id_before="$(file_id "$H/.claude/settings.json")"
+inst "$ROOT" "$H"
+exit_is "a launcher that cannot be written exits 1" 1
+same "and settings are not rewired to it" "$id_before" "$(file_id "$H/.claude/settings.json")"
+check "naming what did not apply" "did not apply: launcher ~/.claude/agent-toolkit-run" "$out"
+
+# A session start queued behind an install that moves the link applies nothing
+# once it gets the lock.
+H="$(home queued)"
+QUEUED_X="$TMP/queued-x" QUEUED_Y="$TMP/queued-y"
+copy_root "$QUEUED_X"
+copy_root "$QUEUED_Y"
+inst "$QUEUED_Y" "$H"
+ln -sfn "$QUEUED_X" "$H/.claude/agent-toolkit"
+lock_holder "$H"
+printf '{"hook_event_name":"SessionStart"}' >"$TMP/queued.payload"
+HOME="$H" "$QUEUED_X/install.sh" --sync <"$TMP/queued.payload" >"$TMP/queued.out" 2>&1 &
+queued=$!
+sleep 1.5
+ln -sfn "$QUEUED_Y" "$H/.claude/agent-toolkit"
+before="$(snapshot "$H")"
+kill "$holder" 2>/dev/null
+wait "$holder" 2>/dev/null
+wait "$queued"
+same "a session start that finds the link moved once it holds the lock applies nothing" "$before" "$(snapshot "$H")"
+[ ! -s "$TMP/queued.out" ] && ok "and prints nothing" || bad "and prints nothing" "$(cat "$TMP/queued.out")"
+
+H="$(home dry-move)"
+inst "$ROOT" "$H"
+MOVED="$TMP/dry-moved-root"
+copy_root "$MOVED"
+inst "$MOVED" "$H" --dry-run
+check "a dry run from a new location shows the link move" "~/.claude/agent-toolkit → $MOVED (was $ROOT)" "$out"
+check "and the stamp it would remove" "version stamp removed" "$out"
+
+# An agent file whose backup failed stays the user's.
+H="$(home agent-backup-fails)"
+inst "$ROOT" "$H"
+grep -vx developer.md "$H/.claude/agents/.toolkit-agents" >"$TMP/manifest" && cp "$TMP/manifest" "$H/.claude/agents/.toolkit-agents"
+printf 'my own developer\n' >"$H/.claude/agents/developer.md"
+rm -rf "$H/.claude/backups"
+printf 'not a directory\n' >"$H/.claude/backups"
+inst "$ROOT" "$H"
+inst "$ROOT" "$H"
+grep -qx 'my own developer' "$H/.claude/agents/developer.md" \
+  && ok "a user's agent whose backup failed is not replaced on the next run" || bad "a user's agent whose backup failed is not replaced" "replaced"
+rm -f "$H/.claude/backups"
+inst "$ROOT" "$H"
+grep -qx 'my own developer' "$H"/.claude/backups/agents/developer.md.* 2>/dev/null \
+  && ok "and is backed up once the backup can be taken" || bad "and is backed up once the backup can be taken" "no backup"
+
+# A settings backup that cannot be taken leaves no copy of settings behind.
+H="$(home backups-blocked)"
+inst "$ROOT" "$H"
+jq 'del(.hooks.PreToolUse)' "$H/.claude/settings.json" >"$TMP/s" && cp "$TMP/s" "$H/.claude/settings.json"
+rm -rf "$H/.claude/backups"
+printf 'not a directory\n' >"$H/.claude/backups"
+inst "$ROOT" "$H"
+check "a settings backup that cannot be taken names the backups path" "cannot write ~/.claude/backups" "$out"
+[ -z "$(find "$H/.claude" -maxdepth 1 -name 'settings.*.json')" ] \
+  && ok "and leaves no staged copy of settings" || bad "and leaves no staged copy of settings" "$(ls -a "$H/.claude")"
+
+H="$(home nan)"
+printf '{"cleanupPeriodDays": NaN}\n' >"$H/.claude/settings.json"
+id_before="$(file_id "$H/.claude/settings.json")"
+inst "$ROOT" "$H"
+check "NaN, which Claude Code cannot parse, does not parse here either" "settings.json does not parse" "$out"
+same "and the file is left untouched" "$id_before" "$(file_id "$H/.claude/settings.json")"
+
+H="$(home linked-settings)"
+mkdir -p "$TMP/dotfiles"
+printf '{"theme":"dark"}\n' >"$TMP/dotfiles/settings.json"
+printf 'mine\n' >"$TMP/dotfiles/CLAUDE.md"
+ln -s "$TMP/dotfiles/settings.json" "$H/.claude/settings.json"
+ln -s "$TMP/dotfiles/CLAUDE.md" "$H/.claude/CLAUDE.md"
+inst "$ROOT" "$H"
+check "a settings.json that was a link says it is now a file" "settings.json was a link to $TMP/dotfiles/settings.json and is now a file" "$out"
+check "and so does a pointer that was one" "~/.claude/CLAUDE.md was a link to $TMP/dotfiles/CLAUDE.md and is now a file" "$out"
+
+# A project's own module never runs inside a session start.
+H="$(home cwd-imports)"
+inst "$ROOT" "$H"
+HOSTILE="$TMP/hostile-project"
+mkdir -p "$HOSTILE"
+for module in ast sqlite3 importlib traceback fcntl json; do
+  printf 'open(%s, "w").close()\n' "'$TMP/imported-$module'" >"$HOSTILE/$module.py"
+done
+cd "$HOSTILE" || exit 1
+hook "$H" "$(command_for "$H" SessionStart install.sh)" '{"hook_event_name":"SessionStart"}'
+cd "$ROOT" || exit 1
+[ -z "$(ls "$TMP"/imported-* 2>/dev/null)" ] && ok "a project's own ast.py or sqlite3.py never runs at session start" \
+  || bad "a project's own module never runs at session start" "$(ls "$TMP"/imported-*)"
+[ -z "$out" ] && ok "and the session start stays clean" || bad "and the session start stays clean" "$out"
+
+if [ "$(id -u)" -ne 0 ]; then
+  H="$(home lock-error)"
+  inst "$ROOT" "$H"
+  chmod 0300 "$H/.claude"
+  inst "$ROOT" "$H"
+  chmod 0755 "$H/.claude"
+  exit_is "a lock that cannot be taken for another reason exits 1" 1
+  check "and says why, not that another install held it" \
+    "the apply lock on ~/.claude could not be taken, so nothing was applied: ~/.claude cannot be opened" "$out"
+fi
+
+H="$(home corrupt-ledger)"
+inst "$ROOT" "$H"
+head -c 40 "$H/.claude/agent-toolkit-applied.json" >"$TMP/ledger" && cp "$TMP/ledger" "$H/.claude/agent-toolkit-applied.json"
+jq 'del(.hooks.PreToolUse)' "$H/.claude/settings.json" >"$TMP/s" && cp "$TMP/s" "$H/.claude/settings.json"
+id_before="$(file_id "$H/.claude/settings.json")"
+inst "$ROOT" "$H"
+exit_is "a ledger that will not read exits 1" 1
+same "and settings are left untouched rather than the ledger rebuilt" "$id_before" "$(file_id "$H/.claude/settings.json")"
+fix="$(block 'Needs you' | grep -F 'agent-toolkit-applied.json.unreadable-' | sed 's/^ *//')"
+check "with a fix that moves it aside" "mv ~/.claude/agent-toolkit-applied.json ~/.claude/backups/agent-toolkit-applied.json.unreadable-" "$fix"
+HOME="$H" bash -c "$fix" && inst "$ROOT" "$H"
+exit_is "and after that fix, install goes green" 0
+
+H="$(home crafted-ledger)"
+inst "$ROOT" "$H"
+jq '.permissions.allow = ["Bash(npm test)"] | .sandbox = {"enabled": true}' "$H/.claude/settings.json" >"$TMP/s" && cp "$TMP/s" "$H/.claude/settings.json"
+jq '.values += [{"path": ["sandbox"], "value": {"enabled": true}}] | .members += [{"path": ["permissions", "allow"], "value": "Bash(npm test)"}]' \
+  "$H/.claude/agent-toolkit-applied.json" >"$TMP/ledger" && cp "$TMP/ledger" "$H/.claude/agent-toolkit-applied.json"
+inst "$ROOT" "$H"
+check "a ledger naming a value the toolkit never sets cannot remove it" '["Bash(npm test)"] true' \
+  "$(js "$H" '(.permissions.allow | tostring) + " " + (.sandbox.enabled | tostring)')"
+
+H="$(home dubious-git)"
+inst "$ROOT" "$H"
+stamp="$(cat "$H/.claude/agent-toolkit-version")"
+mkdir -p "$TMP/dubious"
+printf '#!/bin/sh\ncase "$*" in *--show-toplevel*) echo "fatal: detected dubious ownership in repository" >&2; exit 128 ;; esac\nexec %s "$@"\n' \
+  "$(command -v git)" >"$TMP/dubious/git"
+chmod +x "$TMP/dubious/git"
+out="$(HOME="$H" PATH="$TMP/dubious:$PATH" "$ROOT/install.sh" 2>&1)"
+rc=$?
+check "a checkout git refuses to read keeps its stamp" "$stamp" "$(cat "$H/.claude/agent-toolkit-version" 2>/dev/null)"
+check "and says why" "git cannot read the version directory's history, so the version stamp was left as it was: fatal: detected dubious ownership" "$out"
+exit_is "as an advisory" 0
+
+H="$(home since-bytes)"
+inst "$ROOT" "$H"
+printf '\377\376\n' >"$H/.claude/retro/since"
+hook "$H" "$(command_for "$H" SessionStart install.sh)" '{"hook_event_name":"SessionStart"}'
+json_is "a retro marker that will not decode is reported with who acts and the recorder's reason" \
+  '.hookSpecificOutput.additionalContext | test("! the retro recorder is not recording. Fix \\(user\\): retro/since cannot be read")'
+
+H="$(home reap-partial)"
+mkdir -p "$H/.claude/bg-procs"
+printf '{"pid": 12' >"$H/.claude/bg-procs/424242.json"
+printf '{"hook_event_name":"SessionEnd","session_id":"x"}' | HOME="$H" "$ROOT/hooks/reap.sh"
+[ -e "$H/.claude/bg-procs/424242.json" ] && ok "a registry entry still being written is left for its writer" || bad "a registry entry still being written is left" "removed"
+touch -d '5 minutes ago' "$H/.claude/bg-procs/424242.json"
+printf '{"hook_event_name":"SessionEnd","session_id":"x"}' | HOME="$H" "$ROOT/hooks/reap.sh"
+[ ! -e "$H/.claude/bg-procs/424242.json" ] && ok "and dropped once it is old enough to be abandoned" || bad "and dropped once abandoned" "still there"
+
+H="$(home list-fails)"
+: >"$CLAUDE_CALLS"
+out="$(HOME="$H" CLAUDE_STUB_FAIL=list "$ROOT/install.sh" 2>&1)"
+check "a plugin listing that does not answer is a finding" "claude plugin marketplace list --json did not answer" "$out"
+grep -q '|plugin marketplace add' "$CLAUDE_CALLS" && bad "and nothing is fetched on a guess" "$(cat "$CLAUDE_CALLS")" || ok "and nothing is fetched on a guess"
+
+H="$(home claude-crashes)"
+out="$(HOME="$H" CLAUDE_STUB_FAIL=version "$ROOT/install.sh" 2>&1)"
+check "a claude whose --version fails is not called outdated" "claude --version failed" "$out"
+
+H="$(home dry-secrets)"
+python3 -c 'import json, sys
+hooks = [{"hooks": [{"type": "command", "command": "~/.claude/agent-toolkit/hooks/old%d.sh" % i}]} for i in range(60)]
+print(json.dumps({"env": {"SECRET_TOKEN": "sk-test-canary-1234"}, "hooks": {"Stop": hooks}}, indent=2))' >"$H/.claude/settings.json"
+inst "$ROOT" "$H" --dry-run
+[[ "$out" != *sk-test-canary* ]] && ok "a dry run never prints an env value that is not the toolkit's" || bad "a dry run never prints a foreign env value" "printed it"
+check "and says it hid it" '"SECRET_TOKEN": "<redacted>"' "$out"
+check "and says when the diff is cut" "more lines" "$out"

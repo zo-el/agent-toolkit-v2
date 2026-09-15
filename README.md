@@ -10,8 +10,6 @@ The session is the CTO: it plans, delegates, verifies, and talks to me. Agents d
 
 Follow [`INSTALL.md`](INSTALL.md).
 
-The installer also installs the two plugins the toolkit relies on: `pr-review-toolkit`, whose agents are the review gates, and [claude-notifications-go](https://github.com/777genius/agent-notifications), which fires when the main agent finishes or needs you and stays quiet for subagents.
-
 ## What's here
 
 | | |
@@ -95,4 +93,4 @@ A segment with nothing to say takes no width, so the line stays short when littl
 - **`⏱ 63% 2h13m · 41% 3d2h`** — how much of each rate-limit window is used, and how long until it resets. The window's own length is deliberately not shown; a fixed `5h` label says nothing you can act on. Falls back to `5h` / `7d` labels only when the payload carries no reset time, since two bare percentages wouldn't say which is which.
 - **`☰ 2/5`** — tasks done out of open, from this session's own list. The platform clears the whole list once every task completes, so this only ever shows live work. A `?` means part of the list would not read, and the count is of what did; green is kept for a whole list with nothing left open.
 - **`⎇ main* #42`** — branch, dirty marker, and the open PR for it, coloured by review state.
-- **`⬡ v<count>·<sha>`**: the "are my changes applied?" light. A `⚠` means the installed version directory has moved past the last install; a dim `?` means it could not be verified.
+- **`⬡ v<count>·<sha>`**: the "are my changes applied?" light. A `⚠` means the installed version directory is not at the version last applied; a dim `?` means that could not be verified.

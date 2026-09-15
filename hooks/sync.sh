@@ -10,8 +10,8 @@ fields="$(jq -r '[.hook_event_name // "PostToolUse", .tool_input.file_path // ""
 fp="$(jq -r '.[1]' <<<"$fields")"
 [ -n "$fp" ] || exit 0
 
-# install.sh shapes its report for the event, so the event goes on with it. The
-# rest of the payload stays here: a Write carries the whole file.
+# install.sh --sync shapes its report by event, so only the event is passed on:
+# a Write payload carries the whole file.
 case "$(realpath -m -- "$fp" 2>/dev/null || printf '%s' "$fp")" in
   "$root"/skills/* | "$root"/agents/*)
     exec "$root/install.sh" --sync <<<"$(jq -c '{hook_event_name: .[0]}' <<<"$fields")"

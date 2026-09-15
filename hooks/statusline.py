@@ -350,7 +350,7 @@ def segment_git(data, cwd):
 
 def segment_toolkit():
     """The "are my changes applied?" light. install.sh stamps the installed
-    version; a ⚠ means the version directory has moved past that stamp.
+    version; a ⚠ means the version directory is at a different one.
 
     Freshness fails safe: only a positively verified match shows a clean stamp.
     A timeout, an error, or a directory with no version shows a dim ? rather
