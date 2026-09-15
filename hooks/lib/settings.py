@@ -17,7 +17,6 @@ import errno
 import json
 import os
 import re
-import shlex
 import sys
 import tempfile
 import time
@@ -35,17 +34,13 @@ TOOLKIT_COMMAND = re.compile(r"agent-toolkit-run|\.claude/agent-toolkit/|install
 RETIRABLE_MEMBERS = {("permissions", "deny"), ("permissions", "additionalDirectories")}
 NOT_TOP_LEVEL_VALUES = {"hooks", "statusLine", "permissions", "sandbox", "env", "enabledPlugins"}
 
-# Errors a second run cannot clear, so the user has to act on them.
-USER_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC, errno.EEXIST, errno.ENOTDIR, errno.EISDIR}
-
 
 class SettingsError(Exception):
-    """kind is who can fix it: "user" or "install". fix is a command for them."""
+    """kind is who can fix it: "user" or "install"."""
 
-    def __init__(self, kind, reason, fix=""):
+    def __init__(self, kind, reason):
         super().__init__(reason)
         self.kind = kind
-        self.fix = fix
 
 
 def fingerprint(node):
@@ -145,29 +140,13 @@ def earlier_forms(item, request):
     return {fingerprint(f) for f in forms}
 
 
-def for_the_user(error, request):
-    """A failure in the file's content, with the newest backup named and the
-    file opened for editing, since no command can know the right value."""
-    home = request.get("home", "")
-    newest, when = newest_backup(request["backups"])
-    reason = str(error)
-    if newest:
-        reason += ". The newest backup is %s, from %s" % (shell_path(newest, home), when)
-    return SettingsError("user", reason, '"${EDITOR:-vi}" %s' % shell_path(request["settings"], home))
-
-
-def shell_path(path, home):
-    if home and path.startswith(home + "/"):
-        return "~/" + shlex.quote(path[len(home) + 1 :])
-    return shlex.quote(path)
-
-
-def read_ledger(request, current, values, members):
-    """The ledger on disk, or on a machine whose install predates it, every
-    toolkit-owned value present now, in whichever form it was written.
+def ledger_on_disk(request, write, result):
+    """The (values, members) the ledger holds, or None when there is none.
 
     A ledger that is there but will not read is not a machine that predates it:
-    rebuilding it would claim values the user set as the toolkit's."""
+    rebuilding it would claim values the user set as the toolkit's. It is moved
+    aside and reported, and this apply retires nothing.
+    """
     path = request["ledger"]
     try:
         with open(path, encoding="utf-8") as f:
@@ -177,17 +156,38 @@ def read_ledger(request, current, values, members):
             {(tuple(e["path"]), fingerprint(e["value"])) for e in data["members"] if tuple(e["path"]) in RETIRABLE_MEMBERS},
         )
     except FileNotFoundError:
-        pass
+        return None
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
-        aside = os.path.join(request["backups"], "agent-toolkit-applied.json.unreadable-" + time.strftime("%Y%m%d-%H%M%S"))
-        home = request.get("home", "")
-        raise SettingsError(
-            "user",
-            "the ledger %s cannot be read (%s). Moving it aside lets the next install rebuild it"
-            % (shell_path(path, home), e),
-            "mkdir -p %s && mv %s %s" % (shell_path(request["backups"], home), shell_path(path, home), shell_path(aside, home)),
-        )
-    if not (request.get("prev_root") or has_toolkit_wiring(current)):
+        reason = str(e)
+        if write:
+            try:
+                os.makedirs(request["backups"], exist_ok=True)
+                aside = free_name(request["backups"], "agent-toolkit-applied.json.unreadable")
+                os.replace(path, aside)
+                result["ledger_aside"] = aside
+            except OSError as move_failed:
+                reason += ", and it cannot be moved aside: %s" % (move_failed.strerror or move_failed)
+        result["ledger_unreadable"] = reason
+        return {}, set()
+
+
+def free_name(directory, name):
+    """A path under directory that nothing holds yet, named for the time."""
+    base = os.path.join(directory, "%s-%s" % (name, time.strftime("%Y%m%d-%H%M%S")))
+    path, n = base, 0
+    while os.path.lexists(path):
+        n += 1
+        path = "%s.%d" % (base, n)
+    return path
+
+
+def predating(request, current, values, members):
+    """On a machine whose install predates the ledger, every toolkit-owned value
+    present now, in whichever form it was written.
+
+    Toolkit wiring in the file is what says an install ran here. Without it this
+    is a first apply, and the values in the file are the user's own."""
+    if not has_toolkit_wiring(current):
         return {}, set()
     found_values = {p: get(current, p) for p in values if get(current, p) is not MISSING}
     found_members = set()
@@ -199,13 +199,15 @@ def read_ledger(request, current, values, members):
     return found_values, found_members
 
 
-def merge(current, request):
-    """(merged, ledger, restart reasons)."""
+def merge(current, request, on_disk):
+    """(merged, ledger, restart reasons). on_disk is what the ledger holds, or
+    None when there is none and the file itself has to say what an earlier
+    install wrote."""
     if not isinstance(current, dict):
         raise SettingsError("user", "the top level is not an object")
     desired = request["desired"]
     values, members = owned(desired)
-    had_values, had_members = read_ledger(request, current, values, members)
+    had_values, had_members = on_disk if on_disk is not None else predating(request, current, values, members)
     merged = copy.deepcopy(current)
     kept_values, kept_members = {}, []
 
@@ -303,58 +305,57 @@ def redacted(settings, desired):
     return {**settings, "env": {k: (v if k in own else "<redacted>") for k, v in env.items()}}
 
 
-def read_bytes(path, home=""):
+def read_bytes(path):
     try:
         with open(path, "rb") as f:
             return f.read()
     except FileNotFoundError:
         return None
     except OSError as e:
-        where = shell_path(path, home)
-        raise SettingsError("user", "cannot read %s: %s" % (where, e.strerror), "ls -l %s" % where)
+        raise SettingsError("user", "cannot read %s: %s" % (path, e.strerror or e))
 
 
 def reject_constant(name):
     raise ValueError("%s is not JSON" % name)
 
 
-def parse(raw, request):
-    if raw is None or not raw.strip():
+def parse(raw):
+    """An absent file is a first install. A file that is there and holds nothing
+    is a loss the user owns: overwriting it would bury whatever it held."""
+    if raw is None:
         return {}
+    if not raw.strip():
+        raise SettingsError("user", "settings.json is empty")
     try:
         return json.loads(raw, parse_constant=reject_constant)
     except ValueError as e:
-        home, backups = request.get("home", ""), request["backups"]
-        newest, when = newest_backup(backups)
-        settings = shell_path(request["settings"], home)
-        if not newest:
-            raise for_the_user(SettingsError("user", "settings.json does not parse: %s" % e), request)
-        broken = os.path.join(backups, "settings.json.broken-" + time.strftime("%Y%m%d-%H%M%S"))
-        raise SettingsError(
-            "user",
-            "settings.json does not parse: %s. The newest backup is from %s" % (e, when),
-            "mv %s %s && cp %s %s" % (settings, shell_path(broken, home), shell_path(newest, home), settings),
-        )
+        raise SettingsError("user", "settings.json does not parse: %s" % e)
 
 
 def newest_backup(backups):
-    """(path, when) of the newest settings backup that can be read, or ("", "").
-    A dangling or vanished entry is skipped: it is no backup to offer."""
+    """(path, when) of the newest settings backup that parses, or ("", "").
+    One that will not read or will not parse is no backup to offer."""
+    found = []
     try:
-        names = [n for n in os.listdir(backups) if n.startswith("settings.json.") and ".broken-" not in n]
+        names = os.listdir(backups)
     except OSError:
         return "", ""
-    found = []
     for name in names:
+        if not name.startswith("settings.json."):
+            continue
         path = os.path.join(backups, name)
         try:
             found.append((os.stat(path).st_mtime, path))
         except OSError:
             continue
-    if not found:
-        return "", ""
-    mtime, path = max(found)
-    return path, time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+    for mtime, path in sorted(found, reverse=True):
+        try:
+            with open(path, encoding="utf-8") as f:
+                json.load(f)
+        except (OSError, ValueError):
+            continue
+        return path, time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+    return "", ""
 
 
 def write_new(path, data, mode):
@@ -384,7 +385,12 @@ def stage(path, data, new_mode=None):
     directory = os.path.dirname(path)
     os.makedirs(directory, exist_ok=True)
     stem, ext = os.path.splitext(os.path.basename(path))
-    fd, tmp = tempfile.mkstemp(prefix=stem + ".", suffix=ext, dir=directory)
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=stem + ".", suffix=ext, dir=directory)
+    except OSError as e:
+        # The temporary name is this file's own, so the directory is what the
+        # report can name.
+        raise OSError(e.errno, e.strerror, directory)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
@@ -409,37 +415,32 @@ def replace(path, data):
     os.replace(stage(path, data), path)
 
 
-def write_failure(error, request):
-    target = error.filename or request["settings"]
-    kind = "user" if error.errno in USER_ERRNOS else "install"
-    where = shell_path(target, request.get("home", ""))
-    return SettingsError(kind, "cannot write %s: %s" % (where, error.strerror or error), "ls -ld %s" % where if kind == "user" else "")
+def write_failed(error, fallback):
+    return SettingsError("user", "cannot write %s: %s" % (error.filename or fallback, error.strerror or error))
 
 
 def run(request, write, read=None):
     """One apply or plan. read is the only way this reads settings.json, so a
     test can change the file between the merge and the re-read."""
     path = request["settings"]
-    read = read or (lambda p: read_bytes(p, request.get("home", "")))
+    read = read or read_bytes
     result = {"settings": "current", "ledger": "current", "restart": []}
+    on_disk = ledger_on_disk(request, write, result)
     for _ in range(ATTEMPTS):
         before = read(path)
-        current = parse(before, request)
-        try:
-            merged, ledger, restart = merge(current, request)
-        except SettingsError as e:
-            raise e if e.fix else for_the_user(e, request)
+        current = parse(before)
+        merged, ledger, restart = merge(current, request, on_disk)
         try:
             text = render(merged).encode("utf-8")
         except ValueError as e:
-            raise for_the_user(SettingsError("user", "settings.json holds a value JSON cannot carry: %s" % e), request)
+            raise SettingsError("user", "settings.json holds a value JSON cannot carry: %s" % e)
         changed = before is None or fingerprint(merged) != fingerprint(current)
         if not write:
             if changed:
                 old = render(redacted(current, request["desired"])).splitlines(True) if before is not None else []
                 new = render(redacted(merged, request["desired"])).splitlines(True)
                 result.update(settings="would-write", restart=restart, diff="".join(difflib.unified_diff(old, new, path, path)))
-            if ledger_bytes(ledger) != read_bytes(request["ledger"]):
+            if "ledger_unreadable" in result or ledger_bytes(ledger) != read_bytes(request["ledger"]):
                 result["ledger"] = "would-write"
             return result
         if changed:
@@ -450,26 +451,44 @@ def run(request, write, read=None):
             except OSError as e:
                 if saved:
                     os.unlink(saved)
-                raise write_failure(e, request)
+                raise write_failed(e, path)
             if read(path) != before:
                 os.unlink(staged)
                 if saved:
                     os.unlink(saved)
                 continue
             link = os.readlink(path) if os.path.islink(path) else ""
+            # The old ledger with this one folded in, written while the values
+            # are still unapplied: a ledger write that fails after the rename
+            # then leaves no value recorded as the user's own.
+            write_ledger(request["ledger"], combined(on_disk, ledger), result)
             try:
                 # A settings.json that is a symlink becomes a file: writing
                 # through the link would write outside ~/.claude.
                 os.replace(staged, path)
             except OSError as e:
                 os.unlink(staged)
-                raise write_failure(e, request)
+                raise write_failed(e, path)
             result.update(settings="written", backup=saved, restart=restart)
             if link:
                 result["replaced_link"] = link
         write_ledger(request["ledger"], ledger, result)
         return result
     raise SettingsError("install", "settings.json changed on every re-read, so nothing was applied")
+
+
+def combined(on_disk, ledger):
+    """This run's ledger folded into what was there before it."""
+    if on_disk is None:
+        return ledger
+    had_values, had_members = on_disk
+    values = dict(had_values)
+    values.update((tuple(e["path"]), e["value"]) for e in ledger["values"])
+    members = list(had_members) + [(tuple(e["path"]), fingerprint(e["value"])) for e in ledger["members"]]
+    return {
+        "values": [{"path": list(p), "value": v} for p, v in values.items()],
+        "members": [{"path": list(p), "value": json.loads(i)} for p, i in dict.fromkeys(members)],
+    }
 
 
 def ledger_bytes(ledger):
@@ -493,7 +512,8 @@ def main():
     try:
         result = run(request, write=(mode == "apply"))
     except SettingsError as e:
-        result = {"settings": "failed", "kind": e.kind, "reason": str(e), "fix": e.fix}
+        newest, when = newest_backup(request["backups"])
+        result = {"settings": "failed", "kind": e.kind, "reason": str(e), "newest_backup": newest, "backup_when": when}
     print(json.dumps(result, ensure_ascii=False))
 
 

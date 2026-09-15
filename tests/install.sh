@@ -613,13 +613,16 @@ id_before="$(file_id "$H/.claude/settings.json")"
 inst "$ROOT" "$H"
 exit_is "a settings.json that does not parse exits 1" 1
 same "and is never written" "$id_before" "$(file_id "$H/.claude/settings.json")"
-check "the finding gives the reason and the newest backup" "settings.json does not parse" "$(block 'Needs you')"
-check "as a command that keeps the broken file" "mv ~/.claude/settings.json ~/.claude/backups/settings.json.broken-" "$(block 'Needs you')"
-check "before restoring the backup" "&& cp ~/.claude/backups/settings.json." "$(block 'Needs you')"
-fix="$(block 'Needs you' | grep -F 'settings.json.broken-' | sed 's/^ *//')"
-HOME="$H" bash -c "$fix" && inst "$ROOT" "$H"
-exit_is "and that fix, run as printed, leads to a green install" 0
-[ -n "$(ls "$H"/.claude/backups/settings.json.broken-* 2>/dev/null)" ] && ok "keeping the broken file" || bad "keeping the broken file" "gone"
+check "the finding gives the reason" "settings.json does not parse" "$(block 'Needs you')"
+check "and the newest backup that parses" ". The newest backup that parses is ~/.claude/backups/settings.json." "$(block 'Needs you')"
+# A backup that does not parse is no backup to offer, however new it is.
+printf 'half a file' >"$H/.claude/backups/settings.json.99999999-999999"
+inst "$ROOT" "$H"
+[[ "$out" != *"settings.json.99999999-999999"* ]] && ok "and never one that does not parse itself" \
+  || bad "a backup that does not parse is skipped" "$(block 'Needs you')"
+offered="$(block 'Needs you' | grep -oE '~/\.claude/backups/settings\.json\.[0-9.-]+' | head -1)"
+cp "$H/${offered#\~/}" "$H/.claude/settings.json" && inst "$ROOT" "$H"
+exit_is "and the backup it names restores a green install" 0
 
 printf '{"z": 1, "env": "not an object", "a": 2}\n' >"$H/.claude/settings.json"
 id_before="$(file_id "$H/.claude/settings.json")"
@@ -628,8 +631,18 @@ exit_is "a settings.json the merge cannot apply to exits 1" 1
 same "and is never written" "$id_before" "$(file_id "$H/.claude/settings.json")"
 check "the finding gives the reason" "settings.json was left untouched: env is not an object" "$out"
 [[ "$out" != *"cp ~/.claude/backups"* ]] && ok "and offers no restore that would discard the file" || bad "and offers no restore" "$out"
-check "but names the newest backup and opens the file" "$(printf '. The newest backup is ~/.claude/backups/settings.json.')" "$out"
-check "with an editor" '"${EDITOR:-vi}" ~/.claude/settings.json' "$out"
+check "but names the newest backup that parses" ". The newest backup that parses is ~/.claude/backups/settings.json." "$out"
+
+H="$(home blank-settings)"
+printf '{}\n' >"$H/.claude/settings.json"
+inst "$ROOT" "$H"
+: >"$H/.claude/settings.json"
+id_before="$(file_id "$H/.claude/settings.json")"
+inst "$ROOT" "$H"
+exit_is "a settings.json holding nothing exits 1" 1
+same "and is never written over" "$id_before" "$(file_id "$H/.claude/settings.json")"
+check "with the reason and the backup that would restore it" \
+  "settings.json is empty. The newest backup that parses is ~/.claude/backups/settings.json." "$(block 'Needs you')"
 
 printf '{"zebra": 1, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "/bin/true"}]}]}, "apple": 2, "mango": {"b": 1, "a": 2}}\n' >"$H/.claude/settings.json"
 inst "$ROOT" "$H"
@@ -1337,14 +1350,71 @@ H="$(home corrupt-ledger)"
 inst "$ROOT" "$H"
 head -c 40 "$H/.claude/agent-toolkit-applied.json" >"$TMP/ledger" && cp "$TMP/ledger" "$H/.claude/agent-toolkit-applied.json"
 jq 'del(.hooks.PreToolUse)' "$H/.claude/settings.json" >"$TMP/s" && cp "$TMP/s" "$H/.claude/settings.json"
-id_before="$(file_id "$H/.claude/settings.json")"
+hook "$H" "$(command_for "$H" SessionStart install.sh)" '{"hook_event_name":"SessionStart"}'
+check "a ledger that will not read still restores the wiring" "hooks/guard.sh" \
+  "$(js "$H" '[.hooks.PreToolUse[].hooks[].command] | join(" ")')"
+json_is "and says so" '.hookSpecificOutput.additionalContext | test("ledger ~/.claude/agent-toolkit-applied.json does not read")'
+[ -n "$(ls "$H"/.claude/backups/agent-toolkit-applied.json.unreadable-* 2>/dev/null)" ] \
+  && ok "keeping the unreadable ledger in backups" || bad "keeping the unreadable ledger" "$(ls "$H/.claude/backups")"
+jq -e . "$H/.claude/agent-toolkit-applied.json" >/dev/null 2>&1 && ok "and writing a ledger that reads" \
+  || bad "and writing a ledger that reads" "$(cat "$H/.claude/agent-toolkit-applied.json")"
 inst "$ROOT" "$H"
-exit_is "a ledger that will not read exits 1" 1
-same "and settings are left untouched rather than the ledger rebuilt" "$id_before" "$(file_id "$H/.claude/settings.json")"
-fix="$(block 'Needs you' | grep -F 'agent-toolkit-applied.json.unreadable-' | sed 's/^ *//')"
-check "with a fix that moves it aside" "mv ~/.claude/agent-toolkit-applied.json ~/.claude/backups/agent-toolkit-applied.json.unreadable-" "$fix"
-HOME="$H" bash -c "$fix" && inst "$ROOT" "$H"
-exit_is "and after that fix, install goes green" 0
+exit_is "so the next install goes green" 0
+
+# A first apply that failed leaves the user's own values theirs: the ledger is
+# rebuilt from the file only where the toolkit's own wiring is already in it.
+H="$(home failed-first-apply)"
+printf '{"includeCoAuthoredBy": false, "isolatePeerMachines": true,' >"$H/.claude/settings.json"
+inst "$ROOT" "$H"
+exit_is "a first install against a settings.json that does not parse exits 1" 1
+printf '{"includeCoAuthoredBy": false, "isolatePeerMachines": true}\n' >"$H/.claude/settings.json"
+inst "$ROOT" "$H"
+exit_is "and goes green once the file parses" 0
+check "with neither value the user already held claimed as the toolkit's" "[]" \
+  "$(jq -c '[.values[].path | join(".")] | map(select(. == "includeCoAuthoredBy" or . == "isolatePeerMachines"))' \
+    "$H/.claude/agent-toolkit-applied.json")"
+
+# The ledger written before the settings rename is what a value applied now
+# rests on, so a ledger write that fails after the rename loses nothing.
+cat >"$TMP/ledger-fails.py" <<'PY'
+import json
+import os
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from lib import settings
+
+home = sys.argv[2]
+os.makedirs(home, exist_ok=True)
+path = os.path.join(home, "settings.json")
+request = {
+    "settings": path, "ledger": os.path.join(home, "ledger.json"), "backups": os.path.join(home, "backups"),
+    "desired": {"env": {"TOOLKIT_VALUE": "1"}}, "absent": [], "home": home, "root": "/r", "prev_root": "",
+}
+real = settings.replace
+writes = []
+
+
+def failing(target, data):
+    # settings.json does not exist yet, so its being there is what marks the
+    # ledger write that comes after the rename. That one fails.
+    writes.append(target)
+    if os.path.exists(path):
+        raise OSError(5, "the ledger write failed")
+    real(target, data)
+
+
+settings.replace = failing
+settings.run(request, write=True)
+settings.replace = real
+ledgered = json.load(open(request["ledger"]))["values"]
+request["desired"] = {"env": {}}
+settings.run(request, write=True)
+print(json.dumps({"ledgered": ledgered, "env": json.load(open(path))["env"]}))
+PY
+out="$(python3 "$TMP/ledger-fails.py" "$ROOT/hooks" "$TMP/ledger-fails" 2>&1)"
+json_is "a value whose ledger write failed after the rename is recorded, and retired by a later install" \
+  '.ledgered == [{"path": ["env", "TOOLKIT_VALUE"], "value": "1"}] and .env == {}'
 
 H="$(home crafted-ledger)"
 inst "$ROOT" "$H"
@@ -1611,9 +1681,11 @@ check "a dangling backup entry does not hide why settings.json was left untouche
 
 H="$(home infinite)"
 printf '{"cleanupPeriodDays": 1e999}\n' >"$H/.claude/settings.json"
+id_before="$(file_id "$H/.claude/settings.json")"
 inst "$ROOT" "$H"
-check "a number JSON cannot carry is left untouched, with the file opened for editing" \
-  "$(printf 'holds a value JSON cannot carry: Out of range float values are not JSON compliant: inf\n    "${EDITOR:-vi}" ~/.claude/settings.json')" "$out"
+check "a number JSON cannot carry gives its reason" \
+  "holds a value JSON cannot carry: Out of range float values are not JSON compliant: inf" "$out"
+same "and the file is left untouched" "$id_before" "$(file_id "$H/.claude/settings.json")"
 
 H="$(home claude-is-a-file)"
 rm -rf "$H/.claude"

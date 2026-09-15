@@ -665,7 +665,7 @@ settings_request() {
 }
 
 apply_settings() {
-  local request result state reason fix saved shown lines
+  local request result state reason newest aside saved shown lines
   if ! request="$(settings_request)"; then
     finding required toolkit "install.sh does not build its own settings" "$ROOT/install.sh"
     return
@@ -675,8 +675,12 @@ apply_settings() {
     finding required toolkit "hooks/lib/settings.py failed: $(printf '%s' "$result" | tail -1)" "$ROOT/hooks/lib/settings.py"
     return
   fi
+  # settings.py names absolute paths, which the report writes the way the user
+  # types them.
   reason="$(jq -r '.reason // ""' <<<"$result")"
-  fix="$(jq -r '.fix // ""' <<<"$result")"
+  reason="${reason//"$HOME"\//\~/}"
+  newest="$(jq -r '.newest_backup // ""' <<<"$result")"
+  [ -z "$newest" ] || reason+=". The newest backup that parses is $(home_path "$newest"), from $(jq -r '.backup_when' <<<"$result")"
   saved="$(jq -r '.backup // ""' <<<"$result")"
   case "$state" in
     written)
@@ -691,11 +695,16 @@ apply_settings() {
       ;;
     failed)
       case "$(jq -r '.kind' <<<"$result")" in
-        user) finding required user "settings.json was left untouched: $reason" "$fix" ;;
-        *) finding required install "settings.json was not applied: $reason" "${fix:-$(install_command)}" ;;
+        user) finding required user "settings.json was left untouched: $reason" ;;
+        *) finding required install "settings.json was not applied: $reason" "$(install_command)" ;;
       esac
       ;;
   esac
+  reason="$(jq -r '.ledger_unreadable // ""' <<<"$result")"
+  if [ -n "$reason" ]; then
+    aside="$(jq -r '.ledger_aside // ""' <<<"$result")"
+    finding required user "the ledger ~/.claude/agent-toolkit-applied.json does not read ($reason), so every toolkit value was set afresh and one the toolkit has stopped setting may stay${aside:+. The old ledger is kept at $(home_path "$aside")}"
+  fi
   if [ "$(jq -r '.replaced_link // ""' <<<"$result")" != "" ]; then
     finding advisory user "settings.json was a link to $(jq -r '.replaced_link' <<<"$result") and is now a file, so the link's target no longer receives changes"
   fi
