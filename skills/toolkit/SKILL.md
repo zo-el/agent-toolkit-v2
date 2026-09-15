@@ -54,4 +54,4 @@ Guards read their payload from stdin. Write it to a file and redirect — `hooks
 
 Commit in the toolkit repo. Then ask the user to approve the push — other machines only get the change once it's on origin.
 
-On another machine, `git pull` is the whole upgrade. The next session start re-links skills and re-checks the wiring. A new machine is `git clone` plus `./install.sh`.
+On another machine, `git pull` brings the change in, and the next session start applies it and says when to restart. A new machine follows `INSTALL.md`.

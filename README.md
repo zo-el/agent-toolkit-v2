@@ -8,19 +8,9 @@ The session is the CTO: it plans, delegates, verifies, and talks to me. Agents d
 
 ## Install
 
-```bash
-./install.sh          # preview first with: ./install.sh --dry-run
-```
+Follow [`INSTALL.md`](INSTALL.md).
 
-The installer enables two plugins but cannot install them. Once per machine:
-
-```bash
-claude plugin install pr-review-toolkit@claude-plugins-official --scope user
-```
-
-Notifications come from [claude-notifications-go](https://github.com/777genius/claude-notifications-go) — install it from its README, then `/claude-notifications-go:settings`. It fires when the main agent finishes or needs you, and stays quiet for sub-agents.
-
-The checkout can live anywhere. Device config reaches it only through the `~/.claude/agent-toolkit` symlink, so moving it is one `./install.sh` from the new location. On another machine, `git pull` is the whole upgrade — the next session start re-links everything.
+The installer also installs the two plugins the toolkit relies on: `pr-review-toolkit`, whose agents are the review gates, and [claude-notifications-go](https://github.com/777genius/agent-notifications), which fires when the main agent finishes or needs you and stays quiet for subagents.
 
 ## What's here
 
@@ -30,7 +20,8 @@ The checkout can live anywhere. Device config reaches it only through the `~/.cl
 | `agents/` | architect · developer · reviewer · project-manager · researcher |
 | `skills/` | `backlog` · `toolkit` (change this repo) · `ui-review` (screenshot galleries) |
 | `hooks/` | the guard, the statusline, the task line, the retro recorder, the formatter, background process tracking |
-| `install.sh` | wiring and the doctor |
+| `INSTALL.md` | how to install, and what install touches |
+| `install.sh` | the installer, and the doctor that runs at every session start |
 | `RETRO.md` | learnings written by hand, read alongside the retro digest |
 | `documentation/brief.md` | what this toolkit is for |
 
@@ -104,4 +95,4 @@ A segment with nothing to say takes no width, so the line stays short when littl
 - **`⏱ 63% 2h13m · 41% 3d2h`** — how much of each rate-limit window is used, and how long until it resets. The window's own length is deliberately not shown; a fixed `5h` label says nothing you can act on. Falls back to `5h` / `7d` labels only when the payload carries no reset time, since two bare percentages wouldn't say which is which.
 - **`☰ 2/5`** — tasks done out of open, from this session's own list. The platform clears the whole list once every task completes, so this only ever shows live work. A `?` means part of the list would not read, and the count is of what did; green is kept for a whole list with nothing left open.
 - **`⎇ main* #42`** — branch, dirty marker, and the open PR for it, coloured by review state.
-- **`⬡ v<count>·<sha>`** — the "are my changes applied?" light. A `⚠` means the repo has moved past the last install; a dim `?` means it couldn't be verified.
+- **`⬡ v<count>·<sha>`**: the "are my changes applied?" light. A `⚠` means the installed version directory has moved past the last install; a dim `?` means it could not be verified.
