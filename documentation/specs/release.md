@@ -83,13 +83,13 @@ The machine verifies the commit for itself either way, so immutability is a seco
 | Invocation | Network | Writes | Output | Exit |
 | ----------------------- | ----------- | ------ | ------ | ---- |
 | `hooks/update.sh stage` | GitHub reads | release folders, the record | nothing | always `0` |
-| `hooks/update.sh apply` | none | through install, when a staged release goes live | hook report | always `0` |
+| `hooks/update.sh apply` | none of its own | through install, when a staged release goes live | hook report | always `0` |
 | `hooks/update.sh now` | GitHub reads | as `stage`, then as `apply` | what it fetched, then install's terminal report | `0`, `1` |
 | `hooks/update.sh --help` | none | nothing | usage | `0` |
 | any other argument | none | nothing | usage on stderr | `2` |
 
 - `stage` is wired async at every `SessionStart`. Nothing waits on it, so it is where the network lives.
-- `apply` is wired synchronously at `SessionStart` for `startup`, `resume`, `clear` and `compact`. It is local, and it is silent and immediate when there is nothing to do.
+- `apply` is wired synchronously at `SessionStart` for `startup`, `resume`, `clear` and `compact`. It is silent and immediate when there is nothing to do, which is every start but the one that takes a new release.
 - `now` is the whole cycle at once, in the foreground, ignoring the throttle and any bad mark. It is how a person updates on demand, how a machine leaves dev mode, and what a report offers as its fix. It ends by running the wanted version's `install.sh`, so a machine already at the wanted release re-installs it.
 - `now` on a machine tracking `off` changes nothing, says so, and exits `1`.
 
@@ -130,6 +130,7 @@ Any failure stages nothing, records the reason, and is reported at the next `app
 
 - Nothing staged for the wanted release, or a staged version equal to the live one, means nothing runs and nothing prints. This is the ordinary case, and it costs no more than reading the record and the live version.
 - Otherwise install runs from the staged folder and does everything install does. Its root checks come first, the stable link moves only when they pass, and its report names what applied.
+- **An activation is as slow as a full install, plugin fetches included**, and the session start or compaction that runs it waits. It happens once per release, and the alternative is a machine that never quite has the version it reports.
 - **Went live**, meaning the stable link resolves to the staged folder afterwards: the release is this machine's. The report carries install's own output, its restart line included.
 - **Did not go live**: nothing on the machine changed, the version is marked bad, and it is not tried again until the wanted release changes. The report carries install's reason. `hooks/update.sh now` tries it regardless, which is what a machine does after fixing the cause.
 - Install serialises applies across the machine already, so an activation and a session's `--sync` never write at once. A `--sync` that takes the lock second finds the stable link moved off its own root and stops. An activation that takes the lock second applies over what the `--sync` wrote, which is what going live means.
