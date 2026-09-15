@@ -84,7 +84,7 @@ The machine verifies the commit for itself either way, so immutability is a seco
 | ----------------------- | ----------- | ------ | ------ | ---- |
 | `hooks/update.sh stage` | GitHub reads | release folders, the record | nothing | always `0` |
 | `hooks/update.sh apply` | none | through install, when a staged release goes live | hook report | always `0` |
-| `hooks/update.sh now` | GitHub reads | as `stage`, then as `apply` | install's terminal report | install's: `0`, `1` |
+| `hooks/update.sh now` | GitHub reads | as `stage`, then as `apply` | what it fetched, then install's terminal report | `0`, `1` |
 | `hooks/update.sh --help` | none | nothing | usage | `0` |
 | any other argument | none | nothing | usage on stderr | `2` |
 
@@ -128,11 +128,11 @@ Any failure stages nothing, records the reason, and is reported at the next `app
 
 ### Activating
 
-- Nothing staged for the wanted release, or a staged version equal to the live one, means nothing runs and nothing prints. This is the ordinary case and it costs two small reads.
+- Nothing staged for the wanted release, or a staged version equal to the live one, means nothing runs and nothing prints. This is the ordinary case, and it costs no more than reading the record and the live version.
 - Otherwise install runs from the staged folder and does everything install does. Its root checks come first, the stable link moves only when they pass, and its report names what applied.
 - **Went live**, meaning the stable link resolves to the staged folder afterwards: the release is this machine's. The report carries install's own output, its restart line included.
 - **Did not go live**: nothing on the machine changed, the version is marked bad, and it is not tried again until the wanted release changes. The report carries install's reason. `hooks/update.sh now` tries it regardless, which is what a machine does after fixing the cause.
-- Install serialises applies across the machine already, so an activation and a session's `--sync` cannot both write. Whichever takes the lock second finds the link where the first left it and stops.
+- Install serialises applies across the machine already, so an activation and a session's `--sync` never write at once. A `--sync` that takes the lock second finds the stable link moved off its own root and stops. An activation that takes the lock second applies over what the `--sync` wrote, which is what going live means.
 
 **What a new version reaches, and when.** Hooks, permissions, settings, agents and skills are live as soon as install applies them, because Claude Code reloads them when `settings.json` changes. `CLAUDE.md` reaches a session only at its next start, and an agent already running keeps the definition it started with. Applying at a compaction therefore changes the machine mid-lane and the rules at the next start, which is the accepted cost of not waiting for a session to end.
 
@@ -189,7 +189,7 @@ The updater's report is what distinguishes them when it matters: it names the li
 - **Only `stage` prunes**, never `apply`, so no session start waits on a removal.
 - It keeps the live version directory, the wanted release, and the one that was live before the current one. Everything else under `~/.claude/agent-toolkit-releases` goes, along with any part-written folder more than a day old.
 - The stable link is read again immediately before each removal, and the directory it points at is never removed.
-- Install never removes a version directory, and that boundary is unchanged. Release folders are the updater's, and a clone is nobody's.
+- Install never removes a version directory, and that boundary is unchanged. Release folders are the updater's to remove, and a clone is nobody's.
 
 ## Bootstrap
 
