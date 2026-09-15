@@ -1598,3 +1598,26 @@ same "and ask gh for nothing but a local token, calling neither curl nor wget" \
   "$(printf 'gh auth token --hostname github.com\n%.0s' 1 2 3)" "$(cat "$NET_CALLS")"
 other_git="$(grep -vE '^(-C [^ ]+ )?(rev-parse|rev-list|config --get) ' "$TMP/git.calls")"
 [ -z "$other_git" ] && ok "and run git only to read a version or an identity" || bad "and run git only to read" "$other_git"
+
+# A backups directory holding a dangling entry still gives the real reason.
+H="$(home dangling-backup)"
+printf '{}\n' >"$H/.claude/settings.json"
+inst "$ROOT" "$H"
+ln -s "$TMP/nowhere" "$H/.claude/backups/settings.json.zzzz"
+printf '{"env": "not an object"}\n' >"$H/.claude/settings.json"
+inst "$ROOT" "$H"
+check "a dangling backup entry does not hide why settings.json was left untouched" "settings.json was left untouched: env is not an object" "$out"
+[[ "$out" != *"settings.py failed"* ]] && ok "and blames nothing on the toolkit" || bad "and blames nothing on the toolkit" "$out"
+
+H="$(home infinite)"
+printf '{"cleanupPeriodDays": 1e999}\n' >"$H/.claude/settings.json"
+inst "$ROOT" "$H"
+check "a number JSON cannot carry is left untouched, with the file opened for editing" \
+  "$(printf 'holds a value JSON cannot carry: Out of range float values are not JSON compliant: inf\n    "${EDITOR:-vi}" ~/.claude/settings.json')" "$out"
+
+H="$(home claude-is-a-file)"
+rm -rf "$H/.claude"
+printf 'not a directory\n' >"$H/.claude"
+inst "$ROOT" "$H"
+exit_is "a file at ~/.claude exits 1" 1
+check "with a fix that moves it out of the way" "$(printf '✗ ~/.claude is not a directory, so nothing was changed\n    mv ~/.claude ~/.claude.not-a-directory')" "$out"

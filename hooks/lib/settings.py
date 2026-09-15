@@ -149,10 +149,9 @@ def for_the_user(error, request):
     """A failure in the file's content, with the newest backup named and the
     file opened for editing, since no command can know the right value."""
     home = request.get("home", "")
-    newest = newest_backup(request["backups"])
+    newest, when = newest_backup(request["backups"])
     reason = str(error)
     if newest:
-        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(newest)))
         reason += ". The newest backup is %s, from %s" % (shell_path(newest, home), when)
     return SettingsError("user", reason, '"${EDITOR:-vi}" %s' % shell_path(request["settings"], home))
 
@@ -304,14 +303,15 @@ def redacted(settings, desired):
     return {**settings, "env": {k: (v if k in own else "<redacted>") for k, v in env.items()}}
 
 
-def read_bytes(path):
+def read_bytes(path, home=""):
     try:
         with open(path, "rb") as f:
             return f.read()
     except FileNotFoundError:
         return None
     except OSError as e:
-        raise SettingsError("user", "cannot read %s: %s" % (path, e.strerror))
+        where = shell_path(path, home)
+        raise SettingsError("user", "cannot read %s: %s" % (where, e.strerror), "ls -l %s" % where)
 
 
 def reject_constant(name):
@@ -325,26 +325,36 @@ def parse(raw, request):
         return json.loads(raw, parse_constant=reject_constant)
     except ValueError as e:
         home, backups = request.get("home", ""), request["backups"]
-        newest = newest_backup(backups)
+        newest, when = newest_backup(backups)
         settings = shell_path(request["settings"], home)
         if not newest:
             raise for_the_user(SettingsError("user", "settings.json does not parse: %s" % e), request)
         broken = os.path.join(backups, "settings.json.broken-" + time.strftime("%Y%m%d-%H%M%S"))
         raise SettingsError(
             "user",
-            "settings.json does not parse: %s. The newest backup is from %s"
-            % (e, time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(newest)))),
+            "settings.json does not parse: %s. The newest backup is from %s" % (e, when),
             "mv %s %s && cp %s %s" % (settings, shell_path(broken, home), shell_path(newest, home), settings),
         )
 
 
 def newest_backup(backups):
+    """(path, when) of the newest settings backup that can be read, or ("", "").
+    A dangling or vanished entry is skipped: it is no backup to offer."""
     try:
         names = [n for n in os.listdir(backups) if n.startswith("settings.json.") and ".broken-" not in n]
     except OSError:
-        return ""
-    paths = [os.path.join(backups, n) for n in names]
-    return max(paths, key=os.path.getmtime, default="")
+        return "", ""
+    found = []
+    for name in names:
+        path = os.path.join(backups, name)
+        try:
+            found.append((os.stat(path).st_mtime, path))
+        except OSError:
+            continue
+    if not found:
+        return "", ""
+    mtime, path = max(found)
+    return path, time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
 
 
 def write_new(path, data, mode):
@@ -402,13 +412,15 @@ def replace(path, data):
 def write_failure(error, request):
     target = error.filename or request["settings"]
     kind = "user" if error.errno in USER_ERRNOS else "install"
-    return SettingsError(kind, "cannot write %s: %s" % (shell_path(target, request.get("home", "")), error.strerror or error))
+    where = shell_path(target, request.get("home", ""))
+    return SettingsError(kind, "cannot write %s: %s" % (where, error.strerror or error), "ls -ld %s" % where if kind == "user" else "")
 
 
-def run(request, write, read=read_bytes):
+def run(request, write, read=None):
     """One apply or plan. read is the only way this reads settings.json, so a
     test can change the file between the merge and the re-read."""
     path = request["settings"]
+    read = read or (lambda p: read_bytes(p, request.get("home", "")))
     result = {"settings": "current", "ledger": "current", "restart": []}
     for _ in range(ATTEMPTS):
         before = read(path)
@@ -420,7 +432,7 @@ def run(request, write, read=read_bytes):
         try:
             text = render(merged).encode("utf-8")
         except ValueError as e:
-            raise SettingsError("user", "settings.json holds a value JSON cannot carry: %s" % e)
+            raise for_the_user(SettingsError("user", "settings.json holds a value JSON cannot carry: %s" % e), request)
         changed = before is None or fingerprint(merged) != fingerprint(current)
         if not write:
             if changed:

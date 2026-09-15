@@ -1024,7 +1024,11 @@ main() {
   elif [ "$ready" -eq 1 ]; then
     ready=0
     if ! err="$(mkdir -p "$CLAUDE_DIR" 2>&1)"; then
-      finding required user "~/.claude cannot be created: $(printf '%s' "$err" | one_line)" "mkdir -p ~/.claude"
+      if [ -e "$CLAUDE_DIR" ]; then
+        finding required user "~/.claude is not a directory, so nothing was changed" "mv ~/.claude ~/.claude.not-a-directory"
+      else
+        finding required user "~/.claude cannot be created: $(printf '%s' "$err" | one_line)" "chmod u+w ~"
+      fi
     else
       take_lock "$([ "$MODE" = sync ] && echo 5 || echo 60)"
       case $? in
