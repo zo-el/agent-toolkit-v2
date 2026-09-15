@@ -7,7 +7,7 @@
 #   ask   anything that leaves the machine, touches the device outside the
 #         workspace, destroys unrecoverable local work, or writes the Linear board.
 #
-# Everything else is silent — local work is free.
+# Everything else is silent, because local work is free.
 #
 # Matching is substring-regex over the raw command, so a compound command is
 # caught. A quoted mention of a gated word can trip an ask; the cost is one
@@ -15,25 +15,47 @@
 set -uo pipefail
 
 input="$(cat)"
-command -v jq >/dev/null 2>&1 || { echo "guard: jq missing — gate inactive" >&2; exit 0; }
 
-verdict() {
-  jq -cn --arg d "$1" --arg r "$2" \
-    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:$d,permissionDecisionReason:$r}}'
+# Install requires jq and python3 both, and either one alone keeps the gate
+# live. They are needed to read the payload only: the verdict is printed here.
+if command -v jq >/dev/null 2>&1; then
+  field() { printf '%s' "$input" | jq -r ".$1 // empty" 2>/dev/null; }
+elif command -v python3 >/dev/null 2>&1; then
+  # -I keeps the session's project directory off the import path, where its own
+  # json.py would otherwise be what this reads the payload with.
+  field() {
+    printf '%s' "$input" | python3 -I -c '
+import json, sys
+try:
+    node = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+for key in sys.argv[1].split("."):
+    node = node.get(key) if isinstance(node, dict) else None
+print(node if isinstance(node, str) else "")' "$1"
+  }
+else
+  echo "guard: neither jq nor python3 is on PATH, so no call can be judged" >&2
+  exit 0
+fi
+
+verdict() { # decision, reason
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"%s","permissionDecisionReason":"%s"}}\n' \
+    "$1" "$(printf '%s' "$2" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g')"
   exit 0
 }
 
-tool="$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null)" || exit 0
+tool="$(field tool_name)" || exit 0
 
 # ── Linear: shared team state, so a write surfaces before it lands ────────────
 case "$tool" in
   mcp__linear*)
     case "$tool" in *__list_*|*__get_*|*__search_*|*__extract_*) exit 0 ;; esac
-    verdict ask "Linear write ($tool) — show the change table and get approval first."
+    verdict ask "Linear write ($tool): show the change table and get approval first."
     ;;
 esac
 
-cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)" || exit 0
+cmd="$(field tool_input.command)" || exit 0
 [ -n "$cmd" ] || exit 0
 hit() { printf '%s' "$cmd" | grep -qE "$1"; }
 

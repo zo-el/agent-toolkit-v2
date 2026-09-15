@@ -72,12 +72,24 @@ expect "linear write asks"            ask    "$(tool_payload 'mcp__linear__save_
 expect "linear delete asks"           ask    "$(tool_payload 'mcp__linear__delete_comment')"
 expect "non-linear mcp is free"       silent "$(tool_payload 'mcp__context7__query-docs')"
 
-# Without jq the guard must fail open rather than block every command. env -i so
-# it sees a bare environment, which is what a hook actually gets.
-stub_path "$TMP/nojq" bash grep sed awk cat printf
-printf '%s' "$(bash_payload 'git push')" > "$TMP/p.json"
-out="$(env -i PATH="$TMP/nojq" HOME="$TMP" "$ROOT/hooks/guard.sh" < "$TMP/p.json" 2>/dev/null)"
-[ -z "$out" ] && ok "fails open without jq" || bad "fails open without jq" "emitted a verdict: $out"
+# Without jq the guard reads the payload with python3 and gives the same
+# verdicts. env -i so it sees a bare environment, which is what a hook gets.
+stub_path "$TMP/nojq" bash grep sed tr cat python3
+bare() { # payload directory, payload → the guard's output, run with that PATH alone
+  printf '%s' "$2" > "$TMP/p.json"
+  env -i PATH="$1" HOME="$TMP" "$ROOT/hooks/guard.sh" < "$TMP/p.json" 2>/dev/null
+}
+out="$(bare "$TMP/nojq" "$(bash_payload 'git status')")"
+[ -z "$out" ] && ok "without jq a read-only command passes silently" || bad "without jq a read-only command passes" "emitted: $out"
+check "without jq a push still asks" ask "$(decision "$(bare "$TMP/nojq" "$(bash_payload 'git push origin main')")")"
+check "without jq a public comment is still denied" deny "$(decision "$(bare "$TMP/nojq" "$(bash_payload 'gh pr comment 12 --body hi')")")"
+
+# With neither reader the gate cannot judge anything, and must not block work.
+stub_path "$TMP/noreader" bash grep sed tr cat
+out="$(bare "$TMP/noreader" "$(bash_payload 'git push origin main')")"
+rc=$?
+{ [ "$rc" = 0 ] && [ -z "$out" ]; } && ok "with neither jq nor python3 the guard exits 0" \
+  || bad "with neither jq nor python3 the guard exits 0" "exit $rc: $out"
 
 # ── installer ────────────────────────────────────────────────────────────────
 . "$ROOT/tests/install.sh"
