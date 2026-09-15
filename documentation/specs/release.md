@@ -56,7 +56,11 @@ The pull request body carries a `## Changelog` section holding either one or mor
 
 ### Rolling back
 
-`gh release edit v<prev> --latest` makes an earlier release the one GitHub reports as latest. Every machine tracking `latest` converges on it at its next check, downgrading, and each says so in its report. Immutability leaves the latest flag editable for exactly this.
+A release that should be running nowhere is marked a prerelease. The latest release is by definition the newest that is neither a draft nor a prerelease, so the one before it becomes latest again. Every machine tracking `latest` converges on it at its next check, downgrading, and each says so in its report. Immutability leaves the prerelease and latest flags editable for exactly this.
+
+Marking the previous release latest outright is the same act in one step, and it rests on GitHub honouring that flag over its own date order, which its reference does not state. The prerelease flag rests on the definition itself.
+
+A machine that must not move at all is pinned in its track instead, which needs nobody else's agreement.
 
 ### Immutable releases
 
