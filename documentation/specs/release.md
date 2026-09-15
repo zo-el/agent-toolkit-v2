@@ -178,18 +178,19 @@ A release the machine will not install is announced at most once, and the record
 
 | What | Severity | Who | Fix |
 | ---- | -------- | --- | --- |
-| a release went live | not a finding: the change line, install's own report, and the restart line, which going live always warrants | | |
+| the live version changed since the last report | not a finding: the change line, install's own report when this run produced one, and the restart line, which a changed version always warrants | | |
 | a release did not go live | required | user | `~/.claude/agent-toolkit/hooks/update.sh now`, once install's own reason is dealt with |
 | the last check failed | advisory | user | that failure's own fix |
 | no check has succeeded in seven days | advisory | user | `~/.claude/agent-toolkit/hooks/update.sh now` |
 | the archive was not the commit the release names, or the commit is not on `main` | required | user | nothing automatic: the release is wrong and the repository owner acts |
 | the track holds something else | required | user | edit or remove `~/.claude/agent-toolkit-track` |
+| the track names a release nobody published | required | user | edit `~/.claude/agent-toolkit-track` to a release that exists, or to `latest` |
 | `gh` is missing, holds no token, or cannot see the repository | advisory | user | the same command install's requirement list names, which is where that text lives |
 | the wanted release is not being installed here | advisory, announced once | user | the way forward for dev mode, a pin, or `off` |
 
-- `systemMessage` reaches the user: one line, present when a release went live, when one failed to, or when a required finding stands.
+- `systemMessage` reaches the user: one line, present when the live version changed, when a release failed to go live, or when a required finding stands.
 - **A fix is printed as a command that runs from anywhere**, which for the updater means its path through the stable link. The report is read in a session whose working directory is a project, not the toolkit.
-- **`reloadSkills` is set whenever a release went live.** A new version directory re-points every skill link, and the terminal report install prints on a full install has no field that says so.
+- **`reloadSkills` is set whenever the report says the live version changed.** A new version directory re-points every skill link, and the terminal report install prints on a full install has no field that says so.
 - **Silence is the normal state.** A machine at the wanted release whose last check succeeded prints nothing at all.
 - **The updater reports its own access failures**, rather than leaving them to the doctor. A session start that skips the checks a user can only fix outside Claude Code would otherwise skip the one thing that stops updates.
 - **`stage` reports nothing.** An async hook's output reaches nothing reliably and is killed at teardown in `-p` mode, so it records and `apply` reports. A failure is therefore reported at the session start after the one that hit it.
