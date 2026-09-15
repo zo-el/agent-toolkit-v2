@@ -170,7 +170,7 @@ join() { # separator, items
 
 restart_reasons() {
   local reasons
-  mapfile -t reasons < <(printf '%s\n' "${RESTART[@]}" | sort -u)
+  mapfile -t reasons < <(printf '%s\n' "${RESTART[@]}" | LC_ALL=C sort -u)
   join ", " "${reasons[@]}"
 }
 
@@ -404,6 +404,15 @@ cannot_start() { # path → the reason on stdout, or nothing
   fi
 }
 
+# Runs a script the way exec would, through its #! line, without needing it to
+# be executable.
+via_shebang() { # path, arguments
+  local first words
+  IFS= read -r first <"$1"
+  read -ra words <<<"${first#\#!}"
+  "${words[@]}" "$@"
+}
+
 # Root checks: install writes nothing derived from this directory unless they pass.
 check_root() {
   local before=${#F_SEV[@]} entries entry reason out detail
@@ -441,10 +450,14 @@ check_root() {
 # toolkit is unreachable, and the guard must ask before a push. HOME points
 # nowhere, so neither can find or write anything.
 check_gate() {
-  local ask='"permissionDecision":"ask"' payload='{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}'
-  if [ -f "$ROOT/hooks/launcher.sh" ] && { ! sh -n "$ROOT/hooks/launcher.sh" 2>/dev/null ||
-    [[ "$(HOME=/nonexistent/agent-toolkit sh "$ROOT/hooks/launcher.sh" PreToolUse hooks/guard.sh </dev/null 2>/dev/null)" != *"$ask"* ]]; }; then
-    finding required toolkit "hooks/launcher.sh does not ask when the toolkit is unreachable" "$ROOT/hooks/launcher.sh"
+  local ask='"permissionDecision":"ask"' payload='{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' reason
+  if [ -f "$ROOT/hooks/launcher.sh" ]; then
+    reason="$(cannot_start "$ROOT/hooks/launcher.sh")"
+    if [ -n "$reason" ]; then
+      finding required toolkit "hooks/launcher.sh cannot start: $reason" "$ROOT/hooks/launcher.sh"
+    elif [[ "$(HOME=/nonexistent/agent-toolkit via_shebang "$ROOT/hooks/launcher.sh" PreToolUse hooks/guard.sh </dev/null 2>/dev/null)" != *"$ask"* ]]; then
+      finding required toolkit "hooks/launcher.sh does not ask when the toolkit is unreachable" "$ROOT/hooks/launcher.sh"
+    fi
   fi
   if [ -x "$ROOT/hooks/guard.sh" ] && [[ "$(HOME=/nonexistent/agent-toolkit "$ROOT/hooks/guard.sh" <<<"$payload" 2>/dev/null)" != *"$ask"* ]]; then
     finding required toolkit "hooks/guard.sh does not ask before a push" "$ROOT/hooks/guard.sh"
@@ -520,8 +533,9 @@ resolve() { (cd "$1" 2>/dev/null && pwd -P) || readlink "$1" 2>/dev/null || true
 # The lock belongs to fd 9, which outlives the python that took it. Returns 1
 # when another apply held it past the deadline, 2 with LOCK_ERROR otherwise.
 take_lock() { # seconds
+  LOCK_FIX=""
   if ! { exec 9<"$CLAUDE_DIR"; } 2>/dev/null; then
-    LOCK_ERROR="~/.claude cannot be opened"
+    LOCK_ERROR="~/.claude cannot be opened" LOCK_FIX="chmod u+rwx ~/.claude"
     return 2
   fi
   LOCK_ERROR="$(python3 - "$1" 2>&1 <<'PY'
@@ -832,8 +846,9 @@ check_notifications() { # plugin listing
 
 # ── version stamp ────────────────────────────────────────────────────────────
 # Written only while no required finding stands, so the status line never shows
-# a version as applied when it is not. Left alone when the link no longer points
-# here, since another install then owns it.
+# a version as applied when it is not. Written under the lock, and left alone
+# when the link no longer points here or another apply holds the lock: that
+# apply owns the stamp.
 apply_stamp() {
   local out rc
   [ "$MODE" = dry ] || [ "$(resolve "$STABLE")" = "$ROOT" ] || return 0
@@ -842,14 +857,19 @@ apply_stamp() {
   case "$rc" in
     0) ;;
     3) finding advisory install "git did not report the version in time, so the version stamp was left as it was" "$(install_command)" && return ;;
-    4) finding advisory user "git cannot read the version directory's history, so the version stamp was left as it was: $(printf '%s' "$out" | one_line)" && return ;;
+    4) finding advisory user "git cannot read the version directory's history, so the version stamp was left as it was: $(printf '%s' "$out" | one_line)" \
+      "git -C $(home_path "$ROOT") status" && return ;;
     *) finding advisory toolkit "hooks/lib/version.py failed, so the version stamp was left as it was" "$ROOT/hooks/lib/version.py"$'\n'"$(printf '%s' "$out" | tail -1)" && return ;;
   esac
+  if [ "$MODE" != dry ]; then
+    take_lock 5 && [ "$(resolve "$STABLE")" = "$ROOT" ] || { exec 9<&-; return 0; }
+  fi
   if [ -z "$out" ]; then
     [ ! -e "$STAMP" ] || act "version stamp removed: this version directory has no version" rm -f "$STAMP"
   elif [ "$(count required)" -eq 0 ] && [ "$(cat "$STAMP" 2>/dev/null)" != "$out" ]; then
     act "version stamp $out" write_atomic "$STAMP" 644 <<<"$out"
   fi
+  exec 9<&-
 }
 
 # ── reports ──────────────────────────────────────────────────────────────────
@@ -1004,7 +1024,7 @@ main() {
   elif [ "$ready" -eq 1 ]; then
     ready=0
     if ! err="$(mkdir -p "$CLAUDE_DIR" 2>&1)"; then
-      finding required user "~/.claude cannot be created: $(printf '%s' "$err" | one_line)"
+      finding required user "~/.claude cannot be created: $(printf '%s' "$err" | one_line)" "mkdir -p ~/.claude"
     else
       take_lock "$([ "$MODE" = sync ] && echo 5 || echo 60)"
       case $? in
@@ -1018,17 +1038,20 @@ main() {
           apply_local
           ;;
         1)
+          [ "$MODE" != sync ] || [ "$(resolve "$STABLE")" = "$ROOT" ] || exit 0
           if [ "$MODE" = sync ]; then
             finding advisory install "another install held the lock for 5 seconds, so this session start applied nothing" "$(install_command)"
           else
             finding required install "another install held the lock for a minute, so nothing was applied" "$(install_command)"
           fi
           ;;
-        *) finding required user "the apply lock on ~/.claude could not be taken, so nothing was applied: $LOCK_ERROR" ;;
+        *) finding required user "the apply lock on ~/.claude could not be taken, so nothing was applied: $LOCK_ERROR" "$LOCK_FIX" ;;
       esac
       exec 9<&-
     fi
-    have setsid && setsid "$ROOT/hooks/reap.sh" </dev/null >/dev/null 2>&1 &
+    # A simple command, so the forked shell execs it: a backgrounded list would
+    # keep this run's stdout open, and a hook's caller waits for that to close.
+    if have setsid; then setsid "$ROOT/hooks/reap.sh" </dev/null >/dev/null 2>&1 & fi
   fi
 
   if check_claude && [ "$ready" -eq 1 ]; then

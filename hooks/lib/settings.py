@@ -145,6 +145,18 @@ def earlier_forms(item, request):
     return {fingerprint(f) for f in forms}
 
 
+def for_the_user(error, request):
+    """A failure in the file's content, with the newest backup named and the
+    file opened for editing, since no command can know the right value."""
+    home = request.get("home", "")
+    newest = newest_backup(request["backups"])
+    reason = str(error)
+    if newest:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(newest)))
+        reason += ". The newest backup is %s, from %s" % (shell_path(newest, home), when)
+    return SettingsError("user", reason, '"${EDITOR:-vi}" %s' % shell_path(request["settings"], home))
+
+
 def shell_path(path, home):
     if home and path.startswith(home + "/"):
         return "~/" + shlex.quote(path[len(home) + 1 :])
@@ -316,7 +328,7 @@ def parse(raw, request):
         newest = newest_backup(backups)
         settings = shell_path(request["settings"], home)
         if not newest:
-            raise SettingsError("user", "settings.json does not parse: %s" % e, "python3 -m json.tool %s" % settings)
+            raise for_the_user(SettingsError("user", "settings.json does not parse: %s" % e), request)
         broken = os.path.join(backups, "settings.json.broken-" + time.strftime("%Y%m%d-%H%M%S"))
         raise SettingsError(
             "user",
@@ -401,7 +413,10 @@ def run(request, write, read=read_bytes):
     for _ in range(ATTEMPTS):
         before = read(path)
         current = parse(before, request)
-        merged, ledger, restart = merge(current, request)
+        try:
+            merged, ledger, restart = merge(current, request)
+        except SettingsError as e:
+            raise e if e.fix else for_the_user(e, request)
         try:
             text = render(merged).encode("utf-8")
         except ValueError as e:

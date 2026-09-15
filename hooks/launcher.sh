@@ -14,14 +14,20 @@ entry=${2-}
 if [ $# -ge 2 ]; then shift 2; else set --; fi
 link="$HOME/.claude/agent-toolkit"
 
+lead="agent-toolkit is unreachable, so its guard cannot judge this call"
 if [ -n "$entry" ] && [ -f "$link/$entry" ] && [ -x "$link/$entry" ]; then
   [ "$caller" = PreToolUse ] || exec "$link/$entry" "$@"
   # Claude Code lets the call through on any exit but 0 and 2, which is what a
-  # guard that cannot start, or crashes, exits with.
-  "$link/$entry" "$@"
+  # guard that cannot start, or crashes, exits with. Its output is held until
+  # then, so half a verdict never reaches Claude Code ahead of the ask.
+  out=$("$link/$entry" "$@")
   status=$?
-  if [ "$status" -eq 0 ] || [ "$status" -eq 2 ]; then exit "$status"; fi
-  problem="$entry gave no verdict (exit $status)"
+  if [ "$status" -eq 0 ] || [ "$status" -eq 2 ]; then
+    [ -z "$out" ] || printf '%s\n' "$out"
+    exit "$status"
+  fi
+  lead="agent-toolkit's guard gave no verdict on this call"
+  problem="$entry exited $status"
 else
   target=$(readlink "$link" 2>/dev/null)
   if [ -z "$target" ]; then
@@ -41,7 +47,7 @@ esc() {
 case "$caller" in
   PreToolUse)
     printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"%s"}}\n' \
-      "$(esc "agent-toolkit is unreachable, so its guard cannot judge this call: $problem. Fix: $fix")"
+      "$(esc "$lead: $problem. Fix: $fix")"
     ;;
   SessionStart)
     printf '{"systemMessage":"%s","hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"agent-toolkit doctor:\\n%s"}}\n' \
