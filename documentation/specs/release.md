@@ -179,6 +179,7 @@ A release the machine will not install is announced at most once, and the record
 | the wanted release is not being installed here | advisory, announced once | user | the way forward for dev mode, a pin, or `off` |
 
 - `systemMessage` reaches the user: one line, present when a release went live, when one failed to, or when a required finding stands.
+- **`reloadSkills` is set whenever a release went live.** A new version directory re-points every skill link, and the terminal report install prints on a full install has no field that says so.
 - **Silence is the normal state.** A machine at the wanted release whose last check succeeded prints nothing at all.
 - **`stage` reports nothing.** An async hook's output reaches nothing reliably and is killed at teardown in `-p` mode, so it records and `apply` reports. A failure is therefore reported at the session start after the one that hit it.
 - **Two checks catch two different silences.** A recorded failure names its own cause the moment it happens, which a clock cannot do; and a successful check older than seven days catches a `stage` that is not running at all, which a recorded failure cannot.
