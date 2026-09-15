@@ -241,6 +241,7 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 | install from the staged folder does not go live | nothing on the machine changed. The version is marked bad and the report carries install's reason |
 | install goes live and a later write fails | install's own contract: the new version is live and the report names what did not apply |
 | the track holds something the updater does not accept | the updater stops and reports. Nothing is checked, downloaded or applied |
+| the record will not parse | it is replaced and the run says so. A check and an activation both still happen: the record is what the updater remembers, not what it is allowed to do |
 | the stable link dangles | the updater is behind it and cannot run. The launcher reports it, and the bootstrap is the way back |
 | a staged folder is deleted by hand | it is staged again at the next check |
 | the suite fails in the workflow | no release. The run fails, and GitHub tells the author. Machines see nothing new, which is correct |
