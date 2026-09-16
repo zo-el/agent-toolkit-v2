@@ -114,7 +114,6 @@ A `VERSION` line in any other form counts as no version. Two versions are equal 
 - **The gate reads its payload with `jq`, or with `python3` when `jq` is missing**, so the same verdicts hold on a machine that lacks one of them. A read-only call passes either way. With neither, the call is let through and the missing tools are a required finding.
 - The launcher's own deletion is not defended against, any more than the deletion of `settings.json` is.
 - Claude Code reloads hooks and permissions when `settings.json` changes. A wiring change that one session's `--sync` applies reaches every running session on the machine.
-- **`SessionEnd` entries finish inside Claude Code's 1.5 second budget.** Reaping signals the processes it owns and returns. Waiting for them to exit, and killing what remains, happens in a detached process. A full install and `--sync` do not wait on reaping either.
 
 ## Reports
 
@@ -168,7 +167,7 @@ The list lives once, in `install.sh`. The doctor checks it, both reports render 
 | Requirement | Severity | Fix |
 | ----------- | -------- | --- |
 | `jq` and `python3` on PATH | required. Without them nothing can be merged or verified, so install stops before writing anything | the package line |
-| `git` and `setsid` on PATH | required | the package line |
+| `git` and `flock` on PATH | required | the package line |
 | `claude` on PATH, at or above the minimum version | required. The plugin step is skipped | `curl -fsSL https://claude.ai/install.sh \| bash`, or `claude update` |
 | the root checks pass | required, `toolkit` | the file, and for a python failure the interpreter's last line |
 | each required plugin installed and enabled | required, `install` | a full install |
@@ -245,7 +244,6 @@ It also states, once each:
 - **A hand-kept list of retired values.** It works only when whoever retires a value remembers to add it.
 - **Moving the stable link first and checking after.** A broken version would be live with nothing to roll back to.
 - **Warning at session start instead of applying.** A stale file keeps running dead hook paths until someone acts, and a hook that cannot start does not block the tool it guards.
-- **A longer `SessionEnd` timeout for reaping.** It holds every session exit for as long as a process ignores TERM.
 - **Allowing the checkout at the stable path.** One layout keeps the stable link free to point at any version directory.
 
 ## Decisions left to the build

@@ -17,7 +17,7 @@ Follow [`INSTALL.md`](INSTALL.md).
 | `CLAUDE.md` | the agreement: the CTO loop, tasks, code and writing style, the gates |
 | `agents/` | architect · developer · reviewer · project-manager · researcher |
 | `skills/` | `backlog` · `toolkit` (change this repo) · `ui-review` (screenshot galleries) |
-| `hooks/` | the guard, the statusline, the task line, the retro recorder, the formatter, background process tracking |
+| `hooks/` | the guard, the statusline, the task line, the retro recorder, the formatter |
 | `INSTALL.md` | how to install, and what install touches |
 | `install.sh` | the installer, and the doctor that runs at every session start |
 | `RETRO.md` | learnings written by hand, read alongside the retro digest |
@@ -82,7 +82,7 @@ It answers toolkit questions, not cost questions — every agent's `Retro:` line
 
 ## Statusline
 
-[`hooks/statusline.py`](hooks/statusline.py) shows: model · effort · context bar · lines changed · rate limits · tasks · background processes · branch and PR · directory · toolkit version.
+[`hooks/statusline.py`](hooks/statusline.py) shows: model · effort · context bar · lines changed · rate limits · tasks · branch and PR · directory · toolkit version.
 
 ```
 Opus 5 1M │ ⚡xhigh │ ▰▱▱▱▱▱▱▱ 18% 180k/1M │ +412/-96 │ ⏱ 63% 2h13m · 41% 3d2h │ ☰ 2/5 │ ⎇ main* #42 │ my-app │ ⬡ v10·12d438c

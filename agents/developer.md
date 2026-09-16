@@ -56,7 +56,7 @@ Findings handed to you from an outside review run the same loop — fix, rebuild
 - Full edit — you are the one agent that writes application source.
 - No Linear. Read acceptance criteria from your brief or the task doc; if they look stale, say so instead of guessing.
 - Anything you spawn must not spawn further, and must finish before you return.
-- Stop every process you start. Long-running ones go through `~/.claude/agent-toolkit/hooks/bg.sh`.
+- Stop every process you start. Long-running ones go through Claude Code's own background mode.
 
 ## What you return
 
