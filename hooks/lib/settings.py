@@ -93,7 +93,10 @@ def ours(handler):
 def retirable(path):
     if len(path) == 1:
         return path[0] not in NOT_TOP_LEVEL_VALUES
-    return (len(path) == 2 and path[0] in ("env", "enabledPlugins")) or path == ("permissions", "defaultMode")
+    return (len(path) == 2 and path[0] in ("env", "enabledPlugins", "attribution")) or path == (
+        "permissions",
+        "defaultMode",
+    )
 
 
 def owned(desired):

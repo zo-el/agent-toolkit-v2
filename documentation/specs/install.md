@@ -41,7 +41,7 @@
 | ------------- | ---- | ---- |
 | stable link | `~/.claude/agent-toolkit` | a symlink to the version directory, moved only as Going live describes. A real directory at this path is never replaced or written into |
 | launcher | `~/.claude/agent-toolkit-run` | a copy of the version directory's launcher, replaced whenever the two differ |
-| skills | `~/.claude/skills/<name>` | one symlink per skill into the version directory. Dangling links and links into the previously installed version directory are removed. Links the user made elsewhere are left alone |
+| skills | `~/.claude/skills/<name>` | one symlink per skill into the version directory. A link into the previously installed version directory is removed, as is a dangling link whose target lies inside a version directory. Links the user made elsewhere are left alone, dangling or not |
 | agents | `~/.claude/agents/<name>.md`, `~/.claude/agents/.toolkit-agents` | copies. The manifest names what the toolkit owns, so a retired agent is removed. A file at a toolkit agent's name that the manifest does not list is backed up, then replaced |
 | settings | `~/.claude/settings.json` | toolkit-owned values merged in, everything else kept. See Settings |
 | ledger | `~/.claude/agent-toolkit-applied.json` | the toolkit-owned values this machine's installs introduced or changed |
@@ -65,8 +65,10 @@ The same rule holds when the directory is already live, as with a checkout updat
 
 ### Root checks
 
-- every entry point the wiring names exists in the root and is executable, as is `install.sh`;
-- the launcher exists in the root;
+- every entry point the wiring names exists in the root and is executable, as do `install.sh` and the files install itself reads;
+- the launcher exists in the root, and its own first line runs;
+- the launcher run against a missing entry point asks, and the guard's first line runs;
+- `skills/` and `agents/` hold something, so a partly unpacked directory never installs as an empty toolkit;
 - every python hook compiles and `hooks/lib` imports, checked without writing into the root.
 
 ## Version identity
@@ -92,13 +94,15 @@ A `VERSION` line in any other form counts as no version. Two versions are equal 
 - Removing a plugin's `enabledPlugins` entry does not uninstall the plugin.
 - A settings file that does not parse, or that the merge cannot apply to, is never written.
 - Claude Code writes this file too, and honours no lock of install's. Immediately before the rename, install re-reads the file. If it changed since the merge began, install redoes the merge against the new content.
-- Applies are serialised across the machine. A `--sync` that cannot take the lock within 5 seconds applies nothing and still reports.
+- Applies are serialised across the machine. A `--sync` that cannot take the lock within 5 seconds applies nothing and still reports, and a full install waits up to 60 seconds for it.
+- **A ledger that does not parse never holds an apply back.** It is moved aside to a backup name and the run carries on as though there were none: every toolkit-owned value is set, and nothing is retired. The run reports it.
+- Replacing a `settings.json` or a pointer that was a symlink writes the file in its place and says so.
 
 ## Wiring
 
 - Every command the toolkit writes into settings, the status line included, runs the launcher with the entry point it stands for. Each one runs correctly when the home path contains a space.
 - The pointer's import and the permission rules use `~/` paths, which Claude Code resolves.
-- The launcher resolves the entry point through the stable link at call time and passes stdin, arguments and exit status through untouched. When the stable link dangles, or the entry point is missing or not executable, it degrades by caller:
+- The launcher resolves the entry point through the stable link at call time and passes stdin and arguments through untouched. It passes the exit status through as well, except for a `PreToolUse` entry point that exits anything other than `0` or `2`: Claude Code treats those as non-blocking, so the launcher asks instead. When the stable link dangles, or the entry point is missing or not executable, it degrades by caller:
 
 | Caller | What it does |
 | ------------------ | ------------ |
@@ -107,6 +111,7 @@ A `VERSION` line in any other form counts as no version. Two versions are equal 
 | status line | one short line saying the toolkit is unreachable |
 | any other event | exit `0`, no output |
 
+- **The gate reads its payload with `jq`, or with `python3` when `jq` is missing**, so the same verdicts hold on a machine that lacks one of them. A read-only call passes either way. With neither, the call is let through and the missing tools are a required finding.
 - The launcher's own deletion is not defended against, any more than the deletion of `settings.json` is.
 - Claude Code reloads hooks and permissions when `settings.json` changes. A wiring change that one session's `--sync` applies reaches every running session on the machine.
 - **`SessionEnd` entries finish inside Claude Code's 1.5 second budget.** Reaping signals the processes it owns and returns. Waiting for them to exit, and killing what remains, happens in a detached process. A full install and `--sync` do not wait on reaping either.
@@ -150,13 +155,15 @@ Each `user` fix stands alone on its own line, so it can be copied whole.
 
 - `systemMessage` reaches the user. One line, present only when a required finding stands, or when the run wrote settings or the pointer, or when a restart is due.
 - `additionalContext` reaches the model. It opens with `agent-toolkit doctor:` and holds every finding, advisories included, each with who acts and its fix, plus what was written and its backup path.
-- At `SessionStart`, `reloadSkills: true` is set when the run changed a skill link.
-- Agent copies and skill links applied without a problem are not reported in a hook.
+- At `SessionStart`, `reloadSkills: true` is set when the run changed a skill link. A run whose only change is a relinked skill prints the object holding that field alone, because a new skill Claude Code has not rescanned is not yet usable.
+- An agent copy or a skill link applied without a problem is not reported in a hook. A removal is: taking something away is not the same as keeping it current.
 - The exit is always `0` because Claude Code drops the plain stdout of a hook that exits non-zero and shows the user only the first line of its stderr.
 
 ## Requirements
 
 The list lives once, in `install.sh`. The doctor checks it, both reports render it, and the guide never repeats it. No check uses the network.
+
+**`--sync` checks only what it can act on.** The requirements a user can satisfy only outside Claude Code, being `gh`, the ssh-agent and the git identity, are checked by a full install and skipped at session start. They cannot be fixed from the session that would report them, they cost a session start the time to ask other programs, and the same three lines in every session's context say nothing new.
 
 | Requirement | Severity | Fix |
 | ----------- | -------- | --- |
@@ -221,6 +228,10 @@ It also states, once each:
 | `settings.json` does not parse, or the merge fails | the file is left untouched. Required finding with the reason and the newest backup |
 | another writer changes `settings.json` between the start of the merge and the re-read before the rename | the merge is redone against the new content. A write landing after that re-read is not detected |
 | `--sync` cannot take the lock | nothing applied. Findings still reported |
+| the ledger does not parse | it is moved aside to a backup name. Every toolkit-owned value is set, nothing is retired, and the run reports it |
+| `settings.json` exists and is empty | the file is left untouched. Required user finding, because an empty file is a file something is wrong with, not an empty object |
+| `settings.json` or the pointer is a symlink | the file is written in the link's place, and the report says the link is gone |
+| a backup does not parse | it is never offered as the file to restore. The newest backup that does parse is |
 | a write inside `~/.claude` fails | earlier steps stay applied. The report names what did not apply. No version stamp |
 | a plugin fetch fails, or `claude` is missing or too old | required finding. Everything local still applies |
 | the version directory has no git history and no valid `VERSION` | installs. The stamp is removed |

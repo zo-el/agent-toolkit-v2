@@ -228,6 +228,8 @@ check "spawn depth set"       "2"             "$(settings '.env.CLAUDE_CODE_MAX_
 check "todo tools enabled"    "1"             "$(settings '.env.CLAUDE_CODE_ENABLE_TODO_TOOLS')"
 check "tasks opt-out kept"    "false"         "$(settings '.env.CLAUDE_CODE_ENABLE_TASKS')"
 check "co-authored-by off"    "false"         "$(settings '.includeCoAuthoredBy')"
+check "session url off"       "false"         "$(settings '.attribution.sessionUrl')"
+check "commit trailers off"   "false"         "$(settings '.attribution.commitTrailers')"
 check "agent teams removed"   "null"          "$(settings '.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS')"
 check "peer inbox refused"    "refuse"        "$(settings '.crossSessionInbound')"
 check "cross-machine gated"   "true"          "$(settings '.isolatePeerMachines')"

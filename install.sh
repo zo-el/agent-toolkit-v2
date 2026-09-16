@@ -100,7 +100,10 @@ def run($caller; $entry): "\"$HOME/.claude/agent-toolkit-run\" \($caller) \($ent
       "Read(~/.claude/backups/.claude.json.backup.*)"
     ]
   },
+  # The no-attribution rule, mechanically. includeCoAuthoredBy alone leaves the
+  # session URL trailer and the link in a pull request body.
   includeCoAuthoredBy: false,
+  attribution: {sessionUrl: false, commitTrailers: false},
   enabledPlugins: ($plugins | map({key: ., value: true}) | from_entries),
   statusLine: {type: "command", command: run("statusline"; $statusline), padding: 0},
   hooks: (reduce $wiring[] as $w ({};
