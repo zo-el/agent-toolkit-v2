@@ -21,13 +21,20 @@ set -uo pipefail
 reg="$HOME/.claude/bg-procs"
 start_of() { sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; }
 
-# A group keeps its leader's pid until its last member exits, so a leader that
-# has gone is no reason to leave its children running. The one case where the
-# group may not be the one that was registered is a pid that is alive and now
-# belongs to someone else.
+# Signalling a group is only safe while the pid that names it still leads the
+# process we registered, proved by its kernel start time. Anything else is
+# unknown: a pid we cannot read, one the kernel will not let us signal, one that
+# has gone and may have been recycled as another group's leader. Unknown leaks
+# the process. It never signals, because the group id is a bare number and the
+# group it names may by then be a login session, a terminal, or every process
+# this user owns.
 ours() { # pid, the start time recorded for it
+  case "$1" in "" | *[!0-9]*) return 1 ;; esac
+  # 0 is "this group" and 1 is init, so neither is ever a job of ours, and both
+  # are catastrophic as the target of a group signal.
+  [ "$1" -gt 1 ] || return 1
   [ -n "$2" ] || return 1
-  kill -0 "$1" 2>/dev/null || return 0
+  [ -r "/proc/$1/stat" ] || return 1
   [ "$(start_of "$1")" = "$2" ]
 }
 

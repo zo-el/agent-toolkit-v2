@@ -1639,13 +1639,24 @@ for _ in $(seq 50); do [ -f "$reg/$pid.json" ] || break; sleep 0.1; done
 kill -0 "$pid" 2>/dev/null && bad "own session reaps it" "pid $pid survived" || ok "own session reaps it"
 [ ! -f "$reg/$pid.json" ] && ok "registry entry cleared" || bad "registry entry cleared" "still there"
 
-# A recycled pid must be pruned, never signalled.
+# A recycled pid must be pruned, never signalled. The pid under test is one the
+# reaper must refuse outright: 1 names init, and as a group signal it means every
+# process this user owns, which is the whole terminal the suite is running in.
 printf '{"pid":%d,"start":"999999","owner":"","owner_start":"","session":"x","cmd":["sleep"]}' 1 > "$reg/1.json"
 printf '{"hook_event_name":"SessionEnd","session_id":"x"}' | HOME="$FAKE" "$ROOT/hooks/reap.sh"
 [ ! -f "$reg/1.json" ] && ok "recycled pid pruned unsignalled" || bad "recycled pid pruned" "entry remains"
 
-# A leader that exits leaves its children behind in its group, which keeps its
-# pid until the last of them is gone.
+# The same for a pid that is alive, is not ours, and is not a process group
+# leader: the number names some other group, so no signal may be sent.
+printf '{"pid":%d,"start":"999999","owner":"","owner_start":"","session":"x","cmd":["sleep"]}' "$$" > "$reg/$$.json"
+printf '{"hook_event_name":"SessionEnd","session_id":"x"}' | HOME="$FAKE" "$ROOT/hooks/reap.sh"
+kill -0 "$$" 2>/dev/null && ok "a live pid with a stale start time is spared" || bad "a live pid with a stale start time is spared" "the suite's own shell was signalled"
+[ ! -f "$reg/$$.json" ] && ok "and its entry is pruned unsignalled" || bad "and its entry is pruned" "entry remains"
+
+# A leader that exits leaves its children behind, and the group keeps its pid
+# until the last of them is gone. The reaper leaves them alive: with the leader
+# gone there is nothing left to check the group against, and a group named by a
+# bare number is every process this user owns when that number is 1.
 rm -f "$TMP/child.pid"
 out="$(HOME="$FAKE" CLAUDE_CODE_SESSION_ID=orphans "$ROOT/hooks/bg.sh" -- \
   bash -c "sleep 300 & echo \$! > '$TMP/child.pid'; exit 0")"
@@ -1653,12 +1664,12 @@ lead="$(printf '%s' "$out" | awk '{print $3}')"
 for _ in $(seq 50); do [ -s "$TMP/child.pid" ] && ! kill -0 "$lead" 2>/dev/null && break; sleep 0.1; done
 child="$(cat "$TMP/child.pid" 2>/dev/null)"
 printf '{"hook_event_name":"SessionEnd","session_id":"orphans"}' | HOME="$FAKE" "$ROOT/hooks/reap.sh"
-for _ in $(seq 50); do kill -0 "$child" 2>/dev/null || break; sleep 0.1; done
+sleep 1
 if kill -0 "$child" 2>/dev/null; then
-  bad "a child that outlived its leader is reaped with the group" "pid $child survived"
+  ok "a child whose leader has gone is left alive, not signalled by number"
   kill -KILL "$child" 2>/dev/null
 else
-  ok "a child that outlived its leader is reaped with the group"
+  bad "a child whose leader has gone is left alive, not signalled by number" "pid $child was signalled"
 fi
 for _ in $(seq 20); do [ -f "$reg/$lead.json" ] || break; sleep 0.1; done
 [ ! -f "$reg/$lead.json" ] && ok "and its registry entry is cleared" || bad "and its registry entry is cleared" "still there"
