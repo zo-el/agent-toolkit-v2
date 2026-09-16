@@ -90,11 +90,6 @@ file_id() { stat -c '%i %y' "$1"; }
 exit_is() { [ "$rc" = "$2" ] && ok "$1" || bad "$1" "exit $rc, output: $out"; } # name, expected
 same() { [ "$2" = "$3" ] && ok "$1" || bad "$1" "${4:-it changed}"; }          # name, before, after
 json_is() { jq -se "length == 1 and (.[0] | $2)" <<<"$out" >/dev/null 2>&1 && ok "$1" || bad "$1" "${out:-<empty>}"; }
-alive() { # pid → true while it runs; a zombie has already exited
-  local state
-  state="$(sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $1}')"
-  [ -n "$state" ] && [ "$state" != Z ]
-}
 block() { sed -n "/^$1\$/,/^\$/p" <<<"$out"; } # heading → its lines, blank line included
 # Fields are split on a unit separator: an empty matcher between two tabs would
 # collapse, since read treats a tab as whitespace.
@@ -214,7 +209,6 @@ PreToolUse[Bash] PreToolUse hooks/guard.sh
 PreToolUse[mcp__linear.*] PreToolUse hooks/guard.sh
 PostToolUse[Write|Edit] PostToolUse hooks/sync.sh
 PostToolUse[Write|Edit] async hooks/format.sh (async)
-SessionEnd[] SessionEnd hooks/reap.sh
 SessionEnd[] async hooks/retro.py record (async)
 statusLine statusline hooks/statusline.py
 WIRED
@@ -257,7 +251,7 @@ cmp -s "$ROOT/hooks/launcher.sh" "$FAKE/.claude/agent-toolkit-run" && [ -x "$FAK
   && ok "the launcher is installed outside the version directory" || bad "the launcher is installed" "missing or different"
 check "a settings write takes a backup" "settings.json updated (backup: ~/.claude/backups/settings.json." "$out"
 
-for want in "PreToolUse hooks/guard.sh" "SessionEnd hooks/reap.sh" "async hooks/format.sh" \
+for want in "PreToolUse hooks/guard.sh" "async hooks/format.sh" \
   "PostToolUse hooks/sync.sh" "UserPromptSubmit hooks/taskline.py" "SessionStart install.sh --sync"; do
   check "wires $want through the launcher" "\"\$HOME/.claude/agent-toolkit-run\" $want" \
     "$(settings '[.hooks[][].hooks[].command] | join(" ")')"
@@ -784,7 +778,7 @@ check "while the others still go" "[false,false,false]" \
 
 # ── upgrading an install that predates the ledger ────────────────────────────
 # The shape the previous install.sh leaves: absolute paths everywhere, no
-# launcher, no ledger.
+# launcher, no ledger, and the reaper it used to wire at SessionEnd.
 H="$(home predates-ledger)"
 ln -s "$ROOT" "$H/.claude/agent-toolkit"
 cat >"$H/.claude/settings.json" <<JSON
@@ -816,6 +810,8 @@ check "leaving exactly the four deny rules, none of them in the absolute form" \
   "$(js "$H" '.permissions.deny | tostring')"
 check "with no command left that bypasses the launcher" "[]" \
   "$(js "$H" '[.hooks[][].hooks[].command, .statusLine.command] | map(select(test("agent-toolkit-run") | not)) | tostring')"
+check "and the reaper a previous version wired is unwired, not carried forward" "[]" \
+  "$(js "$H" '[.hooks[][].hooks[].command | select(test("reap"))] | tostring')"
 check "and the user's own env kept" "1" "$(js "$H" '.env.MINE')"
 LEAN="$TMP/root-without-todo-tools"
 copy_root "$LEAN"
@@ -934,12 +930,6 @@ while IFS=$'\037' read -r event matcher command; do
       HOME="$SPACE" PATH="$TMP/formatter:$PATH" sh -c "$command" <"$TMP/hook.payload" >/dev/null 2>&1
       check "$name reaches the formatter" "format-me.py" "$(cat "$TMP/ruff.calls" 2>/dev/null)"
       ;;
-    hooks/reap.sh)
-      pid="$(HOME="$SPACE" CLAUDE_CODE_SESSION_ID=wired-reap "$ROOT/hooks/bg.sh" -- sleep 300 | awk '{print $3}')"
-      hook "$SPACE" "$command" '{"hook_event_name":"SessionEnd","session_id":"wired-reap"}'
-      for _ in $(seq 50); do alive "$pid" || break; sleep 0.1; done
-      alive "$pid" && { bad "$name reaches the reaper" "pid $pid survived"; kill -KILL "$pid"; } || ok "$name reaches the reaper, which ends the session's process"
-      ;;
     hooks/retro.py)
       rm -f "$SPACE/.claude/retro/last-sweep"
       hook "$SPACE" "$command" "{\"hook_event_name\":\"$event\"}"
@@ -965,7 +955,7 @@ hook "$H" "$(command_for "$H" statusline statusline.py)" '{"cwd":"/"}'
 check "the status line says the toolkit is unreachable" "agent-toolkit unreachable" "$out"
 hook "$H" "$(command_for "$H" SessionStart retro.py)" '{"hook_event_name":"SessionStart"}'
 [ "$rc" = 0 ] && [ -z "$out" ] && ok "an async command stays silent, so session start reports once" || bad "an async command stays silent" "exit $rc: $out"
-hook "$H" "$(command_for "$H" SessionEnd reap.sh)" '{"hook_event_name":"SessionEnd"}'
+hook "$H" "$(command_for "$H" PostToolUse sync.sh)" '{"hook_event_name":"PostToolUse"}'
 [ "$rc" = 0 ] && [ -z "$out" ] && ok "any other event exits 0 with no output" || bad "any other event exits 0 with no output" "exit $rc: $out"
 inst "$TMP/moved-root" "$H"
 exit_is "a full install from the new location goes green" 0
@@ -980,40 +970,6 @@ same "and re-points the link" "$TMP/moved-root" "$(readlink "$H/.claude/agent-to
 check "and drops the old location from the approved directories" "null" \
   "$(jq --arg v "$MOVABLE" '.permissions.additionalDirectories | index($v)' "$H/.claude/settings.json")"
 [ -z "$(find "$H/.claude/skills" -maxdepth 1 -lname "$MOVABLE/*")" ] && ok "and unlinks the old location's skills" || bad "and unlinks the old location's skills" "$(ls -l "$H/.claude/skills")"
-
-# ── reaping never blocks ─────────────────────────────────────────────────────
-H="$(home reap)"
-pid="$(HOME="$H" CLAUDE_CODE_SESSION_ID=stubborn "$ROOT/hooks/bg.sh" -- bash -c 'trap "" TERM; while :; do sleep 1; done' | awk '{print $3}')"
-printf '{"hook_event_name":"SessionEnd","session_id":"stubborn"}' >"$TMP/reap.payload"
-start=$(date +%s%N)
-HOME="$H" "$ROOT/hooks/reap.sh" <"$TMP/reap.payload"
-took=$((($(date +%s%N) - start) / 1000000))
-[ "$took" -lt 1000 ] && ok "reap.sh returns in under a second against a process that ignores TERM (${took}ms)" \
-  || bad "reap.sh returns in under a second" "took ${took}ms"
-for _ in $(seq 50); do alive "$pid" || break; sleep 0.1; done
-alive "$pid" && { bad "and the process is gone within 5s" "pid $pid survived"; kill -KILL -- "-$pid"; } || ok "and the process is gone within 5s"
-for _ in $(seq 20); do [ -e "$H/.claude/bg-procs/$pid.json" ] || break; sleep 0.1; done
-[ ! -e "$H/.claude/bg-procs/$pid.json" ] && ok "and its entry is cleared" || bad "and its entry is cleared" "still registered"
-
-inst "$ROOT" "$H"
-pid="$(HOME="$H" "$ROOT/hooks/bg.sh" -- bash -c 'trap "" TERM; while :; do sleep 1; done' | awk '{print $3}')"
-jq '.owner = "999999999"' "$H/.claude/bg-procs/$pid.json" >"$TMP/entry" && cp "$TMP/entry" "$H/.claude/bg-procs/$pid.json"
-inst "$ROOT" "$H" --sync
-alive "$pid" && ok "install returns while the reaper is still waiting on a stubborn process" \
-  || bad "install does not wait on reaping" "the process was already gone"
-for _ in $(seq 50); do alive "$pid" || break; sleep 0.1; done
-alive "$pid" && { bad "and that process is gone within 5s" "pid $pid survived"; kill -KILL -- "-$pid"; } || ok "and that process is gone within 5s"
-
-SLOWREAP="$TMP/slow-reap-root"
-copy_root "$SLOWREAP"
-printf '#!/bin/sh\necho $$ >>"$HOME/reap.pids"\nsleep 8\n' >"$SLOWREAP/hooks/reap.sh"
-H="$(home slow-reap)"
-inst "$SLOWREAP" "$H"
-start=$(date +%s%N)
-inst "$SLOWREAP" "$H" --sync
-took=$((($(date +%s%N) - start) / 1000000))
-[ "$took" -lt 5000 ] && ok "a session start does not wait on a reaper that takes 8 seconds (${took}ms)" || bad "a session start does not wait on the reaper" "took ${took}ms"
-xargs -r kill <"$H/reap.pids" 2>/dev/null
 
 # ── a write that fails ───────────────────────────────────────────────────────
 # Root writes into a read-only directory regardless, so this is skipped there.
@@ -1524,15 +1480,6 @@ printf '\377\376\n' >"$H/.claude/retro/since"
 hook "$H" "$(command_for "$H" SessionStart install.sh)" '{"hook_event_name":"SessionStart"}'
 json_is "a retro marker that will not decode is reported with who acts and the recorder's reason" \
   '.hookSpecificOutput.additionalContext | test("! the retro recorder is not recording. Fix \\(user\\): retro/since cannot be read")'
-
-H="$(home reap-partial)"
-mkdir -p "$H/.claude/bg-procs"
-printf '{"pid": 12' >"$H/.claude/bg-procs/424242.json"
-printf '{"hook_event_name":"SessionEnd","session_id":"x"}' | HOME="$H" "$ROOT/hooks/reap.sh"
-[ -e "$H/.claude/bg-procs/424242.json" ] && ok "a registry entry still being written is left for its writer" || bad "a registry entry still being written is left" "removed"
-touch -d '5 minutes ago' "$H/.claude/bg-procs/424242.json"
-printf '{"hook_event_name":"SessionEnd","session_id":"x"}' | HOME="$H" "$ROOT/hooks/reap.sh"
-[ ! -e "$H/.claude/bg-procs/424242.json" ] && ok "and dropped once it is old enough to be abandoned" || bad "and dropped once abandoned" "still there"
 
 H="$(home list-fails)"
 : >"$CLAUDE_CALLS"

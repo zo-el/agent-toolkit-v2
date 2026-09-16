@@ -61,8 +61,7 @@ WIRING='[
    "hooks":[{"entry":"hooks/sync.sh"},
             {"entry":"hooks/format.sh","async":true}]},
   {"event":"SessionEnd","matcher":"",
-   "hooks":[{"entry":"hooks/reap.sh"},
-            {"entry":"hooks/retro.py record","async":true}]}
+   "hooks":[{"entry":"hooks/retro.py record","async":true}]}
 ]'
 STATUSLINE_ENTRY="hooks/statusline.py"
 
@@ -256,8 +255,8 @@ package_name() { # manager, requirement
     pacman:gh) echo github-cli ;;
     apt-get:sqlite3) echo libpython3-stdlib ;;
     dnf:sqlite3) echo python3-libs ;;
-    dnf:setsid | dnf:flock) echo util-linux-core ;;
-    *:setsid | *:flock) echo util-linux ;;
+    dnf:flock) echo util-linux-core ;;
+    *:flock) echo util-linux ;;
     *) echo "$2" ;;
   esac
 }
@@ -282,14 +281,14 @@ GH_LOGIN="gh auth login --hostname github.com --git-protocol ssh --web"
 # Returns 1 when jq or python3 is missing.
 check_tools() {
   local missing=() stop=() rest=() t line
-  for t in jq python3 git setsid flock gh; do have "$t" || missing+=("$t"); done
+  for t in jq python3 git flock gh; do have "$t" || missing+=("$t"); done
   have python3 && ! python3 -c 'import sqlite3' >/dev/null 2>&1 && missing+=(sqlite3)
   [ ${#missing[@]} -gt 0 ] || return 0
   line="$(package_line "${missing[@]}")"
   for t in "${missing[@]}"; do
     case "$t" in
       jq | python3) stop+=("$t") ;;
-      git | setsid | flock) rest+=("$t") ;;
+      git | flock) rest+=("$t") ;;
     esac
   done
   [ ${#stop[@]} -eq 0 ] || finding required user "not on PATH: ${stop[*]}. Nothing can be merged or verified without it, so nothing was changed" "$line"
@@ -1114,9 +1113,6 @@ main() {
       esac
       exec 9<&-
     fi
-    # A simple command, so the forked shell execs it: a backgrounded list would
-    # keep this run's stdout open, and a hook's caller waits for that to close.
-    if have setsid; then setsid "$ROOT/hooks/reap.sh" </dev/null >/dev/null 2>&1 & fi
   fi
 
   if check_claude && [ "$ready" -eq 1 ]; then

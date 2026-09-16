@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """statusLine command, one line:
 
-    model │ effort │ context │ lines │ limits │ tasks │ bg │ branch+PR │ dir │ toolkit
+    model │ effort │ context │ lines │ limits │ tasks │ branch+PR │ dir │ toolkit
 
 Reads the status JSON Claude Code pipes to stdin. Every segment is wrapped and
 degrades to nothing — a statusline must never crash or print a traceback, and a
@@ -246,73 +246,6 @@ def segment_tasks(data):
     return f"{color}☰ {done}/{len(listing.tasks)}{mark}{RESET}"
 
 
-def proc_start(pid):
-    """Kernel start time, which makes a pid unambiguous across reuse. Raises if
-    the process is gone, so it doubles as the liveness test. comm can contain
-    spaces and parentheses, so cut past the last ')' first."""
-    with open(f"/proc/{pid}/stat", errors="replace") as f:
-        return f.read().rsplit(")", 1)[1].split()[19]
-
-
-def proc_ppid(pid):
-    with open(f"/proc/{pid}/status", errors="replace") as f:
-        for line in f:
-            if line.startswith("PPid:"):
-                return line.split()[1]
-    return None
-
-
-def owning_cli():
-    """(pid, start) of the CLI this statusline renders for — the same ancestry
-    walk bg.sh records ownership by, so the two agree on identity."""
-    pid = str(os.getpid())
-    while pid and pid not in ("0", "1"):
-        if os.path.exists(os.path.join(HOME, ".claude", "sessions", f"{pid}.json")):
-            return pid, proc_start(pid)
-        pid = proc_ppid(pid)
-    return None, None
-
-
-def segment_bg():
-    """Background processes this CLI still has running, from bg.sh's registry.
-    Several sessions run at once, so a global count would report someone else's.
-
-    A wrong count is worse than no count, so the two uncertainties fail at
-    different levels: an unverifiable entry drops out of the count, while only
-    an unidentifiable CLI or a missing registry hides the segment entirely.
-    """
-    reg = os.path.join(HOME, ".claude", "bg-procs")
-    if not os.path.isdir(reg):
-        return None
-    owner, owner_start = owning_cli()
-    if not owner:
-        return None
-    count = 0
-    for name in os.listdir(reg):
-        if not name.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(reg, name)) as f:
-                entry = json.load(f)
-        except (OSError, ValueError):
-            continue
-        if (
-            str(entry.get("owner") or "") != owner
-            or str(entry.get("owner_start") or "") != owner_start
-        ):
-            continue
-        pid = str(entry.get("pid") or "")
-        if not pid.isdigit():
-            continue
-        try:
-            if proc_start(pid) != str(entry.get("start") or ""):
-                continue
-        except (OSError, ValueError, IndexError):
-            continue
-        count += 1
-    return f"{COLORS['blue']}⚙ {count} bg{RESET}" if count else None
-
-
 PR_STYLE = {
     "approved": COLORS["green"],
     "changes_requested": COLORS["red"],
@@ -442,7 +375,6 @@ def main():
         lambda: segment_lines(data),
         lambda: segment_limits(data, now),
         lambda: segment_tasks(data),
-        lambda: segment_bg(),
         lambda: segment_git(data, cwd),
         lambda: f"{DIM}{os.path.basename(cwd)}{RESET}",
         lambda: segment_toolkit(),
