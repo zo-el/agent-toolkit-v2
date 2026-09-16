@@ -45,7 +45,8 @@ Sessions on this machine work on different projects and must not reach into each
 
 [`hooks/guard.sh`](hooks/guard.sh) is the only gate, and it fires regardless of permission mode, inside subagents too:
 
-- **denies** posting publicly as the user — PR and issue comments, review submissions.
+- **denies** posting publicly as the user: PR and issue comments, review submissions.
+- **denies** AI attribution in a commit or a pull request, alongside the `attribution` settings `install.sh` holds off.
 - **asks** before anything leaves the machine (push, PR, release, package publish), before Linear writes, before touching the device outside the workspace, and before the few git commands the reflog cannot undo.
 
 Everything else is silent. `permissions.defaultMode` is `auto` and `~/.claude`, the scratchpad, and this checkout are approved working directories, so an agent runs unattended instead of stalling on a prompt nobody is watching. `Read` is denied on the credentials and settings files, which carry API tokens.

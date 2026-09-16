@@ -776,6 +776,20 @@ check "and one that held the value before the toolkit first wrote it" "on" "$(js
 check "while the others still go" "[false,false,false]" \
   "$(js "$H" '[(.permissions.deny | index("Read(~/.toolkit-test)")), (.permissions.additionalDirectories | index("/toolkit-test-dir")), .enabledPlugins["test@test"]] | map(. != null) | tostring')"
 
+# ── attribution stays off ────────────────────────────────────────────────────
+# The rule against AI attribution is absolute, so the three values that switch
+# it off are not left to anyone remembering: a hand edit of any of them is put
+# back at the next session start, and the report says the file was written.
+H="$(home attribution)"
+inst "$ROOT" "$H"
+jq '.attribution.sessionUrl = true | .attribution.commitTrailers = true | .includeCoAuthoredBy = true' \
+  "$H/.claude/settings.json" >"$TMP/s" && cp "$TMP/s" "$H/.claude/settings.json"
+hook "$H" "$(command_for "$H" SessionStart install.sh)" '{"hook_event_name":"SessionStart"}'
+check "the three attribution values are put back at session start" "[false,false,false]" \
+  "$(js "$H" '[.attribution.sessionUrl, .attribution.commitTrailers, .includeCoAuthoredBy] | tostring')"
+json_is "and the run says so rather than fixing it silently" \
+  '.hookSpecificOutput.additionalContext | test("wrote settings.json")'
+
 # ── upgrading an install that predates the ledger ────────────────────────────
 # The shape the previous install.sh leaves: absolute paths everywhere, no
 # launcher, no ledger, and the reaper it used to wire at SessionEnd.

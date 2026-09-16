@@ -72,6 +72,36 @@ expect "linear write asks"            ask    "$(tool_payload 'mcp__linear__save_
 expect "linear delete asks"           ask    "$(tool_payload 'mcp__linear__delete_comment')"
 expect "non-linear mcp is free"       silent "$(tool_payload 'mcp__context7__query-docs')"
 
+# ── attribution ──────────────────────────────────────────────────────────────
+# Absolute in CLAUDE.md, so the verdict is deny: there is nothing to approve.
+trailer='Claude-Session: https://claude.ai/code/session_01ABC'
+coauthor='Co-Authored-By: Claude <noreply@anthropic.com>'
+generated='Generated with [Claude Code](https://claude.com/claude-code)'
+commit_with() { printf 'git commit -m "feat: x\n\n%s"' "$1"; }
+heredoc() { printf "%s <<'MSG'\nfeat: x\n\n%s\nMSG" "$1" "$2"; }
+
+expect "a session trailer on a commit is denied" deny "$(bash_payload "$(commit_with "$trailer")")"
+expect "a Claude co-author line too"             deny "$(bash_payload "$(commit_with "$coauthor")")"
+expect "and the generated-with line"             deny "$(bash_payload "$(commit_with "$generated")")"
+expect "and a bare session URL"                  deny "$(bash_payload "$(commit_with 'see https://claude.ai/code/session_01ABC')")"
+expect "whatever the case and spacing"           deny "$(bash_payload "$(commit_with 'co-authored-by:  claude <x@y>')")"
+expect "a -C repo does not hide it"              deny "$(bash_payload "$(printf 'git -C /repo commit -q -m "x\n\n%s"' "$trailer")")"
+expect "a merge message carrying it"             deny "$(bash_payload "$(printf 'git merge --no-ff -m "x\n\n%s" feat/y' "$coauthor")")"
+expect "an annotated tag message"                deny "$(bash_payload "$(printf 'git tag -a v1 -m "v1\n\n%s"' "$trailer")")"
+expect "a PR body on create"                     deny "$(bash_payload "$(printf 'gh pr create --title x --body "goal\n\n%s"' "$trailer")")"
+expect "a PR body on edit"                       deny "$(bash_payload "$(printf 'gh pr edit 12 --body "%s"' "$trailer")")"
+expect "an inline heredoc message is read too"   deny "$(bash_payload "$(heredoc 'git commit -F -' "$trailer")")"
+
+# The same words as data. Without this the suite could not write the fixtures
+# above, nor grep for the trailer it forbids.
+expect "grepping for the trailer is free"        silent "$(bash_payload "grep -rn '$trailer' .")"
+expect "printing it is free"                     silent "$(bash_payload "printf '%s\\n' '$coauthor'")"
+expect "a commit line quoted inside a printf"    silent "$(bash_payload "printf '%s' '$(commit_with "$trailer")' > fixture")"
+expect "and one typed into a heredoc body"       silent "$(bash_payload "$(printf "cat > fixture <<'EOF'\n%s\nEOF" "$(commit_with "$trailer")")")"
+expect "a grep chained behind a clean commit"    silent "$(bash_payload "git commit -m 'feat: x' && grep -rn Claude-Session .")"
+expect "a clean heredoc commit message"          silent "$(bash_payload "$(heredoc 'git commit -F -' 'The goal, and why.')")"
+expect "a clean PR still only asks"              ask    "$(bash_payload "gh pr create --title x --body 'the goal'")"
+
 # Without jq the guard reads the payload with python3 and gives the same
 # verdicts. env -i so it sees a bare environment, which is what a hook gets.
 stub_path "$TMP/nojq" bash grep sed tr cat python3

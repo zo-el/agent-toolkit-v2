@@ -3,7 +3,8 @@
 # they hold in auto mode and inside subagents, where no permission prompt would
 # otherwise reach the user.
 #
-#   deny  posting publicly as the user. Never allowed, approval or not.
+#   deny  posting publicly as the user, and AI attribution in a commit or a
+#         pull request. Never allowed, approval or not.
 #   ask   anything that leaves the machine, touches the device outside the
 #         workspace, destroys unrecoverable local work, or writes the Linear board.
 #
@@ -11,7 +12,9 @@
 #
 # Matching is substring-regex over the raw command, so a compound command is
 # caught. A quoted mention of a gated word can trip an ask; the cost is one
-# extra prompt, which is the right direction to be wrong in.
+# extra prompt, which is the right direction to be wrong in. The attribution
+# deny is the exception: it reads one command's own text, because a mention
+# must not trip a verdict there is no prompt for.
 set -uo pipefail
 
 input="$(cat)"
@@ -67,6 +70,35 @@ hit '\bgh[[:space:]]+pr[[:space:]]+review\b' \
 hit '\bgh[[:space:]]+api\b' && hit '(comments|reviews|discussions)' \
   && hit '(--method[= ]+(POST|PUT|PATCH|DELETE)|[[:space:]]-(f|F)[[:space:]]|--(field|raw-field|input)\b)' \
   && verdict deny "Mutating a comment or review endpoint posts as the user. Never allowed."
+
+# ── never: AI attribution in a commit or a pull request ──────────────────────
+# CLAUDE.md forbids it outright, so there is nothing for the user to approve.
+#
+# Only the writing command's own text is judged. It has to sit at a command
+# position and ahead of any heredoc opener, and everything from the first
+# separator after it is dropped, which leaves the same words in a printf, in a
+# heredoc body, or in a grep chained behind a commit as data that passes. An
+# inline heredoc body carries no separator of its own, so it is judged with the
+# command that opens it.
+#
+# What the command does not carry cannot be read here: a message from a file
+# (-F, --body-file), --amend reusing an old one, an editor session, and a
+# wrapped call such as `env X=1 git commit`. The attribution settings the
+# installer owns are what covers those.
+gap='[^|;&'$'\n'']*'                  # options only: never past a line or a separator
+at_command='(^|[;&|(){}'$'\n''])[[:blank:]]*'
+writes_message="$at_command(git$gap[[:blank:]](commit|merge)\
+|git$gap[[:blank:]]tag$gap[[:blank:]]-m|gh[[:blank:]]+pr[[:blank:]]+(create|edit))[[:blank:]]"
+if [[ "${cmd%%<<*}" =~ $writes_message ]]; then
+  message="${cmd#*"${BASH_REMATCH[0]}"}"
+  case "${message%%[;|&]*}" in
+    *'<<'*) ;;
+    *) message="${message%%[;|&]*}" ;;
+  esac
+  printf '%s' "$message" | grep -qiE \
+    'claude-session:|co-authored-by:[[:blank:]]*claude|generated with \[claude code\]|claude\.ai/code/session_' \
+    && verdict deny "No AI attribution in a commit or a pull request. Drop the trailer and run it again."
+fi
 
 # ── ask: anything that leaves the machine ────────────────────────────────────
 hit '\bgit[[:space:]]+push\b' \
