@@ -9,6 +9,8 @@ The toolkit is the instruction set every future session on every machine runs on
 
 Find the checkout with `readlink ~/.claude/agent-toolkit`.
 
+Run `install.sh` from that checkout only, never from a worktree or a copy: a full install points the device at the directory it runs from.
+
 ## Where a change goes
 
 | The change is… | It goes in… |

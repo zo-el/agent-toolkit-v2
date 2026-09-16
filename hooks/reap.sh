@@ -21,23 +21,28 @@ set -uo pipefail
 reg="$HOME/.claude/bg-procs"
 start_of() { sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'; }
 
-# A process is still the one that was signalled only while its start time
-# matches, so a pid recycled during the wait is never killed.
+# A group keeps its leader's pid until its last member exits, so a leader that
+# has gone is no reason to leave its children running. The one case where the
+# group may not be the one that was registered is a pid that is alive and now
+# belongs to someone else.
+ours() { # pid, the start time recorded for it
+  [ -n "$2" ] || return 1
+  kill -0 "$1" 2>/dev/null || return 0
+  [ "$(start_of "$1")" = "$2" ]
+}
+
 if [ "${1:-}" = "--finish" ]; then
   shift
   for _ in 1 2 3 4 5 6; do
     alive=0
     for ((i = 1; i <= $#; i += 3)); do
-      [ "$(start_of "${!i}")" = "${@:i+1:1}" ] && alive=1
+      ours "${!i}" "${@:i+1:1}" && kill -0 -- "-${!i}" 2>/dev/null && alive=1
     done
     [ "$alive" -eq 1 ] || break
     sleep 0.5
   done
   for ((i = 1; i <= $#; i += 3)); do
-    pid="${!i}"
-    if [ "$(start_of "$pid")" = "${@:i+1:1}" ]; then
-      kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
-    fi
+    ours "${!i}" "${@:i+1:1}" && { kill -KILL -- "-${!i}" 2>/dev/null || kill -KILL "${!i}" 2>/dev/null; }
     rm -f "${@:i+2:1}"
   done
   exit 0
@@ -66,11 +71,11 @@ for e in "$reg"/*.json; do
   fi
   eval "$fields"
 
-  # Gone, or the pid was recycled and now belongs to someone else: drop the
-  # record, never signal.
+  # The pid recycled and now belongs to someone else, or the whole group is
+  # gone: drop the record, never signal.
   [ -n "$pid" ] || { rm -f "$e"; continue; }
-  kill -0 "$pid" 2>/dev/null || { rm -f "$e"; continue; }
-  [ -n "$start" ] && [ "$start" = "$(start_of "$pid")" ] || { rm -f "$e"; continue; }
+  ours "$pid" "$start" || { rm -f "$e"; continue; }
+  kill -0 -- "-$pid" 2>/dev/null || { rm -f "$e"; continue; }
 
   reap=0
   [ -n "$ending" ] && [ "$session" = "$ending" ] && reap=1

@@ -639,6 +639,7 @@ cat > "$RP/alpha/s-main.jsonl" <<'JSON'
 {"type":"system","subtype":"stop_hook_summary","timestamp":"2026-08-14T10:00:08.000Z","hookInfos":[{"command":"sh /home/x/.claude/agent-toolkit/hooks/taskline.py","durationMs":30}],"hookErrors":[]}
 {"type":"system","subtype":"stop_hook_summary","timestamp":"2026-08-14T10:00:09.000Z","hookInfos":[{"command":"bash \"${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh\"","durationMs":8}],"hookErrors":["Failed with non-blocking status code: /bin/sh: 1: /home/x/.claude/agent-toolkit/hooks/notify.sh: not found"]}
 {"type":"system","subtype":"stop_hook_summary","timestamp":"2026-08-14T10:00:10.000Z","hookInfos":[{"command":"Implement the CANARYHOOKPROSE feature end to end and prove it","durationMs":4}],"hookErrors":[]}
+{"type":"system","subtype":"stop_hook_summary","timestamp":"2026-08-14T10:00:11.000Z","hookInfos":[{"command":"\"$HOME/.claude/agent-toolkit-run\" PreToolUse hooks/guard.sh","durationMs":12},{"command":"\"$HOME/.claude/agent-toolkit-run\" SessionStart install.sh --sync","durationMs":40}],"hookErrors":[]}
 {"type":"system","subtype":"compact_boundary","timestamp":"2026-08-14T10:06:00.000Z","compactMetadata":{"trigger":"auto","preTokens":1000,"postTokens":100,"cumulativeDroppedTokens":900,"durationMs":5000}}
 {"type":"assistant","uuid":"a9","timestamp":"2026-08-14T10:07:00.000Z","message":{"id":"m9","content":[{"type":"text","text":"Retro: the session did the edits itself"}]}}
 {"type":"assistant","uuid":"a8","timestamp":"2026-08-14T10:07:30.000Z","message":{"id":"m8","content":[{"type":"text","text":"**Retroactive correction:** CANARYRETROPROSE, which is not a retro line\nRetrospective aside — CANARYRETROPROSE either"}]}}
@@ -695,6 +696,11 @@ sql "a hook's errors land on the same label as its runs" "1|1|8" \
 # prompt text, which nothing here may store.
 sql "a hook command that is not a command is labelled unknown" "1" \
   "SELECT n FROM hook_run WHERE segment_id='s-main#0' AND hook='unknown'"
+# Every toolkit hook runs through the launcher, so the entry point after the
+# caller is the only name in the command, with or without a directory.
+sql "a hook run through the launcher is labelled by its entry point" "1|1" \
+  "SELECT (SELECT n FROM hook_run WHERE segment_id='s-main#0' AND hook='guard.sh'),
+          (SELECT n FROM hook_run WHERE segment_id='s-main#0' AND hook='install.sh')"
 sql "the session's own retro line is captured" "main|the session did the edits itself" \
   "SELECT author,text FROM retro_line WHERE source_uuid='a9'"
 # "Retroactive" and "Retrospective" start with the word and are followed by
@@ -1637,6 +1643,25 @@ kill -0 "$pid" 2>/dev/null && bad "own session reaps it" "pid $pid survived" || 
 printf '{"pid":%d,"start":"999999","owner":"","owner_start":"","session":"x","cmd":["sleep"]}' 1 > "$reg/1.json"
 printf '{"hook_event_name":"SessionEnd","session_id":"x"}' | HOME="$FAKE" "$ROOT/hooks/reap.sh"
 [ ! -f "$reg/1.json" ] && ok "recycled pid pruned unsignalled" || bad "recycled pid pruned" "entry remains"
+
+# A leader that exits leaves its children behind in its group, which keeps its
+# pid until the last of them is gone.
+rm -f "$TMP/child.pid"
+out="$(HOME="$FAKE" CLAUDE_CODE_SESSION_ID=orphans "$ROOT/hooks/bg.sh" -- \
+  bash -c "sleep 300 & echo \$! > '$TMP/child.pid'; exit 0")"
+lead="$(printf '%s' "$out" | awk '{print $3}')"
+for _ in $(seq 50); do [ -s "$TMP/child.pid" ] && ! kill -0 "$lead" 2>/dev/null && break; sleep 0.1; done
+child="$(cat "$TMP/child.pid" 2>/dev/null)"
+printf '{"hook_event_name":"SessionEnd","session_id":"orphans"}' | HOME="$FAKE" "$ROOT/hooks/reap.sh"
+for _ in $(seq 50); do kill -0 "$child" 2>/dev/null || break; sleep 0.1; done
+if kill -0 "$child" 2>/dev/null; then
+  bad "a child that outlived its leader is reaped with the group" "pid $child survived"
+  kill -KILL "$child" 2>/dev/null
+else
+  ok "a child that outlived its leader is reaped with the group"
+fi
+for _ in $(seq 20); do [ -f "$reg/$lead.json" ] || break; sleep 0.1; done
+[ ! -f "$reg/$lead.json" ] && ok "and its registry entry is cleared" || bad "and its registry entry is cleared" "still there"
 
 # ── duplication ──────────────────────────────────────────────────────────────
 # Both directions of the gate: the checkout as it stands is clean, and a
