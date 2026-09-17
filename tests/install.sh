@@ -101,6 +101,7 @@ command_for() { # home, event, entry → the wired command
   wired "$1" | awk -F'\037' -v e="$2" -v n="$3" '$1 == e && index($3, n) { print $3; exit }'
 }
 hook() { # home, command, payload → out, rc, run as Claude Code runs a hook
+  [ -n "$2" ] || { bad "a command to run as a hook" "no wired command was found"; out=""; rc=1; return; }
   printf '%s' "$3" >"$TMP/hook.payload"
   out="$(HOME="$1" sh -c "$2" <"$TMP/hook.payload" 2>/dev/null)"
   rc=$?
@@ -784,9 +785,11 @@ H="$(home attribution)"
 inst "$ROOT" "$H"
 jq '.attribution.sessionUrl = true | .attribution.commitTrailers = true | .includeCoAuthoredBy = true' \
   "$H/.claude/settings.json" >"$TMP/s" && cp "$TMP/s" "$H/.claude/settings.json"
+attribution_now() { js "$1" '[.attribution.sessionUrl, .attribution.commitTrailers, .includeCoAuthoredBy] | tostring'; }
+check "(the hand edit lands, so the check below is not vacuous)" "[true,true,true]" "$(attribution_now "$H")"
 hook "$H" "$(command_for "$H" SessionStart install.sh)" '{"hook_event_name":"SessionStart"}'
 check "the three attribution values are put back at session start" "[false,false,false]" \
-  "$(js "$H" '[.attribution.sessionUrl, .attribution.commitTrailers, .includeCoAuthoredBy] | tostring')"
+  "$(attribution_now "$H")"
 json_is "and the run says so rather than fixing it silently" \
   '.hookSpecificOutput.additionalContext | test("wrote settings.json")'
 

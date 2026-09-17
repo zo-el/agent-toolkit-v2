@@ -76,7 +76,7 @@ expect "non-linear mcp is free"       silent "$(tool_payload 'mcp__context7__que
 # Absolute in CLAUDE.md, so the verdict is deny: there is nothing to approve.
 trailer='Claude-Session: https://claude.ai/code/session_01ABC'
 coauthor='Co-Authored-By: Claude <noreply@anthropic.com>'
-generated='Generated with [Claude Code](https://claude.com/claude-code)'
+generated='🤖 Generated with [Claude Code](https://claude.com/claude-code)'
 commit_with() { printf 'git commit -m "feat: x\n\n%s"' "$1"; }
 heredoc() { printf "%s <<'MSG'\nfeat: x\n\n%s\nMSG" "$1" "$2"; }
 
@@ -84,7 +84,9 @@ expect "a session trailer on a commit is denied" deny "$(bash_payload "$(commit_
 expect "a Claude co-author line too"             deny "$(bash_payload "$(commit_with "$coauthor")")"
 expect "and the generated-with line"             deny "$(bash_payload "$(commit_with "$generated")")"
 expect "and a bare session URL"                  deny "$(bash_payload "$(commit_with 'see https://claude.ai/code/session_01ABC')")"
-expect "whatever the case and spacing"           deny "$(bash_payload "$(commit_with 'co-authored-by:  claude <x@y>')")"
+expect "and the key with no URL behind it"       deny "$(bash_payload "$(commit_with 'Claude-Session: 01ABC')")"
+expect "an amend that adds one"                  deny "$(bash_payload "$(printf 'git commit --amend -m "x\n\n%s"' "$trailer")")"
+expect "whatever the case and spacing"           deny "$(bash_payload "$(commit_with 'co-authored-by:Claude <x@y>')")"
 expect "a -C repo does not hide it"              deny "$(bash_payload "$(printf 'git -C /repo commit -q -m "x\n\n%s"' "$trailer")")"
 expect "a merge message carrying it"             deny "$(bash_payload "$(printf 'git merge --no-ff -m "x\n\n%s" feat/y' "$coauthor")")"
 expect "an annotated tag message"                deny "$(bash_payload "$(printf 'git tag -a v1 -m "v1\n\n%s"' "$trailer")")"
@@ -92,14 +94,33 @@ expect "a PR body on create"                     deny "$(bash_payload "$(printf 
 expect "a PR body on edit"                       deny "$(bash_payload "$(printf 'gh pr edit 12 --body "%s"' "$trailer")")"
 expect "an inline heredoc message is read too"   deny "$(bash_payload "$(heredoc 'git commit -F -' "$trailer")")"
 
-# The same words as data. Without this the suite could not write the fixtures
+# A region ending at the first separator would miss every one of these, which is
+# why the whole command is judged once a writing command is in it.
+expect "a clean commit chained to a dirty PR"    deny "$(bash_payload "$(printf 'git commit -m "clean" && gh pr create --body "%s"' "$trailer")")"
+expect "a separator inside the subject"          deny "$(bash_payload "$(printf 'git commit -m "a & b\n\n%s"' "$trailer")")"
+expect "a pipe inside a PR body table"           deny "$(bash_payload "$(printf 'gh pr create --body "| a | b |\n\n%s"' "$trailer")")"
+expect "a herestring earlier in the command"     deny "$(bash_payload "$(printf 'cat <<<"x" && git commit -m "y\n%s"' "$trailer")")"
+expect "a commit inside an if"                   deny "$(bash_payload "$(printf 'if true; then git commit -m "x\n%s"; fi' "$trailer")")"
+expect "a commit inside a backtick"              deny "$(bash_payload "$(printf '`git commit -m "x\n%s"`' "$trailer")")"
+expect "a repo named before the pr subcommand"   deny "$(bash_payload "$(printf 'gh -R o/r pr create --body "%s"' "$trailer")")"
+expect "a commit on its own line"                deny "$(bash_payload "$(printf 'git add -A\ngit commit -m "x\n\n%s"' "$trailer")")"
+# The cost of judging the whole command, pinned so it stays a decision rather
+# than a surprise: split the command in two and both halves pass.
+expect "a grep for the words behind a commit"    deny "$(bash_payload "git commit -m 'feat: x' && grep -rn 'Claude-Session:' .")"
+expect "and a git log searching for them"        deny "$(bash_payload "git log --grep='x commit Claude-Session: y'")"
+
+# Quoted text stays data. Without this the suite could not write the fixtures
 # above, nor grep for the trailer it forbids.
 expect "grepping for the trailer is free"        silent "$(bash_payload "grep -rn '$trailer' .")"
 expect "printing it is free"                     silent "$(bash_payload "printf '%s\\n' '$coauthor'")"
 expect "a commit line quoted inside a printf"    silent "$(bash_payload "printf '%s' '$(commit_with "$trailer")' > fixture")"
 expect "and one typed into a heredoc body"       silent "$(bash_payload "$(printf "cat > fixture <<'EOF'\n%s\nEOF" "$(commit_with "$trailer")")")"
-expect "a grep chained behind a clean commit"    silent "$(bash_payload "git commit -m 'feat: x' && grep -rn Claude-Session .")"
+expect "reading history for the words is free"   silent "$(bash_payload 'git log -1 --format=%B | grep -i claude-session')"
+expect "and grepping a status for them"          silent "$(bash_payload "git status | grep commit 'Claude-Session:'")"
+# The holes the rule's comment names, pinned so widening it is a decision.
+expect "a call wrapped in another program"       silent "$(bash_payload "$(printf 'env X=1 git commit -m "x\n\n%s"' "$trailer")")"
 expect "a clean heredoc commit message"          silent "$(bash_payload "$(heredoc 'git commit -F -' 'The goal, and why.')")"
+expect "a clean tag message"                     silent "$(bash_payload "git tag -a v1 -m 'v1'")"
 expect "a clean PR still only asks"              ask    "$(bash_payload "gh pr create --title x --body 'the goal'")"
 
 # Without jq the guard reads the payload with python3 and gives the same
@@ -113,6 +134,8 @@ out="$(bare "$TMP/nojq" "$(bash_payload 'git status')")"
 [ -z "$out" ] && ok "without jq a read-only command passes silently" || bad "without jq a read-only command passes" "emitted: $out"
 check "without jq a push still asks" ask "$(decision "$(bare "$TMP/nojq" "$(bash_payload 'git push origin main')")")"
 check "without jq a public comment is still denied" deny "$(decision "$(bare "$TMP/nojq" "$(bash_payload 'gh pr comment 12 --body hi')")")"
+check "without jq an attributed commit is still denied" deny \
+  "$(decision "$(bare "$TMP/nojq" "$(bash_payload "$(commit_with "$trailer")")")")"
 
 # With neither reader the gate cannot judge anything, and must not block work.
 stub_path "$TMP/noreader" bash grep sed tr cat

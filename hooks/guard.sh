@@ -74,30 +74,32 @@ hit '\bgh[[:space:]]+api\b' && hit '(comments|reviews|discussions)' \
 # ── never: AI attribution in a commit or a pull request ──────────────────────
 # CLAUDE.md forbids it outright, so there is nothing for the user to approve.
 #
-# Only the writing command's own text is judged. It has to sit at a command
-# position and ahead of any heredoc opener, and everything from the first
-# separator after it is dropped, which leaves the same words in a printf, in a
-# heredoc body, or in a grep chained behind a commit as data that passes. An
-# inline heredoc body carries no separator of its own, so it is judged with the
-# command that opens it.
+# One command that writes a message, anywhere in the text and outside any
+# heredoc body, puts the whole text under the rule. Judging all of it rather
+# than the message alone is what closes the shapes that carry a trailer past
+# any shorter region: a commit chained to a `gh pr create`, and a `&`, `;` or
+# `|` inside a subject or a markdown table. The cost is that a clean commit
+# chained to a grep for these words is refused too, which is one command split
+# in two.
+#
+# Quoted text stays data, because the writing command has to sit at a command
+# position: a git line inside a printf, or typed into a heredoc body, passes.
+# That is what lets the suite write its own fixtures.
 #
 # What the command does not carry cannot be read here: a message from a file
-# (-F, --body-file), --amend reusing an old one, an editor session, and a
-# wrapped call such as `env X=1 git commit`. The attribution settings the
-# installer owns are what covers those.
-gap='[^|;&'$'\n'']*'                  # options only: never past a line or a separator
-at_command='(^|[;&|(){}'$'\n''])[[:blank:]]*'
+# (-F, --body-file), --amend reusing an old one, an editor session, and a call
+# wrapped in another program such as `env X=1 git commit`. The attribution
+# settings the installer owns are what covers those.
+gap='[^|;&`'$'\n'']*'   # options only: never past a line or a separator
+at_command='(^|[;&|(){}`'$'\n''])[[:blank:]]*((then|do|else|elif)[[:blank:]]+)?'
 writes_message="$at_command(git$gap[[:blank:]](commit|merge)\
-|git$gap[[:blank:]]tag$gap[[:blank:]]-m|gh[[:blank:]]+pr[[:blank:]]+(create|edit))[[:blank:]]"
-if [[ "${cmd%%<<*}" =~ $writes_message ]]; then
-  message="${cmd#*"${BASH_REMATCH[0]}"}"
-  case "${message%%[;|&]*}" in
-    *'<<'*) ;;
-    *) message="${message%%[;|&]*}" ;;
-  esac
-  printf '%s' "$message" | grep -qiE \
-    'claude-session:|co-authored-by:[[:blank:]]*claude|generated with \[claude code\]|claude\.ai/code/session_' \
-    && verdict deny "No AI attribution in a commit or a pull request. Drop the trailer and run it again."
+|git$gap[[:blank:]]tag$gap[[:blank:]]-m|gh$gap[[:blank:]]pr[[:blank:]]+(create|edit))[[:blank:]]"
+# <<< is a herestring, not a heredoc opener, and would otherwise end the search
+# for a writing command early.
+outside="$(printf '%s' "$cmd" | sed 's/<<</ /g')"
+if [[ "${outside%%<<*}" =~ $writes_message ]] && printf '%s' "$cmd" | grep -qiE \
+  'claude-session:|co-authored-by:[[:blank:]]*claude|generated with \[claude code\]|claude\.ai/code/session_'; then
+  verdict deny "No AI attribution in a commit or a pull request. Drop the trailer and run it again."
 fi
 
 # ── ask: anything that leaves the machine ────────────────────────────────────
