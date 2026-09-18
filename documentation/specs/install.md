@@ -48,10 +48,11 @@
 | pointer | `~/.claude/CLAUDE.md` | imports `@~/.claude/agent-toolkit/CLAUDE.md` |
 | retro marker | `~/.claude/retro/since` | stamped at the first install, never rewritten |
 | plugins | Claude Code's plugin store | the required marketplaces registered, the required plugins installed at user scope |
+| bridge | `~/.claude/tools/penpot-mcp/` | a copy of each file in the version directory's `tools/penpot-mcp/`, replaced whenever the two differ. Nothing else in that directory is read, written or removed, so the dependencies and build the bridge puts there at its first run outlive every version |
 | version stamp | `~/.claude/agent-toolkit-version` | the installed root's version, see Version identity. Written when no required finding stands. Removed when the installed root has no version |
 | backups | `~/.claude/backups/` | a copy taken before every write to settings, the pointer, or a replaced agent file. A backup never overwrites another. Never pruned |
 
-Install replaces every file it writes (launcher, settings, pointer, agents, ledger, stamp) by a rename, never by rewriting it in place.
+Install replaces every file it writes (launcher, bridge, settings, pointer, agents, ledger, stamp) by a rename, never by rewriting it in place.
 
 ## Going live
 
@@ -69,6 +70,7 @@ The same rule holds when the directory is already live, as with a checkout updat
 - the launcher exists in the root, and its own first line runs;
 - the launcher run against a missing entry point asks, and the guard's first line runs;
 - `skills/` and `agents/` hold something, so a partly unpacked directory never installs as an empty toolkit;
+- every file install copies out of `tools/penpot-mcp/` is in the root, and each of its scripts starts, which is the same evidence of a whole directory that `skills/` and `agents/` are;
 - every python hook compiles and `hooks/lib` imports, checked without writing into the root.
 
 ## Version identity
@@ -211,6 +213,7 @@ The list lives once, in `install.sh`. The doctor checks it, both reports render 
 It also states, once each:
 
 - what install touches;
+- the bridge: install puts its files at `~/.claude/tools/penpot-mcp/` and does nothing else for it. The Penpot account, Node, the dependencies it fetches at its first run, and connecting the plugin in a browser are the user's, and no install check looks at any of them;
 - the exit codes;
 - updating: once a new version is in the version directory, the next session start on the machine applies it and says when to restart, and `./install.sh` applies it immediately;
 - moving the checkout: run `install.sh` from the new location.

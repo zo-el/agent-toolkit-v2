@@ -14,7 +14,7 @@ Install is the other half of this and is not restated here: `documentation/specs
 | live version | the version directory the stable link points at, and the version it holds |
 | staged | a release unpacked at `~/.claude/agent-toolkit-releases/v<N>`, complete, with its `VERSION` holding the `v<count>·<sha>` line install reads |
 | record | `~/.claude/agent-toolkit-staging.json`, everything the updater remembers: the wanted release and its commit, when the last check began and whether it succeeded, the last failure and its cause, the versions marked bad, the version last reported live, the directory that was live before the current one, and the releases it has already announced |
-| notes source | whatever answers "the changelog lines belonging to this release", read in one place and defined below |
+| notes source | the `## Changelog` section of the merged pull request that carried a commit, read in one place and defined below |
 | dev mode | the live version directory is a git work tree, so this machine's toolkit is a clone someone edits |
 
 ## Boundaries
@@ -32,7 +32,7 @@ Install is the other half of this and is not restated here: `documentation/specs
 A release is the whole version directory at one commit: `CLAUDE.md`, every agent, every skill, every hook, `install.sh`, `INSTALL.md` and the specs. Nothing is selected out and nothing is added.
 
 - **An agent or a skill arrives exactly as a rule does.** A release that adds one is an ordinary release, and install's own agent copies and skill links are what put it on the machine.
-- **The bridge the `ui-developer` needs is not in the repository.** `INSTALL.md` describes it at `~/.claude/tools/penpot-mcp`, and a release carries no copy of it, so a machine that wants that agent sets it up by hand. Whether that stays true is a decision below.
+- **The Penpot bridge travels with it.** `tools/penpot-mcp/` holds the bridge's `package.json`, its lock file and its two scripts, and install copies them out to `~/.claude/tools/penpot-mcp/`, which `documentation/specs/install.md` owns. A release therefore carries the bridge's four files and none of its installed state.
 
 ## Making a release
 
@@ -62,7 +62,7 @@ A push to `main` runs the release workflow, which:
 
 A release's notes are its changelog lines and nothing else. Generated notes list every merged pull request, chores included, which is not what a changelog entry is.
 
-**The lines come from one place.** The workflow asks the notes source for them, naming the released commit and the commit the latest release names, and the rest of this spec is written against its answer rather than against where a person wrote the lines. Which source that is has not been settled, and the decision is below; the answer it gives is the contract, and it has exactly three forms:
+**The lines come from one place.** The workflow asks the notes source for them, naming the released commit, and everything else here is written against its answer rather than against where a person wrote the lines. The answer has exactly three forms:
 
 | Answer | What the run does |
 | ------------- | ----------------- |
@@ -70,8 +70,11 @@ A release's notes are its changelog lines and nothing else. Generated notes list
 | `none` | publishes nothing. The run succeeds and its summary says so |
 | no answer at all | publishes nothing. The run fails |
 
+**The source is the merged pull request.** Its body carries a `## Changelog` section holding either one or more entries, one short line each naming what was worked on, or the single word `none`. A commit that reached `main` without a pull request, and a pull request whose body carries no such section, are both the third answer.
+
 - **`none` means no release.** Chores, refactors, tests, tooling and doc tidying leave the fleet where it is, and `main` runs ahead of the latest release until the next change a user sees. A release is a whole snapshot, not a patch, so that change carries the chores with it.
 - **No answer at all fails the run**, so forgetting is not the same as deciding. It means `main` moved without the gate, and it is loud.
+- **The PR body carries this one block and nothing else beyond the goal.** `CLAUDE.md`'s rule that a body carries nothing but the goal admits the changelog section, and admits no other addition.
 - An entry is one short line, as `CLAUDE.md` defines it. The workflow neither shortens nor reformats what it is given.
 
 ### Rolling back
@@ -287,8 +290,8 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 | the suite fails in the workflow | no release. The run fails, and GitHub tells the author. Machines see nothing new, which is correct |
 | the suite skips a check in the workflow | no release, and the run fails. The runner is meant to satisfy every check, so a skip is a broken runner rather than a tolerated gap |
 | the account's runner minutes are spent | no run, so no release. GitHub tells the account owner. Machines stay where they are and report nothing, because nothing on a machine is wrong. A merge that reaches no machine is visible on GitHub and nowhere else |
-| the notes source answers `none` | no release. The run succeeds and its summary says so |
-| the notes source gives no answer at all | no release, and the run fails |
+| the merged pull request says `none` | no release. The run succeeds and its summary says so |
+| the commit reached `main` without a pull request, or the body carries no changelog section | no release, and the run fails |
 | `v<count>` already exists | no release. The run says so in its summary |
 
 ## Rejected
@@ -298,7 +301,7 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 - **chezmoi, or another dotfile manager.** It would replace `install.sh`, which is where the cost actually is: root checks, the launcher, the settings merge, the ledger.
 - **Generated release notes.** They list every merged pull request, chores included.
 - **Running the style gate in the workflow.** It is a `PreToolUse` deny on a commit that has not run yet, and after a merge there is nothing left to deny. Running it over a merged range would report findings on work already accepted, with no way to answer them but a second commit.
-- **Naming the notes source throughout the spec.** One reader, one contract, and the source behind it changes without the workflow changing.
+- **Reading the notes in more than one place.** One step answers for a release, so no other step in the workflow learns what a pull request is, and the source can change without them changing.
 - **Marking the previous release latest, to roll back in one step.** It rests on GitHub honouring that flag over its own date order, which its reference does not state. The prerelease flag rests on the definition of latest itself.
 - **A required check before merge.** Rulesets and branch protection answer 403 on this plan.
 - **Downloading in the hook that applies.** Every session start would wait on the network.
@@ -310,15 +313,6 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 - **A status line segment for a pending update.** It shows something that stops being true at the next session start.
 - **Applying at the `fork` session source.** A compaction is the point at which a session's context is rebuilt; a fork inherits one that is already running.
 - **A copy of the updater outside every version directory.** It is a second thing to keep in step, and the launcher already names the fix when the stable link dangles.
-
-## Decisions left to the user
-
-Neither blocks the machine's half. The workflow cannot publish until the first is answered, and the second changes nothing about how a release is made.
-
-| Decision | Options | Where it lands |
-| -------- | ------- | -------------- |
-| where a release's changelog lines are written | the `## Changelog` section of the pull request that carried the commit, which needs `CLAUDE.md`'s rule that a PR body carries nothing but the goal amended; or a `Changelog:` trailer on the commits since the latest release, which amends no rule and survives a merge made outside a pull request | the workflow's notes step, and `CLAUDE.md` for the first option |
-| whether a release carries the Penpot bridge | the release carries nothing for it and `INSTALL.md` keeps describing a setup by hand; or the repository carries the bridge's scripts and install copies them to `~/.claude/tools/penpot-mcp` the way it copies the launcher, leaving the `node_modules` beside them alone so the state that costs minutes to build outlives every release | `documentation/specs/install.md` and `INSTALL.md`, then `install.sh` |
 
 ## Decisions left to the build
 
