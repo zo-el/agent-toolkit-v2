@@ -723,7 +723,7 @@ esac
 # is exactly the machine this approval must still be taken from.
 H="$(home approved-ledgerless)"
 inst "$WHOLESALE" "$H"
-jq --arg h "$H" '.permissions.additionalDirectories += [$h, "/my/own/dir", $h + "/.claude/agent-toolkit-releases/v1.5.0"]' \
+jq --arg h "$H" '.permissions.additionalDirectories += [$h, "/my/own/dir", "~/.claude", $h + "/.claude/agent-toolkit-releases/v1.5.0"]' \
   "$H/.claude/settings.json" >"$TMP/settings" && cp "$TMP/settings" "$H/.claude/settings.json"
 rm -f "$H/.claude/agent-toolkit-applied.json"
 inst "$ROOT" "$H"
@@ -731,6 +731,10 @@ approved="$(js "$H" '.permissions.additionalDirectories | join(" ")')"
 case " $approved " in
   *" $H/.claude "*) bad "~/.claude goes even with no ledger to vouch for it" "it stayed: $approved" ;;
   *) ok "~/.claude goes even with no ledger to vouch for it" ;;
+esac
+case " $approved " in
+  *" ~/.claude "*) bad "and so does the same path written the way a user writes it" "it stayed: $approved" ;;
+  *) ok "and so does the same path written the way a user writes it" ;;
 esac
 case " $approved " in
   *" $H/.claude/agent-toolkit-releases/v1.5.0 "*) bad "and so does a release directory somebody approved" "it stayed: $approved" ;;
@@ -741,6 +745,44 @@ case " $approved " in
   *" $H "*) ok "and so does their home, which the toolkit never wrote" ;;
   *) bad "the user's home stays" "it went: $approved" ;;
 esac
+
+# ── a version directory under ~/.claude/worktrees ────────────────────────────
+# Every agent may write there without being asked, so the one path by which an
+# agent-writable directory becomes the code that runs on every tool call is shut.
+H="$(home worktree-root)"
+WT="$H/.claude/worktrees/wt"
+mkdir -p "$(dirname "$WT")"
+copy_root "$WT"
+before="$(snapshot "$H")"
+inst "$WT" "$H"
+exit_is "a version directory under ~/.claude/worktrees exits 1" 1
+check "saying why, under Needs you" "✗ the version directory is under ~/.claude/worktrees, which every agent may write" "$(block 'Needs you')"
+same "and writes nothing at all" "$before" "$(snapshot "$H")"
+inst "$WT" "$H" --dry-run
+exit_is "and a dry run of one exits 1 as well" 1
+
+# A linked worktree knows the checkout it belongs to, so the finding names it and
+# the fix is the command that installs from there.
+CHECKOUT="$TMP/worktree-checkout"
+copy_root "$CHECKOUT"
+git -C "$CHECKOUT" init -q && git -C "$CHECKOUT" add -A >/dev/null 2>&1 && git -C "$CHECKOUT" commit -q -m checkout
+LINKED="$H/.claude/worktrees/linked"
+git -C "$CHECKOUT" worktree add -q --detach "$LINKED" HEAD
+cp "$ROOT/install.sh" "$LINKED/install.sh"
+inst "$LINKED" "$H"
+exit_is "a linked worktree is refused too" 1
+check "naming the checkout it belongs to" "It belongs to the checkout at $CHECKOUT" "$(block 'Needs you')"
+worktree_fix="$(block 'Needs you' | sed -n 3p | sed 's/^ *//')"
+check "with the command that installs from there" "cd $CHECKOUT && ./install.sh" "$worktree_fix"
+HOME="$H" bash -c "$worktree_fix" >/dev/null 2>&1
+same "and the fix, run as printed, is what goes live" "$CHECKOUT" "$(readlink "$H/.claude/agent-toolkit")"
+git -C "$CHECKOUT" worktree remove --force "$LINKED" 2>/dev/null
+
+# --sync needs no rule: a worktree never becomes the live root, so a --sync from
+# one finds the link pointing elsewhere and stops before anything else.
+inst "$WT" "$H" --sync
+[ "$rc" = 0 ] && [ -z "$out" ] && ok "and --sync from one says nothing and changes nothing" \
+  || bad "--sync from a worktree says nothing" "exit $rc: $out"
 
 # ── version identity ─────────────────────────────────────────────────────────
 H="$(home version)"

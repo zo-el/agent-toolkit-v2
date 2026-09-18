@@ -576,6 +576,26 @@ for module in sorted(wanted - {"lib"}):
 PY
 }
 
+# A worktree is approved for every agent, so it never becomes the live toolkit:
+# the one path by which an agent-writable directory would end up running on every
+# tool call. --sync needs no rule, because a worktree never gets to be the live
+# root for one to run from.
+check_location() {
+  local common checkout
+  [ "$MODE" != sync ] || return 0
+  case "$ROOT/" in "$CLAUDE_DIR/worktrees/"*) ;; *) return 0 ;; esac
+  common="$( (cd "$ROOT" && cd "$(git rev-parse --git-common-dir 2>/dev/null)" && pwd -P) 2>/dev/null)"
+  checkout="${common%/.git}"
+  if [ -n "$checkout" ] && [ "$checkout" != "$common" ] && [ "$checkout" != "$ROOT" ]; then
+    finding required user "the version directory is under ~/.claude/worktrees, which every agent may write, so nothing was changed. It belongs to the checkout at $(home_path "$checkout"), which is what installs" \
+      "cd $(home_path "$checkout") && ./install.sh"
+  else
+    finding required user "the version directory is under ~/.claude/worktrees, which every agent may write, so nothing was changed" \
+      "install from a version directory outside ~/.claude/worktrees"
+  fi
+  return 1
+}
+
 # ~/.claude/agent-toolkit must stay a link, free to point at any version
 # directory. Returns 1 when it is not, and nothing may be written.
 check_layout() {
@@ -1107,7 +1127,7 @@ main() {
   check_tools || finish
   PREV_ROOT="$(resolve "$STABLE")"
   local ready=0 err
-  check_layout && check_root && ready=1
+  check_location && check_layout && check_root && ready=1
 
   if [ "$ready" -eq 1 ] && [ "$MODE" = dry ]; then
     apply_local
