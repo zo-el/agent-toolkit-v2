@@ -6,6 +6,7 @@ documentation/specs/install.md, Version identity.
 
     version.py root <dir>       the directory's version, or nothing
     version.py release <text>   the release name a version or a name stands for
+    version.py worktree <dir>   exit 0 when the directory is a work tree's top
     version.py same <a> <b>     exit 0 when the two are the same version
     version.py newer <a> <b>    exit 0 when a is a later release than b
 
@@ -162,6 +163,12 @@ if __name__ == "__main__":
         if found is None:
             sys.exit(1)
         print("v%d.%d.%d" % found)
+    elif len(args) == 2 and args[0] == "worktree":
+        try:
+            here = _revision_from_git(os.path.realpath(args[1]), 5.0)
+        except Exception:
+            here = None
+        sys.exit(0 if here else 1)
     elif len(args) == 3 and args[0] == "same":
         sys.exit(0 if same(args[1], args[2]) else 1)
     elif len(args) == 3 and args[0] == "newer":

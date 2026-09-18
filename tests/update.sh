@@ -353,3 +353,98 @@ kill "$holder" 2>/dev/null
 wait "$holder" 2>/dev/null
 up apply
 same "and the next one activates" "$(staged v1.6.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+
+# ── now ──────────────────────────────────────────────────────────────────────
+# The whole cycle in the foreground, which is what a person runs the moment
+# updates stop working.
+UH="$(home update-now)"
+publish v1.4.0 "$OLD" v1.4.0
+copy_root "$TMP/now-v1.4.0"
+printf '1.4.0\n' >"$TMP/now-v1.4.0/VERSION"
+printf '%s\n' "${OLD:0:7}" >"$TMP/now-v1.4.0/REVISION"
+PATH="$USTUBS:$PATH" HOME="$UH" "$TMP/now-v1.4.0/install.sh" >/dev/null 2>&1
+
+up now
+exit_is "now on a machine already at the wanted release exits 0" 0
+check "having re-installed it" "Nothing to change" "$out"
+same "and left it live" "$TMP/now-v1.4.0" "$(readlink "$UH/.claude/agent-toolkit")"
+
+publish v1.5.0 "$SHA" v1.5.0
+up now
+exit_is "now on a machine behind a release installs it and exits 0" 0
+check "saying what it fetched" "v1.5.0 is ready at" "$out"
+check "then printing install's own report" "~/.claude/agent-toolkit → $(staged v1.5.0)" "$out"
+same "and the release is live" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+# The throttle is for a session start, never for a person who has just asked.
+before="$(kept .checked_at)"
+up now
+[ "$(kept .checked_at)" != "$before" ] && ok "and now never waits out the throttle" \
+  || bad "now ignores the throttle" "checked_at did not move"
+
+rm -f "$AT_GH_STATE/token"
+before="$(readlink "$UH/.claude/agent-toolkit") $(cat "$UH/.claude/agent-toolkit-version") $(snapshot "$UH/.claude/skills")"
+up now
+exit_is "now that could fetch nothing exits 1" 1
+check "printing the reason" "gh holds no token for github.com" "$out"
+check "with its fix" "gh auth login --hostname github.com" "$out"
+same "and leaving the live version exactly where it was" "$before" \
+  "$(readlink "$UH/.claude/agent-toolkit") $(cat "$UH/.claude/agent-toolkit-version") $(snapshot "$UH/.claude/skills")"
+: >"$AT_GH_STATE/token"
+
+# A version apply will not touch again is exactly what now is for.
+publish v1.6.0 dddddddd3333333333333333333333333333dddd v1.6.0
+recheck
+rm -f "$(staged v1.6.0)/hooks/guard.sh"
+up apply
+same "a release that failed is marked bad" "v1.6.0" "$(kept '.bad[0]')"
+rm -rf "$(staged v1.6.0)"
+publish v1.6.0 dddddddd3333333333333333333333333333dddd v1.6.0
+up now
+exit_is "and now tries it regardless of the mark" 0
+same "so a machine that fixed the cause moves on" "$(staged v1.6.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+same "and the mark is gone" "" "$(kept '.bad[0]')"
+
+# ── dev mode ─────────────────────────────────────────────────────────────────
+# A clone is somebody's work in progress: the updater reads it and leaves it be.
+UH="$(home update-dev)"
+CLONE="$TMP/dev-clone"
+copy_root "$CLONE"
+printf '1.4.0\n' >"$CLONE/VERSION"
+git -C "$CLONE" init -q && git -C "$CLONE" add -A >/dev/null 2>&1 && git -C "$CLONE" commit -q -m clone
+PATH="$USTUBS:$PATH" HOME="$UH" "$CLONE/install.sh" >/dev/null 2>&1
+CLONE_VERSION="v1.4.0·$(git -C "$CLONE" rev-parse --short HEAD)"
+same "the clone is live, at the version it declares and the tree it holds" "$CLONE_VERSION" \
+  "$(cat "$UH/.claude/agent-toolkit-version")"
+
+publish v1.5.0 "$SHA" v1.5.0
+up stage
+[ ! -d "$(staged v1.5.0)" ] && ok "a release is not downloaded onto a machine running a clone" \
+  || bad "dev mode downloads nothing" "it was staged"
+same "though the check still happens, so the machine knows what is out there" "v1.5.0" "$(kept .wanted)"
+up apply
+reports "and the clone is told once, naming both versions" \
+  "v1.5.0 is published and this machine runs a clone at $CLONE_VERSION"
+check "with the way to pull it" "git -C $CLONE pull" "$out"
+reports "and the way to install the release over it" "update.sh now installs the release over it"
+same "the clone is still live" "$CLONE" "$(readlink "$UH/.claude/agent-toolkit")"
+up apply
+says_nothing "and it is not told again"
+
+# The comparison is the semantic version alone, so a clone carrying work of its
+# own is not news, and one already at the release is not either.
+printf '1.5.0\n' >"$CLONE/VERSION"
+git -C "$CLONE" commit -qam bump
+keep 'del(.announced)'
+recheck
+up apply
+says_nothing "a clone at the released version is told nothing"
+printf '1.6.0\n' >"$CLONE/VERSION"
+git -C "$CLONE" commit -qam ahead
+recheck
+up apply
+says_nothing "and one holding a bump nobody has released is told nothing either"
+
+up now
+exit_is "now installs the release over a clone" 0
+same "so the machine leaves dev mode" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+[ -d "$CLONE/.git" ] && ok "and the clone is left on disk, untouched" || bad "the clone is left alone" "it is gone"

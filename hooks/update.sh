@@ -55,6 +55,14 @@ version() { python3 "$ROOT/hooks/lib/version.py" "$@" 2>/dev/null; }
 
 live_root() { (cd "$STABLE" 2>/dev/null && pwd -P); }
 
+# Nothing behind the stable link is not the working directory: a hook runs in a
+# project, which may well be a git work tree with a VERSION of its own.
+live_version() {
+  local root
+  root="$(live_root)"
+  [ -n "$root" ] && version root "$root"
+}
+
 # ── the track ────────────────────────────────────────────────────────────────
 # latest, off, pin, or bad. WANTED carries the release name a pin names.
 TRACK_STATE=""
@@ -233,7 +241,7 @@ resolve_commit() {
 # now ignores the bad mark, which is what a machine does after fixing the cause.
 judge_release() {
   local live
-  live="$(version root "$(live_root)")"
+  live="$(live_version)"
   if [ -n "$live" ] && [ "$(version release "$live")" = "$WANTED" ]; then
     TARGET="$(live_root)"
     STAGE_REASON="$WANTED is already the live version"
@@ -310,12 +318,24 @@ check_succeeded() {
   record_set ".succeeded_at = $(now_seconds) | del(.failure)"
 }
 
+# Nothing declares dev mode: installing from a clone is what causes it, and it is
+# read from the live directory itself.
+in_dev_mode() {
+  local root
+  root="$(live_root)"
+  [ -n "$root" ] && version worktree "$root"
+}
+
 # 0 when the wanted release is here to install, 1 when there is nothing to do.
 run_cycle() {
   gh_is_ready || return 1
   resolve_release || return 1
   record_set '.wanted = $w | .commit = $c' --arg w "$WANTED" --arg c "$COMMIT"
   check_succeeded
+  if [ "$MODE" != now ] && in_dev_mode; then
+    STAGE_REASON="this machine runs a clone, which the updater never overwrites"
+    return 1
+  fi
   judge_release || return 1
   download || return 1
   verify_and_unpack || return 1
@@ -405,35 +425,63 @@ activate() {
   [ -n "$WANTED" ] || return 0
   staged="$RELEASES/$WANTED"
   [ -d "$staged" ] || return 0
-  [ "$MODE" = now ] || ! marked_bad "$WANTED" || return 0
-  before="$(version root "$(live_root)")"
-  version same "$(version root "$staged")" "$before" && return 0
+  marked_bad "$WANTED" && return 0
+  in_dev_mode && return 0
+  version same "$(version root "$staged")" "$(live_version)" && return 0
   take_apply_lock || return 0
-  out="$("$staged/install.sh" 2>&1)"
-  after="$(live_root)"
-  if [ "$after" = "$staged" ]; then
+  if install_from "$staged"; then
     ACTIVATED=1
-    # Install keeps no note of the directory it moved off, so the activation that
-    # moved is what records it, for pruning to keep one version to fall back to.
-    record_set '.previous = $p | .bad = [.bad[]? | select(. != $v)]' --arg p "$PREVIOUS_ROOT" --arg v "$WANTED"
   else
-    record_set '.bad = ((.bad // []) + [$v] | unique)' --arg v "$WANTED"
     finding required user "$WANTED did not go live, so nothing on this machine changed" "$UPDATE_NOW"
   fi
-  while IFS= read -r line; do [ -z "$line" ] || LEAD+=("$line"); done <<<"$out"
+  while IFS= read -r line; do [ -z "$line" ] || LEAD+=("$line"); done <<<"$INSTALL_OUT"
+}
+
+# The install itself, and the bookkeeping either outcome leaves behind. 0 when
+# the stable link resolves to the directory afterwards, which is what went live
+# means.
+INSTALL_OUT=""
+install_from() { # version directory
+  local before after
+  before="$(live_root)"
+  INSTALL_OUT="$("$1/install.sh" 2>&1)"
+  after="$(live_root)"
+  if [ "$after" != "$1" ]; then
+    record_set '.bad = ((.bad // []) + [$v] | unique)' --arg v "$WANTED"
+    return 1
+  fi
+  # Install keeps no note of the directory it moved off, so the activation that
+  # moved is what records it, for pruning to keep one version to fall back to.
+  [ "$before" = "$after" ] || record_set '.previous = $p' --arg p "$before"
+  record_set '.bad = [.bad[]? | select(. != $v)]' --arg v "$WANTED"
+}
+
+# A release this machine will not install is said once, and the record holds
+# which, so a clone somebody is working in is told and then left alone.
+announce() {
+  local live
+  [ -n "$WANTED" ] || return 0
+  in_dev_mode || return 0
+  live="$(live_version)"
+  version newer "$WANTED" "$live" || return 0
+  jq -e --arg v "$WANTED" 'any(.announced[]?; . == $v)' <<<"$RECORD_JSON" >/dev/null 2>&1 && return 0
+  finding advisory user "$WANTED is published and this machine runs a clone at $live, which the updater never overwrites. $UPDATE_NOW installs the release over it" \
+    "git -C $(live_root) pull"
+  record_set '.announced = ((.announced // []) + [$v] | unique)' --arg v "$WANTED"
 }
 
 # Off the record, not off this run: two sessions starting together are each told
 # once, whichever of them caused the change.
 report_change() {
   local live reported
-  live="$(version root "$(live_root)")"
+  live="$(live_version)"
   [ -n "$live" ] || return 0
   reported="$(recorded .reported)"
   version same "$live" "$reported" && return 0
-  # A machine that has never reported anything and changed nothing this run has
-  # no change to announce: whatever put this version here said so at the time.
-  if [ -z "$reported" ] && [ "$ACTIVATED" -eq 0 ]; then
+  # Nothing to announce: either whatever put this version here said so at the
+  # time, or it is a clone somebody is committing to, which moves its own version
+  # without a release having arrived.
+  if [ "$ACTIVATED" -eq 0 ] && { [ -z "$reported" ] || in_dev_mode; }; then
     record_set '.reported = $v' --arg v "$live"
     return 0
   fi
@@ -449,7 +497,7 @@ report_behind() {
   local live
   [ -n "$WANTED" ] || return 0
   { [ ${#F_SEV[@]} -gt 0 ] || [ ${#LEAD[@]} -gt 0 ] || [ ${#MESSAGE[@]} -gt 0 ]; } || return 0
-  live="$(version root "$(live_root)")"
+  live="$(live_version)"
   [ -n "$live" ] && [ "$(version release "$live")" != "$WANTED" ] || return 0
   LEAD+=("the wanted release is $WANTED and the live version is $live")
 }
@@ -477,6 +525,7 @@ do_apply() {
   if [ "$TRACK_STATE" != bad ]; then
     PREVIOUS_ROOT="$(live_root)"
     activate
+    announce
     report_change
     report_record
     report_behind
@@ -504,6 +553,7 @@ print_findings() {
 }
 
 do_now() {
+  local went
   judge_track
   if [ "$TRACK_STATE" = off ]; then
     echo "~/.claude/agent-toolkit-track says off, so this machine installs no release. Nothing changed."
@@ -525,20 +575,31 @@ do_now() {
     return 1
   fi
   check_and_stage
-  record_write
-  if [ -n "$TARGET" ]; then
-    printf '%s is ready at %s\n' "$WANTED" "$TARGET"
+  if [ -z "$TARGET" ]; then
+    record_write
+    report_record
+    print_findings
+    [ -z "$STAGE_REASON" ] || printf '%s. Nothing changed.\n' "$STAGE_REASON"
     return 1
   fi
-  report_record
-  print_findings
-  [ -z "$STAGE_REASON" ] || printf '%s. Nothing changed.\n' "$STAGE_REASON"
-  return 1
+  if ! take_apply_lock; then
+    record_write
+    echo "another session is already installing a release. Nothing changed."
+    return 1
+  fi
+  printf '%s is ready at %s. Installing it now.\n\n' "$WANTED" "$TARGET"
+  install_from "$TARGET"
+  went=$?
+  record_write
+  printf '%s\n' "$INSTALL_OUT"
+  [ "$went" -eq 0 ] || printf '\n%s did not go live, so nothing on this machine changed.\n' "$WANTED"
+  return "$went"
 }
 
 main() {
   [ $# -eq 1 ] || { usage >&2; exit 2; }
   MODE="$1"
+  cd / || exit 0
   case "$MODE" in
     stage) do_stage ;;
     apply) do_apply ;;
