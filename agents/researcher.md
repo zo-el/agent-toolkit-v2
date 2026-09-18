@@ -43,6 +43,7 @@ Read-only. No edits, no Linear, no publishing. `Explore` is the only agent you s
 
 Self-contained — nobody sees your transcript:
 
+- `Status:` as the first line: `done`, `done with concerns`, `needs context`, or `blocked`.
 - The verdict, first line.
 - The reasoning, with inline citations.
 - What's uncertain or contested.

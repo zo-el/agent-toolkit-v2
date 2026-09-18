@@ -2323,6 +2323,33 @@ for a in "$ROOT"/agents/*.md; do
 done
 [ -z "$missing" ] && ok "every agent must answer Retro" || bad "every agent must answer Retro" "missing in:$missing"
 
+# The CTO routes on the report's first line, so the statuses an agent may write
+# and the ones CLAUDE.md routes on are one list, and the line leads the contract
+# it belongs to.
+unrouted="$(python3 - "$ROOT" <<'PY'
+import glob
+import re
+import sys
+
+home = sys.argv[1]
+routed = set(re.findall(r"`Status: ([a-z ]+)`", open(home + "/CLAUDE.md", encoding="utf-8").read()))
+drift = [] if routed else ["CLAUDE.md routes on no status at all"]
+for definition in sorted(glob.glob(home + "/agents/*.md")):
+    agent = definition.rsplit("/", 1)[-1]
+    contract = open(definition, encoding="utf-8").read().split("## What you return")[-1]
+    returned = [line for line in contract.splitlines() if line.startswith("- ")]
+    if not returned or not returned[0].startswith("- `Status:`"):
+        drift.append(agent + " does not open its report with a status")
+        continue
+    offered = set(re.findall(r"`([a-z ]+)`", returned[0].split("first line:")[-1]))
+    if offered != routed:
+        drift.append("%s offers %s" % (agent, ", ".join(sorted(offered)) or "nothing"))
+print("; ".join(drift))
+PY
+)"
+[ -z "$unrouted" ] && ok "every report opens with a status the CTO routes on" \
+  || bad "every report opens with a status the CTO routes on" "$unrouted"
+
 # One wording in both homes, no dash in it, and every line already written
 # matching: a dash there would ask for an override on every append.
 published="$(template "$ROOT/CLAUDE.md")"

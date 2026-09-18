@@ -54,6 +54,7 @@ Only once approval comes back to you. Then report exactly what landed.
 
 Self-contained — nobody sees your transcript:
 
+- `Status:` as the first line: `done`, `done with concerns`, `needs context`, or `blocked`.
 - The change table (pre-update), or what landed (post-approval).
 - Anything where the board and reality disagree, and which one you believe.
 - Work that merged with no issue behind it.

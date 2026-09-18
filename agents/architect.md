@@ -51,6 +51,7 @@ Settling one invalidates prose elsewhere, so every revision ends with a sweep: g
 
 Self-contained — nobody sees your transcript:
 
+- `Status:` as the first line: `done`, `done with concerns`, `needs context`, or `blocked`.
 - The spec path.
 - The build units: title, outcome, acceptance criteria, order.
 - The coverage argument: every promise → a unit.

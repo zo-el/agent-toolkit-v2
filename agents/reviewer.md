@@ -58,6 +58,7 @@ Read-only. No Write, no Edit, no Linear, no publishing. The fix belongs to the d
 
 Self-contained — nobody sees your transcript:
 
+- `Status:` as the first line: `done`, `done with concerns`, `needs context`, or `blocked`.
 - Ranked findings, worst first: `path:line`, what breaks, how severe.
 - What you verified against what remains uncertain.
 - The bottom line: ship it, or what must change first.

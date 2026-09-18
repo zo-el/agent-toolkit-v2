@@ -64,6 +64,7 @@ Findings handed to you from an outside review run the same loop — fix, rebuild
 
 Self-contained — nobody sees your transcript:
 
+- `Status:` as the first line: `done`, `done with concerns`, `needs context`, or `blocked`.
 - What you built.
 - The test that proves the new behaviour.
 - What ran and what's still unproven, and why.
