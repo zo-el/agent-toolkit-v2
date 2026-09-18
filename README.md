@@ -17,9 +17,12 @@ Follow [`INSTALL.md`](INSTALL.md).
 | `CLAUDE.md` | the agreement: the CTO loop, tasks, code and writing style, the gates |
 | `agents/` | architect · developer · ui-developer · reviewer · project-manager · researcher, plus specialists: security-auditor · test-engineer · performance-engineer |
 | `skills/` | `backlog` · `diagnose` (the bug loop) · `toolkit` (change this repo) · `ui-review` (screenshot galleries) |
-| `hooks/` | the guard, the style check, the statusline, the task line, the retro recorder, the formatter |
+| `hooks/` | the guard, the style check, the statusline, the task line, the retro recorder, the formatter, the updater |
 | `INSTALL.md` | how to install, and what install touches |
 | `install.sh` | the installer, and the doctor that runs at every session start |
+| `VERSION` | the version a release is named for, bumped by the pull request that earns it |
+| `tools/penpot-mcp/` | the Penpot bridge install copies out to `~/.claude/tools/penpot-mcp` |
+| `.github/` | the release workflow, and the scripts it runs so the suite can judge them |
 | `RETRO.md` | learnings written by hand, read alongside the retro digest |
 | `documentation/brief.md` | what this toolkit is for |
 

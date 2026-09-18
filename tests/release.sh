@@ -177,13 +177,16 @@ check "the suite is the gate, through the gate the suite tests" ".github/suite-g
 check "and publishing is the script the suite tests" '.github/publish-release.sh "$GITHUB_SHA"' "$(cat "$RELEASE_YML")"
 check "the same suite runs against a pull request" "$(printf 'on:\n  pull_request:\n    branches: [main]')" \
   "$(cat "$ROOT/.github/workflows/tests.yml")"
+# One runner image for both, and it is the one the suite reports no skip on: a
+# non-root user with npx within reach.
 runners="$(grep -h 'runs-on:' "$ROOT/.github/workflows"/*.yml | sort -u)"
-same "on a runner that is not root and reaches npx, which is what leaves no skip" \
-  "    runs-on: ubuntu-latest" "$runners"
+same "both workflows name the same runner image" "    runs-on: ubuntu-latest" "$runners"
+unrunnable=""
 for f in "$ROOT/.github"/*.sh; do
-  [ -x "$f" ] || bad "every script a workflow runs is executable" "${f##*/} is not"
+  [ -x "$f" ] || unrunnable="$unrunnable ${f##*/}"
 done
-ok "every script a workflow runs is executable"
+[ -z "$unrunnable" ] && ok "every script a workflow runs is executable" \
+  || bad "every script a workflow runs is executable" "not executable:$unrunnable"
 
 # ── the guide's way in ───────────────────────────────────────────────────────
 # The one block a person copies out of INSTALL.md, run as it is written. A guide

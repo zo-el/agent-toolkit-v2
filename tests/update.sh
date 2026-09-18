@@ -477,6 +477,26 @@ exit_is "now installs the release over a clone" 0
 same "so the machine leaves dev mode" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
 [ -d "$CLONE/.git" ] && ok "and the clone is left on disk, untouched" || bad "the clone is left alone" "it is gone"
 
+# ── bounded ──────────────────────────────────────────────────────────────────
+# A hung network must not hold a session start or leave a process behind. The
+# stub records what each bound was asked for and then applies it, so this proves
+# the bounds without waiting any of them out.
+UH="$(home update-bounded)"
+BOUNDS="$TMP/bounds"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"%s"\nexec %s "$@"\n' "$BOUNDS" "$(command -v timeout)" >"$USTUBS/timeout"
+chmod +x "$USTUBS/timeout"
+publish v1.5.0 "$SHA" v1.5.0
+: >"$BOUNDS"
+up stage
+bounds="$(cat "$BOUNDS" 2>/dev/null)"
+check "the whole of stage runs under a bound" "-k 10 300 $ROOT/hooks/update.sh stage" "$bounds"
+check "and so does every call that leaves the machine" "60 gh api repos/zo-el/agent-toolkit-v2/releases/latest" "$bounds"
+check "the tag read with it" "60 gh api repos/zo-el/agent-toolkit-v2/git/ref/tags/v1.5.0" "$bounds"
+check "the download" "60 gh api repos/zo-el/agent-toolkit-v2/tarball/$SHA" "$bounds"
+check "the question of whether the commit is on main" "60 gh api repos/zo-el/agent-toolkit-v2/compare/main...$SHA" "$bounds"
+check "and the token read that comes before any of them" "10 gh auth token --hostname github.com" "$bounds"
+rm -f "$USTUBS/timeout"
+
 # ── pruning ──────────────────────────────────────────────────────────────────
 # Three directories are worth keeping: the one that is live, the one that is
 # wanted, and the one the machine fell off, which is what it falls back to.
