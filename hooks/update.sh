@@ -60,6 +60,13 @@ version() { # version.py arguments → its answer, or nothing when it did not an
   out="$(python3 "$ROOT/hooks/lib/version.py" "$@" 2>/dev/null)" && printf '%s' "$out"
 }
 
+take_seal() { # a version directory → its content digest, or nothing
+  local out
+  out="$(python3 "$ROOT/hooks/lib/seal.py" "$1" 2>/dev/null)" && printf '%s' "$out"
+}
+
+sealed() { jq -r --arg v "$1" '.seals[$v] // empty' <<<"$RECORD_JSON" 2>/dev/null; }
+
 # One program answers every version question, so a machine where it cannot run is
 # told that, rather than told its own track file and its own releases are wrong.
 version_reader_works() { version release v1.0.0 >/dev/null; }
@@ -330,7 +337,7 @@ commit_is_on_main() {
 
 # All of it before the rename that makes a release staged.
 verify_and_unpack() {
-  local carried declared
+  local carried declared seal
   if ! carried="$(archive_commit)"; then
     record_failure advisory "the last update check failed: $WANTED would not open as an archive: $(one_line <"$WORK/tar.err")" ""
     return 1
@@ -348,6 +355,10 @@ verify_and_unpack() {
     record_failure advisory "the last update check failed: $WANTED could not be stamped with its revision" "df -h ~/.claude"
     return 1
   fi
+  seal="$(take_seal "$WORK/root")" || {
+    record_failure advisory "the last update check failed: $WANTED could not be sealed, so nothing was staged" "$INSTALL_AGAIN"
+    return 1
+  }
   declared="$(version root "$WORK/root")"
   if [ "$(version release "$declared")" != "$WANTED" ]; then
     record_failure required "$WANTED holds a tree declaring $(if [ -n "$declared" ]; then printf 'version %s' "$declared"; else printf 'no version'; fi), so nothing was installed: installing it would leave this machine at a version that is still not the wanted one" ""
@@ -358,6 +369,9 @@ verify_and_unpack() {
       "chmod u+rwx ~/.claude/agent-toolkit-releases"
     return 1
   }
+  # Taken over the part-written folder and recorded against the release, so it
+  # describes exactly what became staged.
+  record_set '.seals[$v] = $s' --arg v "$WANTED" --arg s "$seal"
   TARGET="$RELEASES/$WANTED"
   STAGE_REASON=""
   return 0
@@ -446,7 +460,7 @@ prune() {
     # Read for each removal rather than once: another session can activate while
     # this loop runs, and the directory it moved to has to survive.
     [ "$real" = "$(live_root)" ] && continue
-    rm -rf "$entry"
+    rm -rf "$entry" && record_set 'del(.seals[$v])' --arg v "${entry##*/}"
   done
   # A part-written folder is a stage that was killed. A day is long enough that
   # one still being written is never mistaken for one that was abandoned.
@@ -514,6 +528,41 @@ apply_wanted() {
   }
 }
 
+# Kept, because deleting it would destroy the only evidence of what happened, and
+# under a name no release has, so pruning never reaches it and nothing mistakes
+# it for a release.
+set_aside() { # the staged folder → where it was kept, or nothing
+  local kept n=0
+  kept="$RELEASES/.altered.$WANTED.$(now_seconds)"
+  while [ -e "$kept" ]; do
+    n=$((n + 1))
+    kept="$RELEASES/.altered.$WANTED.$(now_seconds).$n"
+  done
+  mv -T "$1" "$kept" 2>/dev/null && printf '%s' "$kept"
+}
+
+# Whether the tree about to be run is the tree that was verified. Between the two
+# the folder sat on disk for hours, and what running it means is its install.sh.
+seal_holds() { # the staged folder
+  local recorded taken kept
+  recorded="$(sealed "$WANTED")"
+  if [ -z "$recorded" ]; then
+    # Nothing is known about this tree, and nothing being known is not permission
+    # to run it. Discarded, and staged again at the next check.
+    rm -rf "$1"
+    return 1
+  fi
+  if ! taken="$(take_seal "$1")"; then
+    record_failure advisory "the last update check failed: $WANTED could not be read to check against its seal" "$INSTALL_AGAIN"
+    return 1
+  fi
+  [ "$taken" = "$recorded" ] && return 0
+  kept="$(set_aside "$1")"
+  record_set 'del(.seals[$v])' --arg v "$WANTED"
+  finding required user "$WANTED was altered after this machine unpacked it, so nothing was installed. The folder is kept at $(home_path "${kept:-$1}")" ""
+  return 1
+}
+
 listed() { # the record's field, the value
   jq -e --arg v "$2" "any($1[]?; . == \$v)" <<<"$RECORD_JSON" >/dev/null 2>&1
 }
@@ -539,6 +588,7 @@ activate() {
   fi
   version same "$(version root "$staged")" "$(live_version)" && return 0
   take_apply_lock || { record_lock_problem; return 0; }
+  seal_holds "$staged" || return 0
   if install_from "$staged"; then
     ACTIVATED=1
   else
@@ -718,6 +768,16 @@ do_now() {
       || echo "another session is already installing a release. Nothing changed."
     return 1
   fi
+  case "$TARGET" in
+    "$RELEASES"/*)
+      if ! seal_holds "$TARGET"; then
+        record_write
+        print_findings
+        printf '%s is not the tree this machine unpacked, so nothing was installed.\n' "$WANTED"
+        return 1
+      fi
+      ;;
+  esac
   printf '%s is ready at %s. Installing it now.\n\n' "$WANTED" "$TARGET"
   install_from "$TARGET"
   went=$?

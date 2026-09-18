@@ -86,6 +86,7 @@ reports() { # name, expected substring of additionalContext
   check "$1" "$2" "$said"
 }
 staged() { printf '%s' "$UH/.claude/agent-toolkit-releases/$1"; }
+home_of() { printf '~/%s' "${1#"$UH"/}"; }
 asked() { cat "$AT_GH_STATE/calls" 2>/dev/null; }
 forget_calls() { : >"$AT_GH_STATE/calls"; }
 # The commit every fixture release is cut from, and the one tests/release.sh
@@ -95,10 +96,11 @@ OLD=aaaaaaa1111111111111111111111111111aaaa
 
 # A release as GitHub serves one: a real version directory, tarred the way git
 # archives one, carrying in its pax header the commit a machine verifies against.
-publish() { # tag, commit, the version its tree declares, compare status
+publish() { # tag, commit, the version its tree declares, compare status, a file to serve without
   local dir="$TMP/rel-$2"
   copy_root "$dir"
   printf '%s\n' "${3#v}" >"$dir/VERSION"
+  [ -z "${5:-}" ] || rm -f "$dir/$5"
   python3 - "$dir" "$2" "$AT_GH_STATE/tarball.$2" <<'PY'
 import sys
 import tarfile
@@ -441,9 +443,8 @@ reports "and a session that finds a version it never reported says so, whoever m
 # ── an activation that does not go live ──────────────────────────────────────
 # Install writes nothing from a root that fails its checks, so the machine stays
 # exactly where it was and the release is not tried again.
-publish v1.6.0 cccccccc2222222222222222222222222222cccc v1.6.0
+publish v1.6.0 cccccccc2222222222222222222222222222cccc v1.6.0 behind hooks/guard.sh
 recheck
-rm -f "$(staged v1.6.0)/hooks/guard.sh"
 before="$(snapshot "$UH/.claude/skills")"
 up apply
 reports "a release that fails its root checks is a required finding" "✗ v1.6.0 did not go live"
@@ -476,6 +477,108 @@ kill "$holder" 2>/dev/null
 wait "$holder" 2>/dev/null
 up apply
 same "and the next one activates" "$(staged v1.6.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+
+# ── sealing ──────────────────────────────────────────────────────────────────
+# Verifying asks whether the supplier gave what it said it would. The seal asks
+# whether the tree apply runs is the tree stage verified, and between the two the
+# folder sits on disk for hours.
+UH="$(home update-seal)"
+publish v1.4.0 "$OLD" v1.4.0
+copy_root "$TMP/seal-v1.4.0"
+printf '1.4.0\n' >"$TMP/seal-v1.4.0/VERSION"
+printf '%s\n' "${OLD:0:7}" >"$TMP/seal-v1.4.0/REVISION"
+PATH="$USTUBS:$PATH" HOME="$UH" "$TMP/seal-v1.4.0/install.sh" >/dev/null 2>&1
+publish v1.5.0 "$SHA" v1.5.0
+aside() { find "$UH/.claude/agent-toolkit-releases" -maxdepth 1 -name '.altered.*' -type d | sort; }
+
+# Every shape an alteration takes, against a tree that was staged whole.
+altered() { # name, the command that alters the staged folder
+  rm -rf "$(staged v1.5.0)"
+  find "$UH/.claude/agent-toolkit-releases" -maxdepth 1 -name '.altered.*' -exec rm -rf {} + 2>/dev/null
+  recheck
+  [ -d "$(staged v1.5.0)" ] || bad "$1" "nothing was staged, so the case proves nothing"
+  eval "$2"
+  before="$(readlink "$UH/.claude/agent-toolkit")"
+  up apply
+  reports "$1" "✗ v1.5.0 was altered after this machine unpacked it"
+  same "and nothing on the machine changed" "$before" "$(readlink "$UH/.claude/agent-toolkit")"
+}
+
+altered "a file whose bytes changed is caught" 'printf "x\n" >>"$(staged v1.5.0)/CLAUDE.md"'
+altered "and a file added to the tree" 'printf "x\n" >"$(staged v1.5.0)/hooks/extra.sh"'
+altered "and a file taken out of it" 'rm -f "$(staged v1.5.0)/hooks/format.sh"'
+altered "and a file that gained the bit that runs it" 'chmod 755 "$(staged v1.5.0)/CLAUDE.md"'
+altered "and a symlink pointed somewhere else" \
+  'rm -rf "$(staged v1.5.0)/skills/backlog"; ln -s /etc "$(staged v1.5.0)/skills/backlog"'
+altered "and a file replaced by a link to another" \
+  'rm -f "$(staged v1.5.0)/INSTALL.md"; ln -s README.md "$(staged v1.5.0)/INSTALL.md"'
+
+check "the finding names the folder it kept" "$(home_of "$(aside)")" \
+  "$(jq -r '.hookSpecificOutput.additionalContext // ""' <<<"$out")"
+[ -n "$(aside)" ] && ok "which is kept, because it is the only evidence of what happened" \
+  || bad "the altered folder is kept" "it was deleted"
+[ ! -d "$(staged v1.5.0)" ] && ok "and is no longer staged under a release name" \
+  || bad "the altered folder is no longer staged" "it is still there"
+same "so the record holds no seal for it either" "" "$(kept '.seals["v1.5.0"]')"
+
+# The machine is not stuck: the next check downloads that release again.
+recheck
+[ -d "$(staged v1.5.0)" ] && ok "the next check stages it afresh" || bad "it is staged again" "it was not"
+[ -n "$(kept '.seals["v1.5.0"]')" ] && ok "and seals it afresh" || bad "and seals it afresh" "no seal was recorded"
+
+# A second alteration leaves a second folder, so a repeat is visible on disk.
+printf 'x\n' >>"$(staged v1.5.0)/CLAUDE.md"
+up apply
+[ "$(aside | wc -l)" -eq 2 ] && ok "a second alteration leaves a second folder" \
+  || bad "a second alteration leaves a second folder" "$(aside | wc -l) folders"
+recheck
+[ "$(aside | wc -l)" -eq 2 ] && ok "and pruning never takes one away" \
+  || bad "pruning keeps the folders it set aside" "$(aside | wc -l) left"
+
+# Nothing being known about a tree is not permission to run it, and deleting the
+# record would otherwise be the way past the seal.
+rm -rf "$(staged v1.5.0)"
+recheck
+keep 'del(.seals)'
+before="$(readlink "$UH/.claude/agent-toolkit")"
+up apply
+says_nothing "a folder the record holds no seal for is discarded without a word"
+same "changing nothing" "$before" "$(readlink "$UH/.claude/agent-toolkit")"
+[ ! -d "$(staged v1.5.0)" ] && ok "and is not kept, because nothing happened to it" \
+  || bad "an unsealed folder is discarded" "it is still staged"
+recheck
+up apply
+same "while the one staged after it installs" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+
+# The check runs after the cheap short-circuit, so a session start with nothing
+# to do hashes nothing: a live folder is never set aside over its own seal.
+keep '.seals["v1.5.0"] = "sha256:0000"'
+up apply
+says_nothing "a release already live is not checked against its seal"
+[ -d "$(staged v1.5.0)" ] && ok "and is never set aside over one" || bad "the live folder is left alone" "it was set aside"
+
+# now runs the same tree, so it asks the same question.
+rm -rf "$(staged v1.5.0)"
+publish v1.6.0 bbbbbbbb6666666666666666666666666666bbbb v1.6.0
+recheck
+printf 'x\n' >>"$(staged v1.6.0)/CLAUDE.md"
+up now
+exit_is "now refuses an altered tree too" 1
+check "saying it is not the tree this machine unpacked" "not the tree this machine unpacked" "$out"
+
+# A seal that cannot be taken stages nothing, rather than staging what it could
+# not describe.
+UH="$(home update-sealless)"
+SEALLESS="$TMP/seal-missing"
+copy_root "$SEALLESS"
+rm -f "$SEALLESS/hooks/lib/seal.py"
+publish v1.5.0 "$SHA" v1.5.0
+out="$(PATH="$USTUBS:$PATH" HOME="$UH" "$SEALLESS/hooks/update.sh" stage 2>&1)"
+[ ! -d "$(staged v1.5.0)" ] && ok "a machine that cannot seal a tree stages nothing" \
+  || bad "a machine that cannot seal stages nothing" "it staged it anyway"
+out="$(PATH="$USTUBS:$PATH" HOME="$UH" "$SEALLESS/hooks/update.sh" apply 2>&1)"
+rc=$?
+reports "and says why at the next session start" "! the last update check failed: v1.5.0 could not be sealed"
 
 # ── now ──────────────────────────────────────────────────────────────────────
 UH="$(home update-now)"
@@ -512,9 +615,8 @@ same "and leaving the live version exactly where it was" "$before" \
   "$(readlink "$UH/.claude/agent-toolkit") $(cat "$UH/.claude/agent-toolkit-version") $(snapshot "$UH/.claude/skills")"
 : >"$AT_GH_STATE/token"
 
-publish v1.6.0 dddddddd3333333333333333333333333333dddd v1.6.0
+publish v1.6.0 dddddddd3333333333333333333333333333dddd v1.6.0 behind hooks/guard.sh
 recheck
-rm -f "$(staged v1.6.0)/hooks/guard.sh"
 up apply
 same "a release that failed is marked bad" "v1.6.0" "$(kept '.bad[0]')"
 rm -rf "$(staged v1.6.0)"
