@@ -822,31 +822,34 @@ json_is "and the run says so rather than fixing it silently" \
   '.hookSpecificOutput.additionalContext | test("wrote settings.json")'
 
 # ── a name held across version directories ───────────────────────────────────
-# Two hops. A link into the version directory before last is still the
-# toolkit's: left unrecognised it is neither relinked nor removed, so the
-# finding repeats every session and the skill goes on resolving out of a
-# directory nothing points at.
+# The stable link is the only past this run has: PREV_ROOT is wherever it points
+# now. So a skill link left behind by a run whose link moved and whose skills did
+# not points at a directory this run knows nothing about. Recognising a link by
+# the three paths a run can name leaves that one neither relinked nor removed,
+# and the finding then repeats every session while the skill goes on resolving
+# out of a directory nothing else points at.
 FIRST="$TMP/hop-one" SECOND="$TMP/hop-two"
 copy_root "$FIRST"
 copy_root "$SECOND"
 H="$(home two-hops)"
 inst "$FIRST" "$H"
 inst "$SECOND" "$H"
+ln -sfn "$FIRST/skills/toolkit" "$H/.claude/skills/toolkit"
 inst "$ROOT" "$H"
-exit_is "a third version directory installs green over two earlier ones" 0
-same "and the skill points at it" "$ROOT/skills/toolkit" "$(readlink "$H/.claude/skills/toolkit")"
+exit_is "a skill link older than the stable link's own past installs green" 0
+same "and is relinked at the version directory installing" "$ROOT/skills/toolkit" \
+  "$(readlink "$H/.claude/skills/toolkit")"
 [[ "$out" != *"is not the toolkit's"* ]] && ok "with no finding claiming the name is the user's" \
-  || bad "a link from two hops back is the toolkit's" "$out"
+  || bad "a link older than PREV_ROOT is still the toolkit's" "$out"
 
-# The same link, for a skill the newest version directory no longer has.
+# The same link, for a name the version directory installing no longer has.
 RETIRING="$TMP/root-retiring-a-skill"
 copy_root "$RETIRING"
 rm -rf "$RETIRING/skills/backlog"
 H="$(home retire-skill-two-hops)"
 inst "$FIRST" "$H"
 inst "$SECOND" "$H"
-[ -L "$H/.claude/skills/backlog" ] && ok "a skill links through the second version directory" \
-  || bad "a skill links through the second" "$(ls -l "$H/.claude/skills")"
+ln -sfn "$FIRST/skills/backlog" "$H/.claude/skills/backlog"
 inst "$RETIRING" "$H"
 [ ! -e "$H/.claude/skills/backlog" ] && [ ! -L "$H/.claude/skills/backlog" ] \
   && ok "and is unlinked once a version directory stops providing it" \
