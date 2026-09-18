@@ -41,8 +41,10 @@ up() { # arguments → out, rc, with the stub GitHub ahead of every other
   rc=$?
 }
 kept() { jq -r "$1 // empty" "$UH/.claude/agent-toolkit-staging.json" 2>/dev/null; }
-keep() { # jq assignment over the record
-  jq -c "$1" "$UH/.claude/agent-toolkit-staging.json" >"$TMP/record" 2>/dev/null \
+keep() { # jq assignment over the record, then jq arguments
+  local filter="$1"
+  shift
+  jq -c "$@" "$filter" "$UH/.claude/agent-toolkit-staging.json" >"$TMP/record" 2>/dev/null \
     && cp "$TMP/record" "$UH/.claude/agent-toolkit-staging.json"
 }
 # Six hours is the throttle, and a case that wants a check wants it now.
@@ -448,3 +450,42 @@ up now
 exit_is "now installs the release over a clone" 0
 same "so the machine leaves dev mode" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
 [ -d "$CLONE/.git" ] && ok "and the clone is left on disk, untouched" || bad "the clone is left alone" "it is gone"
+
+# ── pruning ──────────────────────────────────────────────────────────────────
+# Three directories are worth keeping: the one that is live, the one that is
+# wanted, and the one the machine fell off, which is what it falls back to.
+UH="$(home update-prune)"
+publish v1.4.0 "$OLD" v1.4.0
+copy_root "$TMP/prune-v1.4.0"
+printf '1.4.0\n' >"$TMP/prune-v1.4.0/VERSION"
+printf '%s\n' "${OLD:0:7}" >"$TMP/prune-v1.4.0/REVISION"
+PATH="$USTUBS:$PATH" HOME="$UH" "$TMP/prune-v1.4.0/install.sh" >/dev/null 2>&1
+publish v1.5.0 "$SHA" v1.5.0
+recheck
+up apply
+same "the machine is on the release, off the directory it recorded" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+
+mkdir -p "$(staged v1.1.0)" "$(staged v1.2.0)" "$(staged v1.3.0)"
+cp -r "$TMP/prune-v1.4.0" "$(staged v1.4.0)"
+keep '.previous = $p' --arg p "$(staged v1.4.0)"
+publish v1.6.0 eeeeeeee4444444444444444444444444444eeee v1.6.0
+recheck
+[ ! -d "$(staged v1.1.0)" ] && [ ! -d "$(staged v1.2.0)" ] && [ ! -d "$(staged v1.3.0)" ] \
+  && ok "a release that is none of the three is removed" || bad "old releases are pruned" "$(ls "$UH/.claude/agent-toolkit-releases")"
+[ -d "$(staged v1.5.0)" ] && ok "the live one stays" || bad "the live one stays" "it went"
+[ -d "$(staged v1.6.0)" ] && ok "the wanted one stays" || bad "the wanted one stays" "it went"
+[ -d "$(staged v1.4.0)" ] && ok "and the one live before it stays" || bad "the previous one stays" "it went"
+
+# A stage that was killed leaves a folder under a name no release ever has.
+mkdir -p "$UH/.claude/agent-toolkit-releases/.staging.old" "$UH/.claude/agent-toolkit-releases/.staging.new"
+touch -d '2 days ago' "$UH/.claude/agent-toolkit-releases/.staging.old"
+recheck
+[ ! -d "$UH/.claude/agent-toolkit-releases/.staging.old" ] && ok "a part-written folder more than a day old is removed" \
+  || bad "an old part-written folder is removed" "it stayed"
+[ -d "$UH/.claude/agent-toolkit-releases/.staging.new" ] && ok "and a fresh one is left, because a stage may still be writing it" \
+  || bad "a fresh part-written folder is left" "it went"
+
+mkdir -p "$(staged v1.0.0)"
+up apply
+[ -d "$(staged v1.0.0)" ] && ok "apply prunes nothing, so no session start waits on a removal" \
+  || bad "apply prunes nothing" "it removed one"

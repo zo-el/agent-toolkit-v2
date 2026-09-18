@@ -374,7 +374,29 @@ do_stage() {
   releases_dir || { record_write; return 0; }
   take_stage_lock || return 0
   check_and_stage
+  prune
   record_write
+}
+
+# Only stage prunes, so no session start ever waits on a removal. Kept: the live
+# version directory, the wanted release, and the one live before the current one,
+# which is what a machine falls back to.
+prune() {
+  local wanted previous entry
+  wanted="${WANTED:-$(recorded .wanted)}"
+  previous="$(recorded .previous)"
+  for entry in "$RELEASES"/*; do
+    [ -d "$entry" ] || continue
+    [ "${entry##*/}" = "$wanted" ] && continue
+    [ "$entry" = "$previous" ] && continue
+    # Read for each removal rather than once: another session can activate while
+    # this loop runs, and the directory it moved to has to survive.
+    [ "$entry" = "$(live_root)" ] && continue
+    rm -rf "$entry"
+  done
+  # A part-written folder is a stage that was killed. A day is long enough that
+  # one still being written is never mistaken for one that was abandoned.
+  find "$RELEASES" -maxdepth 1 -name '.staging.*' -type d -mtime +0 -exec rm -rf {} + 2>/dev/null
 }
 
 # The check and the download, under whatever lock the caller took. TARGET names
