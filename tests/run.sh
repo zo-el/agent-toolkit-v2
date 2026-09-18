@@ -2419,20 +2419,31 @@ fi
 [ -z "$misnamed" ] && ok "and a skill's frontmatter name is its directory" \
   || bad "and a skill's frontmatter name is its directory" "disagreeing in:$misnamed"
 
-# An agent CLAUDE.md does not name is one the session never reaches for, and a
-# roster row with no definition behind it sends it after nothing. The row is
-# recognised by its effort column, which is what separates the agent table from
-# every other table in the README.
-rowless=""; unnamed=""; ghost=""; rows=0
+# An agent CLAUDE.md gives no row is one the session never reaches for, and a
+# roster row with no definition behind it sends it after nothing. A row is any
+# whose first cell is a backticked lowercase name, so a new effort level joins
+# the roster rather than dropping out of it, and padding the table changes
+# nothing.
+rowless=""; unnamed=""; misfiled=""; ghost=""; efforts=""; rows=0
 for a in "$ROOT"/agents/*.md; do
   agent="$(basename "$a" .md)"
-  grep -qF "| \`$agent\` |" "$ROOT/README.md" || rowless="$rowless $agent"
-  grep -qF "\`$agent\`" "$ROOT/CLAUDE.md" || unnamed="$unnamed $agent"
+  grep -qE "^\| *\`$agent\` *\|" "$ROOT/README.md" || rowless="$rowless $agent"
+  grep -qE "^\| *\`$agent\` *\|" "$ROOT/CLAUDE.md" || unnamed="$unnamed $agent"
+  # The file name is what install links and every check here reads; the
+  # frontmatter name is what the session spawns. They have to be one name.
+  [ "$(sed -n 's/^name: //p' "$a" | head -1)" = "$agent" ] || misfiled="$misfiled $agent"
 done
-for want in $(sed -n 's/^| `\([a-z][a-z-]*\)` | *\(max\|xhigh\|high\) *|.*/\1/p' "$ROOT/README.md"); do
+while read -r want level; do
+  [ -n "$want" ] || continue
   rows=$((rows + 1))
-  [ -f "$ROOT/agents/$want.md" ] || ghost="$ghost $want"
-done
+  if [ ! -f "$ROOT/agents/$want.md" ]; then
+    ghost="$ghost $want"
+  elif [ "$level" != "$(sed -n 's/^effort: //p' "$ROOT/agents/$want.md" | head -1)" ]; then
+    efforts="$efforts $want"
+  fi
+done <<EOF
+$(sed -n 's/^| *`\([a-z][a-z-]*\)` *| *\([a-z]*\) *|.*/\1 \2/p' "$ROOT/README.md")
+EOF
 [ -z "$rowless" ] && ok "every agent has a row in the README roster" \
   || bad "every agent has a row in the README roster" "no row for:$rowless"
 if [ "$rows" -eq 0 ]; then
@@ -2442,8 +2453,12 @@ elif [ -n "$ghost" ]; then
 else
   ok "and every row in it has a definition"
 fi
-[ -z "$unnamed" ] && ok "and CLAUDE.md names every agent the session can spawn" \
-  || bad "and CLAUDE.md names every agent the session can spawn" "not named:$unnamed"
+[ -z "$efforts" ] && ok "and the effort it publishes is the one the definition sets" \
+  || bad "and the effort it publishes is the one the definition sets" "disagreeing for:$efforts"
+[ -z "$unnamed" ] && ok "and CLAUDE.md gives every agent a row of its own" \
+  || bad "and CLAUDE.md gives every agent a row of its own" "no row for:$unnamed"
+[ -z "$misfiled" ] && ok "and an agent's frontmatter name is its file name" \
+  || bad "and an agent's frontmatter name is its file name" "disagreeing in:$misfiled"
 
 # A definition naming a skill is a reference like any other, so retiring one
 # breaks something rather than leaving an instruction pointing at nothing.
