@@ -41,7 +41,7 @@ The code, writing, and documentation rules in `CLAUDE.md`. Comments explain why 
 
 - **Small or mechanical** — a rename, a config bump, a wrapper: read the diff yourself. Nothing else.
 - **Normal** — run `/code-review`, and `/security-review` when the change touches credentials, auth, parsing, crypto, or network trust.
-- **Large or critical** — add `pr-review-toolkit` agents as parallel lenses: `code-reviewer`, `silent-failure-hunter`, `type-design-analyzer`, `pr-test-analyzer`, `code-simplifier`. Deduplicate and rank across their reports.
+- **Large or critical**: add `pr-review-toolkit` agents as parallel lenses: `code-reviewer`, `silent-failure-hunter`, `type-design-analyzer`, `pr-test-analyzer`, `comment-analyzer`, `code-simplifier`. Deduplicate and rank across their reports.
 
 Only reach for the heavy fan when the change earns it. Don't spend five agents on a rename.
 
