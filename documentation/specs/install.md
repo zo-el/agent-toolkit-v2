@@ -33,7 +33,7 @@
 | any other argument | nothing | none | usage on stderr | `2` |
 
 - A full install points the stable link at the directory it runs from. That is how a moved checkout, or a different version directory, gets installed. See Going live.
-- `--sync` runs through the launcher at `SessionStart` (`startup`, `resume`, `clear`) and after an edit to a skill or agent inside the installed version directory. It never re-points the stable link. Started from a directory the stable link does not point at, it changes nothing and prints nothing.
+- `--sync` runs through the launcher at `SessionStart` (`startup`, `resume`, `clear`, `compact`, `fork`) and after an edit to a skill or agent inside the installed version directory. It never re-points the stable link. Started from a directory the stable link does not point at, it changes nothing and prints nothing.
 
 ## What install owns
 
@@ -178,11 +178,9 @@ The list lives once, in `install.sh`. The doctor checks it, both reports render 
 | `gh` on PATH, holding a token for github.com | advisory: PR and release flows | the package line, then `gh auth login --hostname github.com --git-protocol ssh --web` |
 | an ssh-agent holding a key is reachable from the shell Claude Code runs in | advisory: git over SSH from Claude Code fails, an approved push included | start Claude Code from a shell whose agent holds the key: `eval "$(ssh-agent -s)" && ssh-add && claude` |
 | git `user.name` and `user.email` set | advisory: commits fail | `git config --global user.name "<your name>"` and `git config --global user.email "<your email>"` |
-| notifications stay quiet for subagents | advisory | set `notifications.suppressForSubagents` to `true` in the file the plugin reports |
 
 - **The package line** installs every missing package in one command, for the package manager present: `apt-get`, `dnf` or `pacman`. With none of those, it names the packages.
 - A python too old for the hooks fails the compile check, which names the reason, so the version is not checked separately.
-- The notifications check reads the file the plugin itself selects, from the plugin's own `config path --json`. An absent file or key is the plugin's default, which is quiet for subagents.
 
 ### Plugins
 

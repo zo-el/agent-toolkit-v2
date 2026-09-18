@@ -23,7 +23,7 @@ SUBJECT_CHARS = 60  # of a subject, before it is cut
 OWNER_CHARS = 24  # of an owner, which is an agent name
 STATUS_CHARS = 16  # of a status, which is one word
 HINT = (
-    "Tasks: none open — open a lane before acting. Tools are deferred: "
+    "Tasks: none open. Open a lane before acting. Tools are deferred: "
     'ToolSearch "select:TaskCreate,TaskUpdate,TaskGet,TaskList"'
 )
 

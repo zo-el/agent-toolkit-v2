@@ -7,8 +7,7 @@
 echo "install.sh"
 
 STUBS="$TMP/stubs"
-export STUB_STATE="$TMP/claude-state" CLAUDE_CALLS="$TMP/claude.calls" SSH_CALLS="$TMP/ssh.calls" NET_CALLS="$TMP/net.calls" \
-  NOTIFY_STUB="$TMP/agent-notifications"
+export STUB_STATE="$TMP/claude-state" CLAUDE_CALLS="$TMP/claude.calls" SSH_CALLS="$TMP/ssh.calls" NET_CALLS="$TMP/net.calls"
 mkdir -p "$STUBS" "$STUB_STATE"
 
 cat >"$STUBS/claude" <<'SH'
@@ -37,22 +36,15 @@ case "$*" in
   "plugin install "*" --scope user --json")
     [ "${CLAUDE_STUB_FAIL:-}" = install ] && { echo '{"outcome":"failed","message":"the stub fetch failed"}'; exit 1; }
     echo "$3 on" >>"$state/plugins"
-    mkdir -p "$state/cache/$3/bin"
-    cp "$NOTIFY_STUB" "$state/cache/$3/bin/"
     echo '{"outcome":"installed"}' ;;
   *) exit 1 ;;
 esac
-SH
-cat >"$NOTIFY_STUB" <<'SH'
-#!/bin/sh
-[ "$*" = "config path --json" ] || exit 1
-printf '{"path":"%s","exists":true}\n' "$HOME/.config/agent-notifications/config.json"
 SH
 printf '#!/bin/sh\necho "gh $*" >>"$NET_CALLS"\n[ "$1 $2" = "auth token" ] && exit "${GH_STUB_RC:-0}"\nexit 0\n' >"$STUBS/gh"
 for tool in curl wget; do printf '#!/bin/sh\necho "%s $*" >>"$NET_CALLS"\nexit 1\n' "$tool" >"$STUBS/$tool"; done
 printf '#!/bin/sh\necho "ssh-add $*" >>"$SSH_CALLS"\nexit "${SSH_ADD_STUB_RC:-0}"\n' >"$STUBS/ssh-add"
 printf '#!/bin/sh\necho "ssh $*" >>"$SSH_CALLS"\nexit 255\n' >"$STUBS/ssh"
-chmod +x "$STUBS"/* "$NOTIFY_STUB"
+chmod +x "$STUBS"/*
 
 # A machine with nothing to advise about, so a case sees only what it caused.
 # CLAUDE_CODE_EXECPATH names the real Claude Code when the suite runs inside a
@@ -201,12 +193,13 @@ check "a first install asks for a restart for the pointer, both directories, env
   "Restart Claude Code: env changed, plugins changed, ~/.claude/CLAUDE.md changed, ~/.claude/agents was created, ~/.claude/skills was created." "$out"
 settings() { js "$FAKE" "$1"; }
 same "the whole wiring, event, matcher and caller included" "$(LC_ALL=C sort <<'WIRED'
-SessionStart[startup|resume|clear] SessionStart install.sh --sync
+SessionStart[startup|resume|clear|compact|fork] SessionStart install.sh --sync
 SessionStart[] async hooks/retro.py record (async)
 PreCompact[] async hooks/retro.py record (async)
 UserPromptSubmit[] UserPromptSubmit hooks/taskline.py
 UserPromptSubmit[] async hooks/retro.py record --interval 900 (async)
 PreToolUse[Bash] PreToolUse hooks/guard.sh
+PreToolUse[Bash] PreToolUse hooks/style.py
 PreToolUse[mcp__linear.*] PreToolUse hooks/guard.sh
 PostToolUse[Write|Edit] PostToolUse hooks/sync.sh
 PostToolUse[Write|Edit] async hooks/format.sh (async)
@@ -234,11 +227,22 @@ case "$(settings '.permissions.deny | join(" ")')" in
   *SendMessage* | *ListAgents*) bad "agents can still reach main" "SendMessage or ListAgents is denied" ;;
   *) ok "agents can still reach main" ;;
 esac
-missing=""
+# Glob and Grep are not tools this harness has, and an unknown name is dropped in
+# silence. Whole names, because BashOutput contains Bash, ListAgents contains
+# Agent, and neither searches. A duplicate key resolves to the last line.
+missing=""; unknown=""; blind=""
 for a in "$ROOT"/agents/*.md; do
-  grep -q '^tools:.*SendMessage' "$a" || missing="$missing $(basename "$a")"
+  n="$(basename "$a")"
+  names=",$(grep '^tools:' "$a" | tail -1 | sed 's/^tools://; s/[[:space:]]//g'),"
+  case "$names" in *,SendMessage,*) ;; *) missing="$missing $n" ;; esac
+  case "$names" in *,Glob,* | *,Grep,*) unknown="$unknown $n" ;; esac
+  case "$names" in *,Bash,* | *,Agent,*) ;; *) blind="$blind $n" ;; esac
 done
 [ -z "$missing" ] && ok "every agent carries SendMessage" || bad "every agent carries SendMessage" "missing in:$missing"
+[ -z "$unknown" ] && ok "no agent asks for a tool the harness dropped" \
+  || bad "no agent asks for a tool the harness dropped" "declared in:$unknown"
+[ -z "$blind" ] && ok "every agent can search a repo" \
+  || bad "every agent can search a repo" "no Bash or Agent in:$blind"
 check "foreign env kept"      "keep"          "$(settings '.env.MY_VAR')"
 check "foreign key kept"      "dark"          "$(settings '.theme')"
 check "foreign hook kept"     "/usr/bin/true" "$(settings '[.hooks.PreToolUse[].hooks[].command] | join(" ")')"
@@ -252,12 +256,16 @@ cmp -s "$ROOT/hooks/launcher.sh" "$FAKE/.claude/agent-toolkit-run" && [ -x "$FAK
   && ok "the launcher is installed outside the version directory" || bad "the launcher is installed" "missing or different"
 check "a settings write takes a backup" "settings.json updated (backup: ~/.claude/backups/settings.json." "$out"
 
-for want in "PreToolUse hooks/guard.sh" "async hooks/format.sh" \
+for want in "PreToolUse hooks/guard.sh" "PreToolUse hooks/style.py" "async hooks/format.sh" \
   "PostToolUse hooks/sync.sh" "UserPromptSubmit hooks/taskline.py" "SessionStart install.sh --sync"; do
   check "wires $want through the launcher" "\"\$HOME/.claude/agent-toolkit-run\" $want" \
     "$(settings '[.hooks[][].hooks[].command] | join(" ")')"
 done
 check "linear matcher wired" "mcp__linear.*" "$(settings '[.hooks.PreToolUse[].matcher] | join(" ")')"
+# An if field is permission rule syntax, and Bash(git commit *) does not match
+# git -C <repo> commit, which is the form CLAUDE.md requires.
+check "no hook narrows itself with an if" "[]" \
+  "$(settings '[.hooks[][] | select(has("if")), (.hooks[]? | select(has("if")))] | tostring')"
 [ -z "$(settings '[.hooks[][].hooks[].command, .statusLine.command] | map(select(test("agent-toolkit-run") | not)) | .[] | select(. != "/usr/bin/true")')" ] \
   && ok "every toolkit command runs the launcher" || bad "every toolkit command runs the launcher" "$(settings .hooks)"
 
@@ -1016,6 +1024,12 @@ while IFS=$'\037' read -r event matcher command; do
         check "$name reaches the guard, which asks before a Linear write" "ask" "$(decision "$out")"
       fi
       ;;
+    hooks/style.py)
+      # A message finding needs no repository, so this proves the wiring rather
+      # than re-proving the check.
+      hook "$SPACE" "$command" "$(bash_payload "git commit -m \"the parser $EM dropped a token\"" "$SPACE")"
+      check "$name reaches the style gate, which denies a dash in the message" "deny" "$(decision "$out")"
+      ;;
     hooks/statusline.py)
       hook "$SPACE" "$command" '{"model":{"display_name":"Opus 5"},"cwd":"/"}'
       check "$name renders" "Opus 5" "$out"
@@ -1363,18 +1377,20 @@ H="$(home marketplace-fails)"
 out="$(HOME="$H" CLAUDE_STUB_FAIL=add "$ROOT/install.sh" 2>&1)"
 check "a failing marketplace fetch carries its message too" "was not registered: ✘ Failed to add marketplace: the stub refused" "$out"
 
+# Which events notify is the plugin's setting and the user's decision, so the
+# doctor says the same thing either way. Asserted as identical output, which
+# holds for whichever key a view would read.
 H="$(home notifications)"
+# Installed first, so both runs compared below are the same idempotent report.
 inst "$ROOT" "$H"
-[[ "$out" != *suppressForSubagents* ]] && ok "an absent notifications config says nothing" || bad "an absent notifications config says nothing" "$out"
+inst "$ROOT" "$H"
+silent="$out"
 mkdir -p "$H/.config/agent-notifications"
-printf '{"notifications":{"suppressForSubagents":false}}\n' >"$H/.config/agent-notifications/config.json"
+printf '{"notifications":{"suppressForSubagents":false,"notifyOnSubagentStop":true}}\n' >"$H/.config/agent-notifications/config.json"
 inst "$ROOT" "$H"
-check "a config that notifies for subagents is an advisory naming the file" \
-  "notifications.suppressForSubagents is false in ~/.config/agent-notifications/config.json" "$out"
-exit_is "and does not fail the install" 0
-fix="$(block 'Needs you' | grep -F 'suppressForSubagents = true' | sed 's/^ *//')"
-HOME="$H" bash -c "$fix" && inst "$ROOT" "$H"
-[[ "$out" != *suppressForSubagents* ]] && ok "and its fix, run as printed, clears it" || bad "and its fix clears it" "$out"
+same "the doctor holds no view on the notification settings" "$silent" "$out" \
+  "the plugin's config changed what the doctor said: $out"
+exit_is "and the install is green either way" 0
 
 # ── failure paths ────────────────────────────────────────────────────────────
 # A version directory whose gate would not hold never goes live.

@@ -35,16 +35,21 @@ PLUGINS=(
 # Every hook the toolkit wires, relative to the version directory. Each becomes a
 # launcher command; matcher "" writes the group with no matcher.
 #
-# Notification events (Notification, Stop) are deliberately absent: the
-# claude-notifications-go plugin owns them.
+# Notification events (Notification, Stop, SubagentStop) are deliberately
+# absent: the claude-notifications-go plugin owns them, and which of them reach
+# the user is its own configuration.
 #
-# taskline must stay synchronous: only a hook that finishes before the turn does
-# has its stdout injected as context.
+# taskline and style must stay synchronous. Only a hook that finishes before the
+# turn or the tool call does is read at all: an async taskline prints its line
+# into the void, and an async style hook cannot deny a commit that already ran.
+#
+# style.py takes the whole Bash matcher rather than an if. That field is
+# permission rule syntax, and Bash(git commit *) misses git -C <repo> commit.
 #
 # The retro recorder is the mirror image: async on every event, so it can neither
 # block a turn nor inject its stdout.
 WIRING='[
-  {"event":"SessionStart","matcher":"startup|resume|clear",
+  {"event":"SessionStart","matcher":"startup|resume|clear|compact|fork",
    "hooks":[{"entry":"install.sh --sync"}]},
   {"event":"SessionStart","matcher":"",
    "hooks":[{"entry":"hooks/retro.py record","async":true}]},
@@ -54,7 +59,8 @@ WIRING='[
    "hooks":[{"entry":"hooks/taskline.py"},
             {"entry":"hooks/retro.py record --interval 900","async":true}]},
   {"event":"PreToolUse","matcher":"Bash",
-   "hooks":[{"entry":"hooks/guard.sh"}]},
+   "hooks":[{"entry":"hooks/guard.sh"},
+            {"entry":"hooks/style.py"}]},
   {"event":"PreToolUse","matcher":"mcp__linear.*",
    "hooks":[{"entry":"hooks/guard.sh"}]},
   {"event":"PostToolUse","matcher":"Write|Edit",
@@ -477,6 +483,8 @@ check_root() {
 # nowhere, so neither can find or write anything. These two are the only entry
 # points whose #! line is probed: a hook that cannot start is a hook that let
 # the call through, and for the rest the failure is visible where it happens.
+# The style gate is deliberately out, because what it lets through is a local
+# commit rather than anything that leaves the machine.
 check_gate() {
   local ask='"permissionDecision":"ask"' payload='{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' reason
   if [ -f "$ROOT/hooks/launcher.sh" ]; then
@@ -906,19 +914,6 @@ check_plugins() {
       *:disabled) finding required install "plugin $id is installed but not enabled" "$(install_command)" ;;
     esac
   done
-  check_notifications "$plugins"
-}
-
-# The plugin picks its own config file, and says which through its own CLI. An
-# absent file or key is its default, which is quiet for subagents.
-check_notifications() { # plugin listing
-  local dir cfg
-  dir="$(jq -r 'first(.[] | select(.id == "claude-notifications-go@claude-notifications-go") | .installPath) // empty' <<<"$1")"
-  [ -n "$dir" ] && [ -x "$dir/bin/agent-notifications" ] || return 0
-  cfg="$(cd "$HOME" && timeout 10 "$dir/bin/agent-notifications" config path --json </dev/null 2>/dev/null | jq -r '.path // empty' 2>/dev/null)"
-  [ -n "$cfg" ] && jq -e '.notifications.suppressForSubagents == false' "$cfg" >/dev/null 2>&1 || return 0
-  finding advisory user "notifications fire when a subagent finishes: notifications.suppressForSubagents is false in $(home_path "$cfg")" \
-    "jq '.notifications.suppressForSubagents = true' $(home_path "$cfg") > $(home_path "$cfg").new && mv $(home_path "$cfg").new $(home_path "$cfg")"
 }
 
 # ── version stamp ────────────────────────────────────────────────────────────
