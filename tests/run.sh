@@ -95,6 +95,29 @@ expect "linear write asks"            ask    "$(tool_payload 'mcp__linear__save_
 expect "linear delete asks"           ask    "$(tool_payload 'mcp__linear__delete_comment')"
 expect "non-linear mcp is free"       silent "$(tool_payload 'mcp__context7__query-docs')"
 
+expect "gh workflow run asks"         ask    "$(bash_payload 'gh workflow run release.yml --ref main')"
+expect "gh workflow disable asks"     ask    "$(bash_payload 'gh workflow disable release.yml')"
+expect "gh workflow enable asks"      ask    "$(bash_payload 'gh workflow enable release.yml')"
+expect "gh run rerun asks"            ask    "$(bash_payload 'gh run rerun 42 --failed')"
+expect "gh run cancel asks"           ask    "$(bash_payload 'gh run cancel 42')"
+expect "gh run delete asks"           ask    "$(bash_payload 'gh run delete 42')"
+expect "gh release create still asks" ask    "$(bash_payload 'gh release create v1.0.0 --notes x')"
+expect "and delete-asset with it"     ask    "$(bash_payload 'gh release delete-asset v1.0.0 toolkit.tar.gz')"
+expect "a methoded release write asks" ask \
+  "$(bash_payload 'gh api --method PATCH repos/zo-el/agent-toolkit-v2/releases/9 -f prerelease=true')"
+expect "and -X is the same method"    ask    "$(bash_payload 'gh api -X DELETE repos/zo-el/agent-toolkit-v2/git/refs/tags/v1.0.0')"
+expect "and a field alone implies one" ask   "$(bash_payload 'gh api repos/zo-el/agent-toolkit-v2/git/tags -f tag=v1.0.0')"
+expect "listing workflows is free"    silent "$(bash_payload 'gh workflow list')"
+expect "reading a run is free"        silent "$(bash_payload 'gh run view 42 --log')"
+expect "reading a release is free"    silent "$(bash_payload 'gh release view v1.0.0 --json tagName,targetCommitish')"
+expect "downloading one is free"      silent "$(bash_payload 'gh release download v1.0.0 --archive=tar.gz --output /tmp/t.tgz')"
+expect "an unmethoded release read is free" silent \
+  "$(bash_payload 'gh api repos/zo-el/agent-toolkit-v2/releases/latest --jq .tag_name')"
+expect "and an unmethoded ref read"   silent "$(bash_payload 'gh api repos/zo-el/agent-toolkit-v2/git/refs/tags/v1.0.0')"
+# A DELETE carries no field, so -X is the whole evidence that it mutates.
+expect "-X on a comment endpoint is still denied" deny \
+  "$(bash_payload 'gh api -X DELETE repos/zo-el/agent-toolkit-v2/issues/comments/9')"
+
 # ── attribution ──────────────────────────────────────────────────────────────
 # Absolute in CLAUDE.md, so the verdict is deny: there is nothing to approve.
 # The forbidden strings are built from $session rather than typed whole, so no
