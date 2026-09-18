@@ -197,7 +197,9 @@ check "a first install asks for a restart for the pointer, both directories, env
 settings() { js "$FAKE" "$1"; }
 same "the whole wiring, event, matcher and caller included" "$(LC_ALL=C sort <<'WIRED'
 SessionStart[startup|resume|clear|compact|fork] SessionStart install.sh --sync
+SessionStart[startup|resume|clear|compact] SessionStart hooks/update.sh apply
 SessionStart[] async hooks/retro.py record (async)
+SessionStart[] async hooks/update.sh stage (async)
 PreCompact[] async hooks/retro.py record (async)
 UserPromptSubmit[] UserPromptSubmit hooks/taskline.py
 UserPromptSubmit[] async hooks/retro.py record --interval 900 (async)
@@ -1186,9 +1188,33 @@ while IFS=$'\037' read -r event matcher command; do
       hook "$SPACE" "$command" "{\"hook_event_name\":\"$event\"}"
       [ -e "$SPACE/.claude/retro/last-sweep" ] && ok "$name reaches the recorder" || bad "$name reaches the recorder" "no sweep: exit $rc"
       ;;
+    hooks/update.sh)
+      if [ "$args" = stage ]; then
+        rm -f "$SPACE/.claude/agent-toolkit-staging.json"
+        hook "$SPACE" "$command" '{"hook_event_name":"SessionStart","source":"startup"}'
+        [ -e "$SPACE/.claude/agent-toolkit-staging.json" ] && ok "$name reaches the updater, which records the check it began" \
+          || bad "$name reaches the updater" "nothing was recorded: exit $rc"
+      else
+        printf 'neither latest nor a release\n' >"$SPACE/.claude/agent-toolkit-track"
+        hook "$SPACE" "$command" '{"hook_event_name":"SessionStart","source":"startup"}'
+        rm -f "$SPACE/.claude/agent-toolkit-track"
+        check "$name reaches the updater, which refuses a track it cannot read" "agent-toolkit-track holds" "$out"
+      fi
+      ;;
     *) bad "every wired command is checked here" "no check for: $name" ;;
   esac
 done < <(wired "$SPACE" | grep -F 'agent-toolkit-run')
+
+# The updater is two halves with two shapes: one nobody waits on, where the
+# network lives, and one that waits, because taking a release has work to do.
+same "stage runs at every session start, whatever brought it about" "" \
+  "$(wired "$SPACE" | awk -F'\037' '$3 ~ /update.sh stage/ { print $2 }')"
+same "and apply at the starts that rebuild a context, fork apart" "startup|resume|clear|compact" \
+  "$(wired "$SPACE" | awk -F'\037' '$3 ~ /update.sh apply/ { print $2 }')"
+same "nothing waits on stage" "true" \
+  "$(jq -r 'first(.hooks.SessionStart[].hooks[] | select(.command | test("update.sh stage")) | .async)' "$SPACE/.claude/settings.json")"
+same "and apply is waited for" "null" \
+  "$(jq -r 'first(.hooks.SessionStart[].hooks[] | select(.command | test("update.sh apply")) | .async)' "$SPACE/.claude/settings.json")"
 
 # "Runnable as printed" is only really tested by a path with a space in it: the
 # quoter returns one already inside quotes, where a ~ substituted in afterwards
@@ -1877,7 +1903,7 @@ wait "$holder" 2>/dev/null
 H="$(home missing-own-files)"
 inst "$ROOT" "$H"
 before="$(snapshot "$H")"
-for missing in hooks/launcher.sh hooks/lib/settings.py hooks/lib/version.py; do
+for missing in hooks/launcher.sh hooks/lib/settings.py hooks/lib/version.py hooks/update.sh; do
   copy_root "$TMP/missing-root"
   rm -f "$TMP/missing-root/$missing"
   inst "$TMP/missing-root" "$H"

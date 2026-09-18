@@ -56,12 +56,18 @@ PLUGINS=(
 # permission rule syntax, and Bash(git commit *) misses git -C <repo> commit.
 #
 # The retro recorder is the mirror image: async on every event, so it can neither
-# block a turn nor inject its stdout.
+# block a turn nor inject its stdout. The updater's stage half is the same shape,
+# because it is where the network lives; its apply half waits, because taking a
+# release is the one session start that has work to do. Neither runs at fork: a
+# fork inherits a context that is already running.
 WIRING='[
   {"event":"SessionStart","matcher":"startup|resume|clear|compact|fork",
    "hooks":[{"entry":"install.sh --sync"}]},
+  {"event":"SessionStart","matcher":"startup|resume|clear|compact",
+   "hooks":[{"entry":"hooks/update.sh apply"}]},
   {"event":"SessionStart","matcher":"",
-   "hooks":[{"entry":"hooks/retro.py record","async":true}]},
+   "hooks":[{"entry":"hooks/retro.py record","async":true},
+            {"entry":"hooks/update.sh stage","async":true}]},
   {"event":"PreCompact","matcher":"",
    "hooks":[{"entry":"hooks/retro.py record","async":true}]},
   {"event":"UserPromptSubmit","matcher":"",
