@@ -577,6 +577,24 @@ check "and says the machine takes the release again on its own" "staged again on
   || bad "the altered folder is no longer staged" "it is still there"
 same "so the record holds no seal for it either" "" "$(kept '.seals["v1.5.0"]')"
 
+# An alteration nobody can move out of the way keeps its seal and stays staged:
+# dropping the seal there would hand the next apply the evidence to delete.
+if [ "$(id -u)" -ne 0 ]; then
+  rm -rf "$(staged v1.5.0)"
+  recheck
+  printf 'x\n' >>"$(staged v1.5.0)/CLAUDE.md"
+  chmod a-w "$UH/.claude/agent-toolkit-releases"
+  up apply
+  chmod u+w "$UH/.claude/agent-toolkit-releases"
+  reports "an altered tree that cannot be moved aside says so" "could not be moved out of the way"
+  [ -n "$(kept '.seals["v1.5.0"]')" ] && ok "and keeps its seal, so the next run does not delete it" \
+    || bad "a failed set aside keeps the seal" "the seal was dropped"
+  [ -d "$(staged v1.5.0)" ] && ok "with the folder still where it was" || bad "the folder stays" "it is gone"
+  rm -rf "$(staged v1.5.0)"
+else
+  skip "an altered tree that cannot be moved aside" "running as root, which writes into any directory"
+fi
+
 # The machine is not stuck: the next check downloads that release again.
 recheck
 [ -d "$(staged v1.5.0)" ] && ok "the next check stages it afresh" || bad "it is staged again" "it was not"
