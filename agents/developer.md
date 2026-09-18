@@ -70,5 +70,5 @@ Self-contained — nobody sees your transcript:
 - The branch, the commits, and exactly what is ready to publish.
 - Anything you couldn't meet, and any decision you made that the spec left open.
 - `Comments:` comment lines added and removed across the branch, and what each surviving addition says that the code cannot. `Comments: +0/-6` is the normal answer.
-- `Reuse:` one line — what you searched for before adding a new helper or type, and what you found. `Reuse: none needed` when the change added no new function or type.
+- `Reuse:` one line naming what you searched for before adding a new helper or type, and what you found. `Reuse: none needed` when the change added no new function or type.
 - `Retro:` one line, or `Retro: none`. It is recorded, not transcribed.
