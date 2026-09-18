@@ -320,10 +320,6 @@ same "the machine starts at the version it installed" "v1.4.0·${OLD:0:7}" "$(ca
 
 up apply
 says_nothing "apply with nothing staged prints nothing"
-publish v1.4.0 "$OLD" v1.4.0
-recheck
-up apply
-says_nothing "and a staged release equal to the live version installs nothing"
 
 publish v1.5.0 "$SHA" v1.5.0
 recheck
@@ -340,6 +336,13 @@ reports "and install's own report travels with it" "agent-toolkit → $(staged v
 
 up apply
 says_nothing "the next session start says nothing, because this one was told"
+# The folder is now both staged and live, which is the case that must cost no
+# install at all: a missing skill link is what an install would put back.
+rm -f "$UH/.claude/skills/toolkit"
+up apply
+[ ! -e "$UH/.claude/skills/toolkit" ] && ok "and a staged release equal to the live version runs no install" \
+  || bad "an equal staged version runs no install" "install ran and relinked the skill"
+PATH="$USTUBS:$PATH" HOME="$UH" "$(staged v1.5.0)/install.sh" >/dev/null 2>&1
 keep '.reported = "v1.4.0·aaaaaaa"'
 up apply
 reports "and a session that finds a version it never reported says so, whoever moved it" "v1.5.0 is live, from v1.4.0·aaaaaaa"
