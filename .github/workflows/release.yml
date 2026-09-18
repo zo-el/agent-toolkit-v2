@@ -1,0 +1,37 @@
+name: Release
+
+# The merge is the human gate and this is the machine gate: a merge that fails
+# the suite lands on main and is released by nothing, so no machine ever runs a
+# tree the suite has not passed. Contract: documentation/specs/release.md.
+on:
+  push:
+    branches: [main]
+
+# Releases are published in the order they were merged.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # A work tree at the pushed commit, and no depth behind it: nothing here
+      # counts commits, and the version is declared rather than computed.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: The suite
+        run: .github/suite-gate.sh
+
+      # Publishing, and the one line this run writes about what it did. Every
+      # decision it makes is in a script, because a decision only a workflow run
+      # can reach is one the suite cannot judge.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .github/publish-release.sh "$GITHUB_SHA"
