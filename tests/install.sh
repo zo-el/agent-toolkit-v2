@@ -1049,6 +1049,18 @@ while IFS=$'\037' read -r event matcher command; do
   esac
 done < <(wired "$SPACE" | grep -F 'agent-toolkit-run')
 
+# "Runnable as printed" is only really tested by a path with a space in it: the
+# quoter returns one already inside quotes, where a ~ substituted in afterwards
+# would be a literal the shell never expands.
+SPACEFIX="$(home 'fix with a space')"
+printf '{"env": "not an object"}\n' >"$SPACEFIX/.claude/settings.json"
+inst "$ROOT" "$SPACEFIX"
+printf '#!/bin/sh\nprintf "opened %%s\\n" "$1"\n' >"$STUBS/fake-editor"
+chmod +x "$STUBS/fake-editor"
+fix="$(block 'Needs you' | grep -F 'EDITOR' | sed 's/^ *//')"
+check "the fix a settings failure prints opens that very file" \
+  "opened $SPACEFIX/.claude/settings.json" "$(HOME="$SPACEFIX" EDITOR=fake-editor bash -c "$fix")"
+
 # The version directory moves out from under the stable link.
 H="$(home dangling)"
 MOVABLE="$TMP/movable-root"
