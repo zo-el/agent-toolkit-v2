@@ -6,7 +6,8 @@ install.sh declares the values and holds the lock. This file does the rest of
 the Settings contract in documentation/specs/install.md.
 
 The request carries: settings, ledger and backups paths; desired, a fragment
-shaped like settings.json; absent, key paths the toolkit keeps unset; home,
+shaped like settings.json; absent, key paths the toolkit keeps unset; forbidden,
+array members it keeps unset, matched by what they are; home,
 root and prev_root, for recognising what an earlier install wrote. The result
 is one JSON object on stdout.
 """
@@ -223,6 +224,20 @@ def predating(request, current, values, members):
     return found_values, found_members
 
 
+def refused(entry, rule, home):
+    """A member the toolkit keeps unset, matched by what it is rather than by a
+    ledger that vouches for who wrote it: one path exactly, or anything at or
+    below one. A path above either is the user's own and is left alone."""
+    if not isinstance(entry, str):
+        return False
+    path = entry.rstrip("/")
+    if path.startswith("~/"):
+        path = home + path[1:]
+    if "is" in rule:
+        return path == rule["is"]
+    return path == rule["under"] or path.startswith(rule["under"] + "/")
+
+
 def merge(current, request, on_disk):
     """(merged, ledger, restart reasons). on_disk is what the ledger holds, or
     None when there is none and the file itself has to say what an earlier
@@ -245,6 +260,10 @@ def merge(current, request, on_disk):
             entries[:] = [e for e in entries if fingerprint(e) != item]
     for path in request.get("absent", []):
         drop(merged, tuple(path))
+    for rule in request.get("forbidden", []):
+        entries = get(merged, tuple(rule["path"]))
+        if isinstance(entries, list):
+            entries[:] = [e for e in entries if not refused(e, rule, request["home"])]
 
     for path, value in values.items():
         before = get(current, path)

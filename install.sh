@@ -20,6 +20,7 @@ BACKUPS="$CLAUDE_DIR/backups"
 SKILLS_DST="$CLAUDE_DIR/skills"
 AGENTS_DST="$CLAUDE_DIR/agents"
 MANIFEST="$AGENTS_DST/.toolkit-agents"
+RELEASES="$CLAUDE_DIR/agent-toolkit-releases"
 BRIDGE_SRC="$ROOT/tools/penpot-mcp"
 BRIDGE_DST="$CLAUDE_DIR/tools/penpot-mcp"
 # Install copies every file it finds, so a fifth travels on its own. These four
@@ -122,7 +123,7 @@ def run($caller; $entry): "\"$HOME/.claude/agent-toolkit-run\" \($caller) \($ent
     # The version directory only where somebody edits it. On a machine installed
     # from a release the same entry would hand every agent the code that runs at
     # the next session start.
-    additionalDirectories: ([$scratch, $worktrees, $tools] + (if $work_tree then [$root] else [] end)),
+    additionalDirectories: ([$scratch, $worktrees] + (if $work_tree then [$root] else [] end)),
     # A deny governs the Read tool only, so jq and python still reach settings.
     deny: [
       "Read(~/.claude/.credentials.json)",
@@ -149,6 +150,16 @@ JQ
 # Agent teams spawn whole parallel sessions, a different model from one session
 # delegating to subagents. Kept unset rather than merely not written.
 ABSENT='[["env","CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"]]'
+
+# Approvals kept unset in the same way, because retiring one needs a ledger to
+# vouch that the toolkit wrote it, and a machine that lost its ledger would keep
+# for good the one approval the rule exists to remove. A path above either, such
+# as the user's home directory, is theirs and is left alone.
+forbidden_approvals() {
+  jq -n --arg claude_dir "$CLAUDE_DIR" --arg releases "$RELEASES" \
+    '[{path: ["permissions", "additionalDirectories"], is: $claude_dir},
+      {path: ["permissions", "additionalDirectories"], under: $releases}]'
+}
 
 pointer_content() {
   cat <<'EOF'
@@ -739,7 +750,7 @@ settings_request() {
       ;;
   esac
   desired="$(jq -n --arg scratch "$SCRATCH" --arg root "$ROOT" \
-    --arg worktrees "$CLAUDE_DIR/worktrees" --arg tools "$CLAUDE_DIR/tools" \
+    --arg worktrees "$CLAUDE_DIR/worktrees" \
     --argjson work_tree "$work_tree" \
     --arg statusline "$STATUSLINE_ENTRY" --argjson wiring "$WIRING" \
     --argjson plugins "$(printf '%s\n' "${PLUGINS[@]}" | jq -R 'split(" ")[0]' | jq -s .)" \
@@ -747,8 +758,9 @@ settings_request() {
   jq -n --arg settings "$SETTINGS" --arg ledger "$LEDGER" --arg backups "$BACKUPS" \
     --arg home "$HOME" --arg root "$ROOT" --arg prev_root "$PREV_ROOT" \
     --argjson desired "$desired" --argjson absent "$ABSENT" \
+    --argjson forbidden "$(forbidden_approvals)" \
     '{settings: $settings, ledger: $ledger, backups: $backups, home: $home, root: $root,
-      prev_root: $prev_root, desired: $desired, absent: $absent}'
+      prev_root: $prev_root, desired: $desired, absent: $absent, forbidden: $forbidden}'
 }
 
 apply_settings() {

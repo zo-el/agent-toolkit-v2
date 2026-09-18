@@ -345,7 +345,10 @@ check "foreign dir kept"      "/my/own/dir"   "$(settings '.permissions.addition
 approved="$(settings '.permissions.additionalDirectories | join(" ")')"
 check "the scratchpad is approved" "/tmp/claude-$(id -u)" "$approved"
 check "and the worktrees an agent is given" "$FAKE/.claude/worktrees" "$approved"
-check "and the directory the bridge fills" "$FAKE/.claude/tools" "$approved"
+case " $approved " in
+  *" $FAKE/.claude/tools "*) bad "the bridge's directory is not approved either" "it is: $approved" ;;
+  *) ok "the bridge's directory is not approved either" ;;
+esac
 # A work tree, which the suite runs from: a checkout, a worktree, or the runner's
 # own shallow clone. An unpacked source archive is not, and this case says so.
 check "a clone is approved, because the toolkit skill edits one" "$ROOT" "$approved"
@@ -359,6 +362,8 @@ case " $approved " in
   *" $FAKE/.claude "*) bad "~/.claude itself is not approved" "it is: $approved" ;;
   *) ok "~/.claude itself is not approved" ;;
 esac
+same "so a clone approves three paths, and keeps the user's own where it was" \
+  "/my/own/dir /tmp/claude-$(id -u) $FAKE/.claude/worktrees $ROOT" "$approved"
 check "credentials denied through ~/" "Read(~/.claude/.credentials.json)" "$(settings '.permissions.deny | join(" ")')"
 check "review plugin enabled" "true" "$(settings '.enabledPlugins["pr-review-toolkit@claude-plugins-official"]')"
 same "the stable link points at the version directory" "$ROOT" "$(readlink "$FAKE/.claude/agent-toolkit")"
@@ -682,6 +687,8 @@ case " $approved " in
   *) ok "a version directory that is not a work tree is approved for nobody" ;;
 esac
 check "while the agents' own directories still are" "$H/.claude/worktrees" "$approved"
+same "and a release root approves those two and nothing else" \
+  "/tmp/claude-$(id -u) $H/.claude/worktrees" "$approved"
 
 # git init inside a release directory is a local command nothing gates, so where
 # a version directory sits has to answer before what it holds does.
@@ -710,6 +717,29 @@ inst "$ROOT" "$H"
 case " $(js "$H" '.permissions.additionalDirectories | join(" ")') " in
   *" $H/.claude "*) bad "and the next install takes it away" "it is still approved" ;;
   *) ok "and the next install takes it away" ;;
+esac
+
+# The ledger is what says the toolkit wrote a value, and a machine that lost one
+# is exactly the machine this approval must still be taken from.
+H="$(home approved-ledgerless)"
+inst "$WHOLESALE" "$H"
+jq --arg h "$H" '.permissions.additionalDirectories += [$h, "/my/own/dir", $h + "/.claude/agent-toolkit-releases/v1.5.0"]' \
+  "$H/.claude/settings.json" >"$TMP/settings" && cp "$TMP/settings" "$H/.claude/settings.json"
+rm -f "$H/.claude/agent-toolkit-applied.json"
+inst "$ROOT" "$H"
+approved="$(js "$H" '.permissions.additionalDirectories | join(" ")')"
+case " $approved " in
+  *" $H/.claude "*) bad "~/.claude goes even with no ledger to vouch for it" "it stayed: $approved" ;;
+  *) ok "~/.claude goes even with no ledger to vouch for it" ;;
+esac
+case " $approved " in
+  *" $H/.claude/agent-toolkit-releases/v1.5.0 "*) bad "and so does a release directory somebody approved" "it stayed: $approved" ;;
+  *) ok "and so does a release directory somebody approved" ;;
+esac
+check "while the user's own entry stays" "/my/own/dir" "$approved"
+case " $approved " in
+  *" $H "*) ok "and so does their home, which the toolkit never wrote" ;;
+  *) bad "the user's home stays" "it went: $approved" ;;
 esac
 
 # ── version identity ─────────────────────────────────────────────────────────
