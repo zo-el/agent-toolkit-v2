@@ -2512,16 +2512,18 @@ printf '%s\n' "${filled%%·*}" | grep -qE "$SHAPE" \
   || ok "and the shape turns down a line missing its fields"
 
 # Every bullet, not every dated one: a line that lost its date is what this
-# catches, and counting only dated lines would read it as an empty log.
-bullets="$(grep -c '^- ' "$ROOT/RETRO.md")"
-shaped="$(grep -cE "$SHAPE" "$ROOT/RETRO.md")"
-if [ "${bullets:-0}" -eq 0 ]; then
-  skip "every line in the log carries it" "the log holds no line, which is where a retro leaves it"
-elif [ "$bullets" = "$shaped" ]; then
-  ok "every line in the log carries it"
-else
-  bad "every line in the log carries it" "${shaped:-0} of ${bullets:-0} lines match"
-fi
+# catches, and counting only dated lines would read it as an empty log. An
+# emptied log is where a retro leaves it, so no unshaped bullet is the verdict
+# rather than a reason to skip, and the fixture is what keeps it meaning
+# something over a file with nothing in it.
+unshaped() { grep '^- ' "$1" | grep -cvE "$SHAPE"; }
+strays="$(unshaped "$ROOT/RETRO.md")"
+[ "$strays" -eq 0 ] && ok "every line in the log carries it" \
+                   || bad "every line in the log carries it" "$strays lines do not"
+printf '# Retro log\n\n- 2026-08-30 developer agent-toolkit: the separators are gone\n' >"$TMP/loose-log.md"
+[ "$(unshaped "$TMP/loose-log.md")" -eq 1 ] \
+  && ok "and a line that lost them would not" \
+  || bad "and a line that lost them would not" "the shape took it"
 
 # Each threshold is a judgement the spec argues for, so the two must not drift.
 drifted="$(python3 - "$ROOT" <<'PY'
