@@ -478,6 +478,59 @@ wait "$holder" 2>/dev/null
 up apply
 same "and the next one activates" "$(staged v1.6.0)" "$(readlink "$UH/.claude/agent-toolkit")"
 
+# ── the digest ───────────────────────────────────────────────────────────────
+# What the seal binds, against a tree built to hold every shape. A release tree
+# carries no symlink of its own, so this is the only place the target field is
+# exercised at all.
+echo "seal.py"
+
+SEALED="$TMP/sealed-tree"
+rm -rf "$SEALED"
+mkdir -p "$SEALED/hooks" "$SEALED/skills/one" "$SEALED/empty"
+printf 'rules\n' >"$SEALED/CLAUDE.md"
+printf 'run me\n' >"$SEALED/hooks/go.sh"
+chmod 755 "$SEALED/hooks/go.sh"
+printf 'a skill\n' >"$SEALED/skills/one/SKILL.md"
+ln -s ../../CLAUDE.md "$SEALED/skills/one/rules"
+seal_of() { python3 "$ROOT/hooks/lib/seal.py" "$SEALED" 2>/dev/null; }
+WHOLE="$(seal_of)"
+binds() { # name, the command that changes the tree, the command that puts it back
+  eval "$2"
+  [ "$(seal_of)" != "$WHOLE" ] && ok "$1" || bad "$1" "the digest did not move"
+  eval "$3"
+  [ "$(seal_of)" = "$WHOLE" ] || bad "$1" "putting it back did not restore the digest"
+}
+ignores() { # name, the command that changes the tree, the command that puts it back
+  eval "$2"
+  [ "$(seal_of)" = "$WHOLE" ] && ok "$1" || bad "$1" "the digest moved"
+  eval "$3"
+}
+
+check "the digest names the algorithm that made it" "sha256:" "$WHOLE"
+binds "it binds a file's bytes" 'printf "more\n" >>"$SEALED/CLAUDE.md"' 'printf "rules\n" >"$SEALED/CLAUDE.md"'
+binds "and the bit that lets a file run" 'chmod 755 "$SEALED/CLAUDE.md"' 'chmod 644 "$SEALED/CLAUDE.md"'
+binds "and a file added" 'printf "x\n" >"$SEALED/hooks/extra"' 'rm -f "$SEALED/hooks/extra"'
+binds "and a file taken away" 'rm -f "$SEALED/hooks/go.sh"' \
+  'printf "run me\n" >"$SEALED/hooks/go.sh"; chmod 755 "$SEALED/hooks/go.sh"'
+binds "and a file moved to another name" 'mv "$SEALED/CLAUDE.md" "$SEALED/RULES.md"' 'mv "$SEALED/RULES.md" "$SEALED/CLAUDE.md"'
+binds "and where a symlink points" \
+  'ln -sfn /etc/passwd "$SEALED/skills/one/rules"' 'ln -sfn ../../CLAUDE.md "$SEALED/skills/one/rules"'
+binds "and a symlink replaced by what it pointed at" \
+  'rm -f "$SEALED/skills/one/rules"; printf "rules\n" >"$SEALED/skills/one/rules"' \
+  'rm -f "$SEALED/skills/one/rules"; ln -s ../../CLAUDE.md "$SEALED/skills/one/rules"'
+binds "and two files swapped between their names" \
+  'mv "$SEALED/CLAUDE.md" "$SEALED/.swap"; mv "$SEALED/hooks/go.sh" "$SEALED/CLAUDE.md"; mv "$SEALED/.swap" "$SEALED/hooks/go.sh"' \
+  'mv "$SEALED/CLAUDE.md" "$SEALED/.swap"; mv "$SEALED/hooks/go.sh" "$SEALED/CLAUDE.md"; mv "$SEALED/.swap" "$SEALED/hooks/go.sh"'
+# Nothing about running the tree, so nothing the seal answers for.
+ignores "it ignores a timestamp" 'touch -d "2001-02-03" "$SEALED/CLAUDE.md"' ':'
+ignores "and an empty directory, which the root checks answer for" 'rmdir "$SEALED/empty"' 'mkdir "$SEALED/empty"'
+python3 "$ROOT/hooks/lib/seal.py" "$TMP/no-such-tree" >/dev/null 2>&1
+rc=$?
+exit_is "a tree it cannot read is not a digest" 1
+python3 "$ROOT/hooks/lib/seal.py" >/dev/null 2>&1
+rc=$?
+exit_is "and being called wrongly is neither" 2
+
 # ── sealing ──────────────────────────────────────────────────────────────────
 # Verifying asks whether the supplier gave what it said it would. The seal asks
 # whether the tree apply runs is the tree stage verified, and between the two the
