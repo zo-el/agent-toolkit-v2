@@ -2419,6 +2419,32 @@ fi
 [ -z "$misnamed" ] && ok "and a skill's frontmatter name is its directory" \
   || bad "and a skill's frontmatter name is its directory" "disagreeing in:$misnamed"
 
+# An agent CLAUDE.md does not name is one the session never reaches for, and a
+# roster row with no definition behind it sends it after nothing. The row is
+# recognised by its effort column, which is what separates the agent table from
+# every other table in the README.
+rowless=""; unnamed=""; ghost=""; rows=0
+for a in "$ROOT"/agents/*.md; do
+  agent="$(basename "$a" .md)"
+  grep -qF "| \`$agent\` |" "$ROOT/README.md" || rowless="$rowless $agent"
+  grep -qF "\`$agent\`" "$ROOT/CLAUDE.md" || unnamed="$unnamed $agent"
+done
+for want in $(sed -n 's/^| `\([a-z][a-z-]*\)` | *\(max\|xhigh\|high\) *|.*/\1/p' "$ROOT/README.md"); do
+  rows=$((rows + 1))
+  [ -f "$ROOT/agents/$want.md" ] || ghost="$ghost $want"
+done
+[ -z "$rowless" ] && ok "every agent has a row in the README roster" \
+  || bad "every agent has a row in the README roster" "no row for:$rowless"
+if [ "$rows" -eq 0 ]; then
+  bad "and every row in it has a definition" "the roster holds no row"
+elif [ -n "$ghost" ]; then
+  bad "and every row in it has a definition" "no definition behind:$ghost"
+else
+  ok "and every row in it has a definition"
+fi
+[ -z "$unnamed" ] && ok "and CLAUDE.md names every agent the session can spawn" \
+  || bad "and CLAUDE.md names every agent the session can spawn" "not named:$unnamed"
+
 # A definition naming a skill is a reference like any other, so retiring one
 # breaks something rather than leaving an instruction pointing at nothing.
 referenced="$(grep -ho '`[a-z][a-z-]*` skill' "$ROOT/CLAUDE.md" "$ROOT"/agents/*.md "$ROOT"/skills/*/SKILL.md \

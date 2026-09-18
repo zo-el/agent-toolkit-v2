@@ -249,6 +249,7 @@ for a in "$ROOT"/agents/*.md; do
     *"write anything"*)
       barred=$((barred + 1))
       [ "$edits" = 1 ] && armed="$armed $n" ;;
+    *write*) ;;
     *)
       [ "$edits" = 0 ] && loose="$loose $n" ;;
   esac
@@ -259,10 +260,12 @@ done
 [ -z "$blind" ] && ok "every agent can search a repo" \
   || bad "every agent can search a repo" "no Bash or Agent in:$blind"
 # README's table says what each agent cannot do and its tools line is what stops
-# it, held to each other both ways so rewording a definition cannot take it out
-# of scope. A table barring nobody is vacuous, so it fails. Bash is not held
-# here: a shell writes as well as reads, so a read-only agent carrying one is
-# bounded by its role text, which is prose.
+# it, read from the table so that rewording a definition cannot take it out of
+# scope. A table barring nobody is vacuous, so it fails. Only an unqualified
+# "write anything" is a claim the allowlist can answer: a cell naming what may
+# not be written, production source against tests, is role text, because one
+# name covers every file either way. Bash is not held here either, since a shell
+# writes as well as reads.
 if [ "$barred" -eq 0 ]; then
   bad "an agent the README bars from writing declares no editing tool" "the table bars none of them"
 elif [ -n "$armed" ]; then
@@ -270,8 +273,8 @@ elif [ -n "$armed" ]; then
 else
   ok "an agent the README bars from writing declares no editing tool"
 fi
-[ -z "$loose" ] && ok "and one the table does not bar can still write" \
-  || bad "and one the table does not bar can still write" "no editing tool in:$loose"
+[ -z "$loose" ] && ok "and one it says nothing about carries the tools to write" \
+  || bad "and one it says nothing about carries the tools to write" "no editing tool in:$loose"
 # Repo history is read with a shell, so a definition claiming it declares one.
 if [ "$claimed" -eq 0 ]; then
   bad "an agent that reads repo history directly carries a shell" "no definition claims it"
