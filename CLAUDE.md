@@ -81,7 +81,7 @@ Reach for `general-purpose` rather than inventing a new agent.
 
 | Specialist | Call it when | It returns |
 | ---------------------- | ------------ | ---------- |
-| `security-auditor` | the lane touches a trust boundary (credentials, auth, crypto, untrusted input, peer data) or ships a release. On a spec before the developer, on a pinned range after it. | the trust boundaries, ranked findings with exploit paths, a verdict |
+| `security-auditor` | the lane touches a trust boundary (credentials, auth, crypto, untrusted input, peer data) or ships a release. On a spec before the developer, on a pinned range after it, and in place of the developer's and the reviewer's own security pass rather than beside it. | the trust boundaries, ranked findings with exploit paths, a verdict |
 | `test-engineer` | tests are the goal: pinning behaviour before a refactor, coverage for existing code, a flaky suite. Never in the same repo as a running developer. | the tests, what each pins, the bugs they exposed |
 | `performance-engineer` | something is slow, a regression is suspected, or an optimisation is proposed. Before the developer for the baseline and hotspot, after it to re-measure. | the baseline, the hotspot, fixes ranked by measured gain |
 

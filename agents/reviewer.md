@@ -16,6 +16,8 @@ Your brief must tell you **what we're trying to achieve and why**. Without it, a
 
 It also names the range you measure, `<base>..<head>` by sha. Read that range, not the working tree, which may still be moving.
 
+Read it from an export, `git archive <head> | tar -x -C <dir>`, so nothing shifts under you while you work.
+
 ## What you check
 
 **Was this the right work?**

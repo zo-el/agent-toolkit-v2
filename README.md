@@ -37,7 +37,7 @@ Each runs in its own context with a tool allowlist as its outer boundary and its
 | `researcher` | high | write anything |
 | `security-auditor` | xhigh | write anything |
 | `test-engineer` | xhigh | write production source |
-| `performance-engineer` | high | write source, beyond a benchmark harness |
+| `performance-engineer` | high | write anything |
 
 `security-auditor`, `test-engineer` and `performance-engineer` are specialists: the session spawns them only when a lane needs one. Linear tools live only in `project-manager`. `developer` and `ui-developer` edit production source, the ui-developer only the front-end; `test-engineer` edits tests. Subagents nest one level deep, which is what lets the developer and reviewer run their review agents, and the researcher reach a repo through `Explore`. Every agent carries `SendMessage`, so it can reach the session mid-run when it is genuinely blocked instead of finishing a long task on a wrong assumption.
 

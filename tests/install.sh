@@ -279,15 +279,8 @@ for a in "$ROOT"/agents/*.md; do
       [ "$edits" = 1 ] && armed="$armed $n" ;;
     # A cell naming what may not be written is role text for the barred
     # direction, since one tool name covers every file either way, but the agent
-    # still writes something, so it still needs a tool that writes. The
-    # performance engineer is the one row where that does not hold: its cell
-    # allows a benchmark harness and its allowlist carries nothing to write one
-    # with, which is a question for its definition rather than one this decides.
-    *write*)
-      case "$n" in
-        performance-engineer.md) ;;
-        *) [ "$edits" = 0 ] && loose="$loose $n" ;;
-      esac ;;
+    # still writes something, so it still needs a tool that writes.
+    *write*) [ "$edits" = 0 ] && loose="$loose $n" ;;
     *)
       [ "$edits" = 0 ] && loose="$loose $n" ;;
   esac
