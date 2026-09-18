@@ -281,3 +281,75 @@ publish v1.5.0 "$SHA" v1.5.0
 printf 'not a tarball at all\n' >"$AT_GH_STATE/tarball.$SHA"
 refuses v1.5.0 "an archive that will not decompress stages nothing" "would not unpack"
 publish v1.5.0 "$SHA" v1.5.0
+
+# ── applying ─────────────────────────────────────────────────────────────────
+# A session start takes the release that is waiting, or costs nothing at all.
+UH="$(home update-apply)"
+OLD=aaaaaaa1111111111111111111111111111aaaa
+publish v1.4.0 "$OLD" v1.4.0
+copy_root "$TMP/live-v1.4.0"
+printf '1.4.0\n' >"$TMP/live-v1.4.0/VERSION"
+printf '%s\n' "${OLD:0:7}" >"$TMP/live-v1.4.0/REVISION"
+PATH="$USTUBS:$PATH" HOME="$UH" "$TMP/live-v1.4.0/install.sh" >/dev/null 2>&1
+same "the machine starts at the version it installed" "v1.4.0·${OLD:0:7}" "$(cat "$UH/.claude/agent-toolkit-version")"
+
+up apply
+says_nothing "apply with nothing staged prints nothing"
+publish v1.4.0 "$OLD" v1.4.0
+recheck
+up apply
+says_nothing "and a staged release equal to the live version installs nothing"
+
+publish v1.5.0 "$SHA" v1.5.0
+recheck
+[ -d "$(staged v1.5.0)" ] && ok "a newer release is staged and left waiting" || bad "a newer release is staged" "it was not"
+same "and nothing has gone live yet" "v1.4.0·${OLD:0:7}" "$(cat "$UH/.claude/agent-toolkit-version")"
+up apply
+reports "the session start after it says what went live, and what it came from" "v1.5.0 is live, from v1.4.0·${OLD:0:7}"
+check "with the one line the user sees" '"systemMessage":"agent-toolkit: updated to v1.5.0. Restart Claude Code to load the new version"' "$out"
+check "and a rescan, because every skill link moved" '"reloadSkills":true' "$out"
+same "the stable link points at the release" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+same "and the stamp is its version" "v1.5.0·${SHA:0:7}" "$(cat "$UH/.claude/agent-toolkit-version")"
+same "with the directory it moved off recorded, for pruning to keep" "$TMP/live-v1.4.0" "$(kept .previous)"
+reports "and install's own report travels with it" "agent-toolkit → $(staged v1.5.0)"
+
+up apply
+says_nothing "the next session start says nothing, because this one was told"
+keep '.reported = "v1.4.0·aaaaaaa"'
+up apply
+reports "and a session that finds a version it never reported says so, whoever moved it" "v1.5.0 is live, from v1.4.0·aaaaaaa"
+
+# ── an activation that does not go live ──────────────────────────────────────
+# Install writes nothing from a root that fails its checks, so the machine stays
+# exactly where it was and the release is not tried again.
+publish v1.6.0 cccccccc2222222222222222222222222222cccc v1.6.0
+recheck
+rm -f "$(staged v1.6.0)/hooks/guard.sh"
+before="$(snapshot "$UH/.claude/skills")"
+up apply
+reports "a release that fails its root checks is a required finding" "v1.6.0 did not go live"
+reports "carrying install's own reason" "hooks/guard.sh is missing from the version directory"
+reports "and naming both versions" "the wanted release is v1.6.0 and the live version is v1.5.0"
+check "with the command that tries again" "update.sh now" "$out"
+same "the stable link has not moved" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+same "and nothing under skills changed" "$before" "$(snapshot "$UH/.claude/skills")"
+same "the version is marked bad" "v1.6.0" "$(kept '.bad[0]')"
+
+up apply
+case "$(jq -r '.hookSpecificOutput.additionalContext // ""' <<<"$out")" in
+  *"install.sh"*) bad "a version marked bad is not installed again" "it ran install again" ;;
+  *) ok "a version marked bad is not installed again" ;;
+esac
+
+# ── one activation at a time ─────────────────────────────────────────────────
+rm -rf "$(staged v1.6.0)"
+keep 'del(.bad)'
+publish v1.6.0 cccccccc2222222222222222222222222222cccc v1.6.0
+recheck
+lock_holder "$UH/.claude/agent-toolkit-releases/.apply.lock"
+up apply
+same "a session that cannot take the activation lock installs nothing" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+kill "$holder" 2>/dev/null
+wait "$holder" 2>/dev/null
+up apply
+same "and the next one activates" "$(staged v1.6.0)" "$(readlink "$UH/.claude/agent-toolkit")"

@@ -174,6 +174,8 @@ gh_is_ready() {
 COMMIT=""
 TARGET=""        # the version directory now should install from
 STAGE_REASON=""  # what now prints when there is nothing to install
+PREVIOUS_ROOT="" # the version directory live before an activation moved off it
+ACTIVATED=0      # this run installed a release and it went live
 
 # A 404 is not an answer on its own: the repository is private, so a token that
 # cannot see it 404s exactly as a repository with no release does.
@@ -378,6 +380,80 @@ workspace() {
 }
 
 # ── apply ────────────────────────────────────────────────────────────────────
+RELOAD=0
+
+take_apply_lock() {
+  : >>"$RELEASES/.apply.lock" 2>/dev/null || return 1
+  exec 7<"$RELEASES/.apply.lock" 2>/dev/null || return 1
+  flock -w 1 7 2>/dev/null
+}
+
+# apply makes no call of its own, so a machine following latest takes the release
+# the last check recorded.
+apply_wanted() {
+  [ "$TRACK_STATE" = pin ] || WANTED="$(recorded .wanted)"
+}
+
+marked_bad() { jq -e --arg v "$1" 'any(.bad[]?; . == $v)' <<<"$RECORD_JSON" >/dev/null 2>&1; }
+
+# Install from the staged folder, or leave the machine exactly as it is. Nothing
+# here is a report: whether anything is printed is the record's question, not
+# this run's.
+activate() {
+  local staged before after out line
+  apply_wanted
+  [ -n "$WANTED" ] || return 0
+  staged="$RELEASES/$WANTED"
+  [ -d "$staged" ] || return 0
+  [ "$MODE" = now ] || ! marked_bad "$WANTED" || return 0
+  before="$(version root "$(live_root)")"
+  version same "$(version root "$staged")" "$before" && return 0
+  take_apply_lock || return 0
+  out="$("$staged/install.sh" 2>&1)"
+  after="$(live_root)"
+  if [ "$after" = "$staged" ]; then
+    ACTIVATED=1
+    # Install keeps no note of the directory it moved off, so the activation that
+    # moved is what records it, for pruning to keep one version to fall back to.
+    record_set '.previous = $p | .bad = [.bad[]? | select(. != $v)]' --arg p "$PREVIOUS_ROOT" --arg v "$WANTED"
+  else
+    record_set '.bad = ((.bad // []) + [$v] | unique)' --arg v "$WANTED"
+    finding required user "$WANTED did not go live, so nothing on this machine changed" "$UPDATE_NOW"
+  fi
+  while IFS= read -r line; do [ -z "$line" ] || LEAD+=("$line"); done <<<"$out"
+}
+
+# Off the record, not off this run: two sessions starting together are each told
+# once, whichever of them caused the change.
+report_change() {
+  local live reported
+  live="$(version root "$(live_root)")"
+  [ -n "$live" ] || return 0
+  reported="$(recorded .reported)"
+  version same "$live" "$reported" && return 0
+  # A machine that has never reported anything and changed nothing this run has
+  # no change to announce: whatever put this version here said so at the time.
+  if [ -z "$reported" ] && [ "$ACTIVATED" -eq 0 ]; then
+    record_set '.reported = $v' --arg v "$live"
+    return 0
+  fi
+  LEAD=("$(version release "$live") is live, from ${reported:-a version this machine never reported}" "${LEAD[@]}")
+  MESSAGE+=("updated to $(version release "$live"). Restart Claude Code to load the new version")
+  RELOAD=1
+  record_set '.reported = $v' --arg v "$live"
+}
+
+# Said only where the report already has something to say: a machine that is
+# behind on purpose is told once, by the announcement, not at every start.
+report_behind() {
+  local live
+  [ -n "$WANTED" ] || return 0
+  { [ ${#F_SEV[@]} -gt 0 ] || [ ${#LEAD[@]} -gt 0 ] || [ ${#MESSAGE[@]} -gt 0 ]; } || return 0
+  live="$(version root "$(live_root)")"
+  [ -n "$live" ] && [ "$(version release "$live")" != "$WANTED" ] || return 0
+  LEAD+=("the wanted release is $WANTED and the live version is $live")
+}
+
 # Every finding the record holds about a run nobody was there to hear.
 report_record() {
   local text since
@@ -398,13 +474,18 @@ do_apply() {
   judge_track
   [ "$TRACK_STATE" = off ] && return 0
   read_record
-  [ "$TRACK_STATE" = bad ] || report_record
+  if [ "$TRACK_STATE" != bad ]; then
+    PREVIOUS_ROOT="$(live_root)"
+    activate
+    report_change
+    report_record
+    report_behind
+  fi
   required="$(count required)"
   [ "$required" -eq 0 ] || MESSAGE+=("$(plural "$required" "update problem"). Ask Claude to fix it")
-  hook_report SessionStart "agent-toolkit updates:" 0
-  if [ "$(recorded .replaced)" = true ]; then
-    record_set '.replaced = false' && record_write
-  fi
+  hook_report SessionStart "agent-toolkit updates:" "$RELOAD"
+  [ "$(recorded .replaced)" != true ] || record_set '.replaced = false'
+  record_write
   return 0
 }
 

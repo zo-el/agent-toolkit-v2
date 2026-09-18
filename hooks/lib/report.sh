@@ -5,7 +5,8 @@
 # Sourced, never run: it defines and declares, and prints only when asked.
 
 F_SEV=() F_WHO=() F_TEXT=() F_FIX=()
-CONTEXT=()   # what the report says after its findings
+LEAD=()      # what the report says before its findings
+CONTEXT=()   # and what it says after them
 MESSAGE=()   # what systemMessage says beyond the findings
 
 finding() { # severity (required|advisory), who (user|install|toolkit), text, fix lines
@@ -39,16 +40,17 @@ json_str() {
 }
 
 # Exactly one JSON object, or nothing when there is nothing to say. The caller
-# owns what counts as something: it fills CONTEXT and MESSAGE first.
+# owns what counts as something: it fills LEAD, CONTEXT and MESSAGE first.
 hook_report() { # event, the line additionalContext opens with, reloadSkills 0|1
   local i fixes context
-  if [ ${#F_SEV[@]} -eq 0 ] && [ ${#CONTEXT[@]} -eq 0 ] && [ ${#MESSAGE[@]} -eq 0 ]; then
+  if [ ${#F_SEV[@]} -eq 0 ] && [ ${#LEAD[@]} -eq 0 ] && [ ${#CONTEXT[@]} -eq 0 ] && [ ${#MESSAGE[@]} -eq 0 ]; then
     if [ "$3" = 1 ]; then
       printf '{"hookSpecificOutput":{"hookEventName":%s,"reloadSkills":true}}\n' "$(json_str "$1")"
     fi
     return 0
   fi
   context="$2"
+  for i in "${LEAD[@]}"; do context+=$'\n'"$i"; done
   for i in "${!F_SEV[@]}"; do
     mapfile -t fixes <<<"${F_FIX[i]}"
     if [ -n "${F_FIX[i]}" ]; then
