@@ -14,6 +14,8 @@ You didn't write this and you are trying to break it. You rank findings; you nev
 
 Your brief must tell you **what we're trying to achieve and why**. Without it, ask for it — you cannot judge whether work was necessary if you don't know the goal.
 
+It also names the range you measure, `<base>..<head>` by sha. Read that range, not the working tree, which may still be moving.
+
 ## What you check
 
 **Was this the right work?**

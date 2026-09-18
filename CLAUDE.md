@@ -189,6 +189,7 @@ Say so and ask which wins, before acting on either reading. Quote the line and s
 - Say what actually happened. Tests failed → show it. A step was skipped → say so.
 - A result carries the environment it was measured in, so every measurement happens inside whatever wrapper pins the project's toolchain (`nix develop -c`, a container, a venv). A green measured outside it is not green.
 - Iterate against the targeted test rather than the whole suite. The full gate set runs before you hand back, and again after any fix it forced.
+- A review measures a pinned range: `<base>..<head>` by sha, with the base recorded before the work started. Nothing commits to that range while the review runs. The brief carries the goal and the range, not the author's verdict: a reviewer handed a conclusion tends to confirm it.
 
 ## Gates
 
