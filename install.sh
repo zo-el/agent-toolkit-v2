@@ -123,9 +123,7 @@ def run($caller; $entry): "\"$HOME/.claude/agent-toolkit-run\" \($caller) \($ent
     # from a release the same entry would hand every agent the code that runs at
     # the next session start.
     additionalDirectories: ([$scratch, $worktrees, $tools] + (if $work_tree then [$root] else [] end)),
-    # A path left off the list above is a question; a deny is never, and these
-    # are worth never. It governs the Read tool only, so jq and python still
-    # reach settings.
+    # A deny governs the Read tool only, so jq and python still reach settings.
     deny: [
       "Read(~/.claude/.credentials.json)",
       "Read(~/.claude/settings*.json)",
@@ -729,8 +727,17 @@ apply_agents() {
 
 settings_request() {
   local desired work_tree=false
-  # The same question dev mode asks, so a clone is approved and a release is not.
-  python3 "$ROOT/hooks/lib/version.py" worktree "$ROOT" >/dev/null 2>&1 && work_tree=true
+  # A release directory is approved for nobody, and git init inside one is a
+  # local command nothing gates, so where the root sits answers before what it
+  # holds does. Otherwise it is the question dev mode asks, and git failing to
+  # answer it keeps the approval rather than quietly revoking one.
+  case "$ROOT/" in
+    "$CLAUDE_DIR/agent-toolkit-releases/"*) ;;
+    *)
+      python3 "$ROOT/hooks/lib/version.py" worktree "$ROOT" >/dev/null 2>&1
+      case $? in 0 | 3 | 4) work_tree=true ;; esac
+      ;;
+  esac
   desired="$(jq -n --arg scratch "$SCRATCH" --arg root "$ROOT" \
     --arg worktrees "$CLAUDE_DIR/worktrees" --arg tools "$CLAUDE_DIR/tools" \
     --argjson work_tree "$work_tree" \

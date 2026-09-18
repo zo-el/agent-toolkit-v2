@@ -60,9 +60,12 @@ version() { # version.py arguments → its answer, or nothing when it did not an
   out="$(python3 "$ROOT/hooks/lib/version.py" "$@" 2>/dev/null)" && printf '%s' "$out"
 }
 
+# seal.py says on stderr why it could not read a tree, which is worth carrying
+# where there is a workspace to hold it.
+SEAL_REASON=/dev/null
 take_seal() { # a version directory → its content digest, or nothing
   local out
-  out="$(python3 "$ROOT/hooks/lib/seal.py" "$1" 2>/dev/null)" && printf '%s' "$out"
+  out="$(python3 "$ROOT/hooks/lib/seal.py" "$1" 2>"$SEAL_REASON")" && printf '%s' "$out"
 }
 
 sealed() { jq -r --arg v "$1" '.seals[$v] // empty' <<<"$RECORD_JSON" 2>/dev/null; }
@@ -128,7 +131,7 @@ RECORD_DIRTY=0
 
 read_record() {
   [ -e "$RECORD" ] || return 0
-  RECORD_JSON="$(jq -ce 'select(type == "object")' "$RECORD" 2>/dev/null)" && return 0
+  RECORD_JSON="$(jq -ce 'select(type == "object" and ((.seals // {}) | type == "object"))' "$RECORD" 2>/dev/null)" && return 0
   RECORD_JSON='{"replaced":true}'
 }
 
@@ -361,17 +364,18 @@ verify_and_unpack() {
     return 1
   fi
   seal="$(take_seal "$WORK/root")" || {
-    record_failure advisory "the last update check failed: $WANTED could not be sealed, so nothing was staged" "$INSTALL_AGAIN"
+    record_failure advisory "the last update check failed: $WANTED could not be sealed, so nothing was staged: $(one_line <"$SEAL_REASON")" ""
     return 1
   }
+  # Recorded and on disk before the rename, so no other session ever finds a
+  # folder under a release name that nothing is known about.
+  record_set '.seals[$v] = $s' --arg v "$WANTED" --arg s "$seal"
+  record_write
   mv -T "$WORK/root" "$RELEASES/$WANTED" 2>/dev/null || {
     record_failure advisory "the last update check failed: $WANTED would not move into ~/.claude/agent-toolkit-releases" \
       "chmod u+rwx ~/.claude/agent-toolkit-releases"
     return 1
   }
-  # Taken over the part-written folder and recorded against the release, so it
-  # describes exactly what became staged.
-  record_set '.seals[$v] = $s' --arg v "$WANTED" --arg s "$seal"
   TARGET="$RELEASES/$WANTED"
   STAGE_REASON=""
   return 0
@@ -489,6 +493,7 @@ workspace() {
       "df -h ~/.claude"
     return 1
   }
+  SEAL_REASON="$WORK/seal.err"
   trap 'rm -rf "$WORK"' EXIT
 }
 
@@ -528,39 +533,45 @@ apply_wanted() {
   }
 }
 
-# Kept, because deleting it would destroy the only evidence of what happened, and
-# under a name no release has, so pruning never reaches it and nothing mistakes
+# Under a name no release has, so pruning never reaches it and nothing mistakes
 # it for a release.
 set_aside() { # the staged folder → where it was kept, or nothing
   local base kept n=0
   base="$RELEASES/.altered.$WANTED.$(now_seconds)"
   kept="$base"
-  while [ -e "$kept" ]; do
+  # -L as well as -e, because a dangling symlink is a name that is taken and a
+  # rename onto it fails, which would leave the evidence with nowhere to go.
+  while [ -e "$kept" ] || [ -L "$kept" ]; do
     n=$((n + 1))
     kept="$base.$n"
   done
   mv -T "$1" "$kept" 2>/dev/null && printf '%s' "$kept"
 }
 
-# Whether the tree about to be run is the tree that was verified. Between the two
-# the folder sat on disk for hours, and what running it means is its install.sh.
 seal_holds() { # the staged folder
   local recorded taken kept
+  # A directory that is already live is running, not waiting, and the seal is a
+  # question about a tree that has not run yet. Never the thing this removes.
+  [ "$(real_path "$1")" != "$(live_root)" ] || return 0
   recorded="$(sealed "$WANTED")"
   if [ -z "$recorded" ]; then
-    # Nothing is known about this tree, and nothing being known is not permission
-    # to run it. Discarded, and staged again at the next check.
+    # Nothing being known about a tree is not permission to run it.
     rm -rf "$1"
     return 1
   fi
-  if ! taken="$(take_seal "$1")"; then
-    record_failure advisory "the last update check failed: $WANTED could not be read to check against its seal" "$INSTALL_AGAIN"
+  # A tree this machine unpacked and could seal an hour ago, that will not read
+  # now, has been altered as surely as one whose bytes moved.
+  taken="$(take_seal "$1")"
+  [ -n "$taken" ] && [ "$taken" = "$recorded" ] && return 0
+  if ! kept="$(set_aside "$1")"; then
+    finding required user "$WANTED was altered after this machine unpacked it, and could not be moved out of the way, so nothing was installed" \
+      "rm -rf ~/.claude/agent-toolkit-releases/$(shq "$WANTED")"
     return 1
   fi
-  [ "$taken" = "$recorded" ] && return 0
-  kept="$(set_aside "$1")"
+  # Only once it is somewhere the next check will not find: while the seal stands
+  # against a folder still under its release name, that folder is the evidence.
   record_set 'del(.seals[$v])' --arg v "$WANTED"
-  finding required user "$WANTED was altered after this machine unpacked it, so nothing was installed. The folder is kept at $(home_path "${kept:-$1}")" ""
+  finding required user "$WANTED was altered after this machine unpacked it, so nothing was installed. The folder is kept at $(home_path "$kept"), and the release is staged again on its own" ""
   return 1
 }
 

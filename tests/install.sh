@@ -346,7 +346,15 @@ approved="$(settings '.permissions.additionalDirectories | join(" ")')"
 check "the scratchpad is approved" "/tmp/claude-$(id -u)" "$approved"
 check "and the worktrees an agent is given" "$FAKE/.claude/worktrees" "$approved"
 check "and the directory the bridge fills" "$FAKE/.claude/tools" "$approved"
+# A work tree, which the suite runs from: a checkout, a worktree, or the runner's
+# own shallow clone. An unpacked source archive is not, and this case says so.
 check "a clone is approved, because the toolkit skill edits one" "$ROOT" "$approved"
+GITLESS="$TMP/gitless-root"
+copy_root "$GITLESS"
+mkdir -p "$GITLESS/.git"
+inst "$GITLESS" "$H"
+check "and so is one git would not answer for, because that is not the answer no" "$GITLESS" \
+  "$(js "$H" '.permissions.additionalDirectories | join(" ")')"
 case " $approved " in
   *" $FAKE/.claude "*) bad "~/.claude itself is not approved" "it is: $approved" ;;
   *) ok "~/.claude itself is not approved" ;;
@@ -675,15 +683,29 @@ case " $approved " in
 esac
 check "while the agents' own directories still are" "$H/.claude/worktrees" "$approved"
 
+# git init inside a release directory is a local command nothing gates, so where
+# a version directory sits has to answer before what it holds does.
+UNPACKED="$H/.claude/agent-toolkit-releases/v1.5.0"
+mkdir -p "$(dirname "$UNPACKED")"
+cp -r "$RELEASE_ROOT" "$UNPACKED"
+git -C "$UNPACKED" init -q && git -C "$UNPACKED" add -A >/dev/null 2>&1 && git -C "$UNPACKED" commit -q -m planted
+inst "$UNPACKED" "$H"
+case " $(js "$H" '.permissions.additionalDirectories | join(" ")') " in
+  *" $UNPACKED "*) bad "a release directory made to look like a clone is approved for nobody either" "it is approved" ;;
+  *) ok "a release directory made to look like a clone is approved for nobody either" ;;
+esac
+
 # The wholesale entry the previous generation wrote is retired at the next apply,
 # which is what every toolkit-owned value it stops setting gets.
 H="$(home approved-retire)"
 WHOLESALE="$TMP/wholesale-root"
 copy_root "$WHOLESALE"
-patch_desired "$WHOLESALE" '.desired.permissions.additionalDirectories += [$ENV.HOME]'
+patch_desired "$WHOLESALE" '.desired.permissions.additionalDirectories += [$ENV.HOME + "/.claude"]'
 inst "$WHOLESALE" "$H"
-check "a home that was installed with ~/.claude approved has it" "$H/.claude" \
-  "$(js "$H" '.permissions.additionalDirectories | join(" ")')"
+case " $(js "$H" '.permissions.additionalDirectories | join(" ")') " in
+  *" $H/.claude "*) ok "a home that was installed with ~/.claude approved has it" ;;
+  *) bad "a home that was installed with ~/.claude approved has it" "$(js "$H" '.permissions.additionalDirectories | join(" ")')" ;;
+esac
 inst "$ROOT" "$H"
 case " $(js "$H" '.permissions.additionalDirectories | join(" ")') " in
   *" $H/.claude "*) bad "and the next install takes it away" "it is still approved" ;;
@@ -1331,7 +1353,11 @@ H="$(home dangling)"
 MOVABLE="$TMP/movable-root"
 rm -rf "$TMP/moved-root"
 copy_root "$MOVABLE"
+# A work tree, because that is the version directory an approved directory names,
+# and dropping the old location is what this case is about.
+git -C "$MOVABLE" init -q && git -C "$MOVABLE" add -A >/dev/null 2>&1 && git -C "$MOVABLE" commit -q -m movable
 inst "$MOVABLE" "$H"
+check "the checkout installed from is approved" "$MOVABLE" "$(js "$H" '.permissions.additionalDirectories | join(" ")')"
 mv "$MOVABLE" "$TMP/moved-root"
 hook "$H" "$(command_for "$H" PreToolUse guard.sh)" "$(bash_payload 'ls')"
 check "with the link dangling, a PreToolUse call is asked" "ask" "$(decision "$out")"

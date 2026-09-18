@@ -6,11 +6,8 @@ verified. Contract: documentation/specs/release.md, Sealing.
 
     seal.py <directory>    prints the digest, or nothing with the reason on stderr
 
-Every regular file's path, whether it is executable, and a hash of its bytes;
-every symlink's path and its target; ordered by path. Every field is NUL
-terminated, and a path cannot hold a NUL, so no path can be read as the start of
-another entry. Directories appear only through the paths inside them, which is
-why an emptied skills/ is the root checks' question rather than this one.
+Every field is NUL terminated and a path cannot hold a NUL, so no path can be
+read as the start of another entry.
 
 Exit 1: the tree could not be read.
 """
@@ -51,7 +48,7 @@ def _entries(root):
                 elif entry.is_dir(follow_symlinks=False):
                     stack.append(entry.path)
                 elif entry.is_file(follow_symlinks=False):
-                    runs = b"1" if os.stat(entry.path).st_mode & EXECUTABLE else b"0"
+                    runs = b"1" if entry.stat(follow_symlinks=False).st_mode & EXECUTABLE else b"0"
                     yield path, _record(b"f", path, [runs, _bytes_of(entry.path)])
                 else:
                     # Nothing a git archive carries, and nothing install runs, but

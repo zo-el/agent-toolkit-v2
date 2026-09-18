@@ -86,7 +86,6 @@ reports() { # name, expected substring of additionalContext
   check "$1" "$2" "$said"
 }
 staged() { printf '%s' "$UH/.claude/agent-toolkit-releases/$1"; }
-home_of() { printf '~/%s' "${1#"$UH"/}"; }
 asked() { cat "$AT_GH_STATE/calls" 2>/dev/null; }
 forget_calls() { : >"$AT_GH_STATE/calls"; }
 # The commit every fixture release is cut from, and the one tests/release.sh
@@ -543,6 +542,7 @@ printf '%s\n' "${OLD:0:7}" >"$TMP/seal-v1.4.0/REVISION"
 PATH="$USTUBS:$PATH" HOME="$UH" "$TMP/seal-v1.4.0/install.sh" >/dev/null 2>&1
 publish v1.5.0 "$SHA" v1.5.0
 aside() { find "$UH/.claude/agent-toolkit-releases" -maxdepth 1 -name '.altered.*' -type d | sort; }
+aside_name=""
 
 # Every shape an alteration takes, against a tree that was staged whole.
 altered() { # name, the command that alters the staged folder
@@ -555,6 +555,8 @@ altered() { # name, the command that alters the staged folder
   up apply
   reports "$1" "✗ v1.5.0 was altered after this machine unpacked it"
   same "and nothing on the machine changed" "$before" "$(readlink "$UH/.claude/agent-toolkit")"
+  aside_name="$(aside | head -1)"
+  aside_name="${aside_name##*/}"
 }
 
 altered "a file whose bytes changed is caught" 'printf "x\n" >>"$(staged v1.5.0)/CLAUDE.md"'
@@ -566,8 +568,9 @@ altered "and a symlink pointed somewhere else" \
 altered "and a file replaced by a link to another" \
   'rm -f "$(staged v1.5.0)/INSTALL.md"; ln -s README.md "$(staged v1.5.0)/INSTALL.md"'
 
-check "the finding names the folder it kept" "$(home_of "$(aside)")" \
+check "the finding names the folder it kept" "${aside_name:-.altered.v1.5.0}" \
   "$(jq -r '.hookSpecificOutput.additionalContext // ""' <<<"$out")"
+check "and says the machine takes the release again on its own" "staged again on its own" "$out"
 [ -n "$(aside)" ] && ok "which is kept, because it is the only evidence of what happened" \
   || bad "the altered folder is kept" "it was deleted"
 [ ! -d "$(staged v1.5.0)" ] && ok "and is no longer staged under a release name" \
@@ -610,6 +613,24 @@ up apply
 says_nothing "a release already live is not checked against its seal"
 [ -d "$(staged v1.5.0)" ] && ok "and is never set aside over one" || bad "the live folder is left alone" "it was set aside"
 
+# A directory that is already live is running, not waiting. The first machine to
+# take a release staged by an updater that recorded no seal, and every machine
+# the guide's own bootstrap builds, has a live folder under a release name and
+# nothing recorded about it.
+UH="$(home update-live-unsealed)"
+publish v1.5.0 "$SHA" v1.5.0
+recheck
+up apply
+same "a release machine is live under a release name" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+keep 'del(.seals)'
+up now
+exit_is "now on it re-installs the wanted release" 0
+[ -d "$(staged v1.5.0)" ] && ok "and the live directory is never the one discarded" \
+  || bad "the live directory survives now" "it was deleted"
+same "so the stable link still resolves" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+up apply
+says_nothing "and a session start after it says nothing"
+
 # now runs the same tree, so it asks the same question.
 rm -rf "$(staged v1.5.0)"
 publish v1.6.0 bbbbbbbb6666666666666666666666666666bbbb v1.6.0
@@ -620,13 +641,55 @@ exit_is "now refuses an altered tree too" 1
 check "saying it cannot vouch for the tree it had staged" "cannot vouch for the tree it had staged" "$out"
 check "and naming what happened to it above that" "was altered after this machine unpacked it" "$out"
 
+# A tree this machine sealed an hour ago that will not read now has been altered
+# as surely as one whose bytes moved, and is not an advisory to repeat for ever.
+UH="$(home update-unreadable)"
+publish v1.4.0 "$OLD" v1.4.0
+copy_root "$TMP/unreadable-v1.4.0"
+printf '1.4.0\n' >"$TMP/unreadable-v1.4.0/VERSION"
+printf '%s\n' "${OLD:0:7}" >"$TMP/unreadable-v1.4.0/REVISION"
+PATH="$USTUBS:$PATH" HOME="$UH" "$TMP/unreadable-v1.4.0/install.sh" >/dev/null 2>&1
+publish v1.5.0 "$SHA" v1.5.0
+recheck
+if [ "$(id -u)" -ne 0 ]; then
+  chmod 000 "$(staged v1.5.0)/CLAUDE.md"
+  up apply
+  reports "a staged tree that will not read is altered, not an advisory" \
+    "✗ v1.5.0 was altered after this machine unpacked it"
+  [ ! -d "$(staged v1.5.0)" ] && ok "so it is set aside rather than left to repeat" \
+    || bad "an unreadable tree is set aside" "it is still staged"
+  find "$UH/.claude/agent-toolkit-releases" -maxdepth 1 -name '.altered.*' -exec chmod -R u+rwX {} + 2>/dev/null
+else
+  skip "a staged tree that will not read is altered" "running as root, which reads anything"
+fi
+
+# A record that parses and holds a seals map of another shape is a record that
+# did not parse: every read of it answers empty and every write fails.
+UH="$(home update-badseals)"
+publish v1.5.0 "$SHA" v1.5.0
+recheck
+printf '{"seals":"not a map"}\n' >"$UH/.claude/agent-toolkit-staging.json"
+rm -rf "$(staged v1.5.0)"
+up stage
+up apply
+reports "a seals map of another shape is a record that did not read" "did not read and was replaced"
+[ -n "$(kept '.seals["v1.5.0"]')" ] && ok "and the machine goes on sealing what it stages" \
+  || bad "a replaced record seals again" "nothing was sealed"
+
 # A seal that cannot be taken stages nothing, rather than staging what it could
 # not describe.
 UH="$(home update-sealless)"
 SEALLESS="$TMP/seal-missing"
 copy_root "$SEALLESS"
-rm -f "$SEALLESS/hooks/lib/seal.py"
 publish v1.5.0 "$SHA" v1.5.0
+# The same home and the same release stage from an intact root first, so nothing
+# below can pass because staging was broken for another reason.
+out="$(PATH="$USTUBS:$PATH" HOME="$UH" "$SEALLESS/hooks/update.sh" stage 2>&1)"
+[ -d "$(staged v1.5.0)" ] && ok "this machine and this release do stage" \
+  || bad "the control stages" "nothing was staged: $out"
+rm -rf "$(staged v1.5.0)"
+rm -f "$SEALLESS/hooks/lib/seal.py"
+keep ".checked_at -= 21601"
 out="$(PATH="$USTUBS:$PATH" HOME="$UH" "$SEALLESS/hooks/update.sh" stage 2>&1)"
 [ ! -d "$(staged v1.5.0)" ] && ok "a machine that cannot seal a tree stages nothing" \
   || bad "a machine that cannot seal stages nothing" "it staged it anyway"

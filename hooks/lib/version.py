@@ -10,9 +10,9 @@ documentation/specs/install.md, Version identity.
     version.py same <a> <b>     exit 0 when the two are the same version
     version.py newer <a> <b>    exit 0 when a is a later release than b
 
-root exits 3 when git did not answer in time, 4 when git failed, with its
-message, and 5 when VERSION or REVISION is there and will not read, named with
-the reason. release exits 1 when the text names no version at all. Anything
+root and worktree exit 3 when git did not answer in time and 4 when git failed;
+root exits 5 as well, when VERSION or REVISION is there and will not read, named
+with the reason. release exits 1 when the text names no version at all. Anything
 else exits 2.
 """
 
@@ -167,10 +167,13 @@ if __name__ == "__main__":
             sys.exit(1)
         print("v%d.%d.%d" % found)
     elif len(args) == 2 and args[0] == "worktree":
+        # 3 and 4 as root uses them: git not answering is not the answer no.
         try:
             here = _revision_from_git(os.path.realpath(args[1]), 5.0)
-        except Exception:
-            here = None
+        except subprocess.TimeoutExpired:
+            sys.exit(3)
+        except Unknown:
+            sys.exit(4)
         sys.exit(0 if here else 1)
     elif len(args) == 3 and args[0] == "same":
         sys.exit(0 if same(args[1], args[2]) else 1)
