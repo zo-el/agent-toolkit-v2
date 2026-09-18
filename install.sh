@@ -22,6 +22,15 @@ AGENTS_DST="$CLAUDE_DIR/agents"
 MANIFEST="$AGENTS_DST/.toolkit-agents"
 SCRATCH="/tmp/claude-$(id -u)"
 
+# The report shape and the requirement text hooks/update.sh prints too. Sourced
+# before anything else needs them, so a root missing one says so in a line
+# rather than in a bash error partway through a report.
+for shared in hooks/lib/report.sh hooks/lib/requirements.sh; do
+  # shellcheck source=/dev/null
+  . "$ROOT/$shared" 2>/dev/null \
+    || { printf 'agent-toolkit: %s is missing from %s. Fix: reinstall the toolkit\n' "$shared" "$ROOT" >&2; exit 1; }
+done
+
 # The lowest release with every CLI and hook surface used here: plugin install
 # --json arrived in 2.1.268, after everything else.
 MIN_CLAUDE=2.1.268
@@ -149,33 +158,13 @@ EOF
 }
 
 # ── findings and changes ─────────────────────────────────────────────────────
-F_SEV=() F_WHO=() F_TEXT=() F_FIX=()
 CHANGES=()   # what changed, or in a dry run what would
 WROTE=()     # settings and pointer writes, which a hook report names
 REMOVED=()   # deletions, which a hook report names as well
 RESTART=()   # what changed that Claude Code reads only at start
 SKILLS_CHANGED=0
 
-finding() { # severity (required|advisory), who (user|install|toolkit), text, fix lines
-  F_SEV+=("$1") F_WHO+=("$2") F_TEXT+=("$3") F_FIX+=("${4:-}")
-}
-
-count() { # severity
-  local n=0 s
-  for s in "${F_SEV[@]}"; do [ "$s" = "$1" ] && n=$((n + 1)); done
-  echo "$n"
-}
-
 have() { command -v "$1" >/dev/null 2>&1; }
-
-one_line() { tr '\n\t' '  ' | sed 's/  */ /g; s/^ //; s/ $//' | cut -c1-400; }
-
-join() { # separator, items
-  local sep="$1" out="" item
-  shift
-  for item in "$@"; do out+="${out:+$sep}$item"; done
-  printf '%s' "$out"
-}
 
 restart_reasons() {
   local reasons
@@ -281,8 +270,6 @@ package_line() { # requirements
     *) echo "install these packages with your package manager: ${names[*]}" ;;
   esac
 }
-
-GH_LOGIN="gh auth login --hostname github.com --git-protocol ssh --web"
 
 # Returns 1 when jq or python3 is missing. gh is checked with the token it
 # carries, which a session start skips: the same three lines every session
@@ -923,7 +910,7 @@ check_plugins() {
 apply_stamp() {
   local out rc
   [ "$MODE" = dry ] || [ "$(resolve "$STABLE")" = "$ROOT" ] || return 0
-  out="$(python3 "$ROOT/hooks/lib/version.py" "$ROOT" 2>&1)"
+  out="$(python3 "$ROOT/hooks/lib/version.py" root "$ROOT" 2>&1)"
   rc=$?
   case "$rc" in
     0) ;;
@@ -942,10 +929,6 @@ apply_stamp() {
 }
 
 # ── reports ──────────────────────────────────────────────────────────────────
-mark() { [ "$1" = required ] && printf '✗' || printf '!'; }
-
-plural() { [ "$1" -eq 1 ] && echo "$1 $2" || echo "$1 ${2}s"; }
-
 # A fix shared by consecutive findings, or a fix line already printed under the
 # heading, is printed once.
 report_group() { # who, heading
@@ -989,50 +972,24 @@ report_terminal() {
   printf '\n%s %s, %s\n' "$([ "$required" -eq 0 ] && echo ✓ || echo ✗)" "$(plural "$required" "required finding")" "$advisory advisory"
 }
 
-json_str() {
-  local s="$1"
-  s="${s//\\/\\\\}" s="${s//\"/\\\"}" s="${s//$'\n'/\\n}" s="${s//$'\t'/\\t}" s="${s//$'\r'/}"
-  s="${s//[[:cntrl:]]/}"
-  printf '"%s"' "$s"
-}
-
-# Exactly one JSON object, or nothing when there is nothing to say. A skill link
-# applied cleanly is not reported, but at session start still asks for a rescan.
+# A skill link applied cleanly is not reported, but at session start still asks
+# for a rescan.
 report_hook() {
-  local i required context="" message=() fixes names=() reload=0
+  local i required names=() reload=0
   required="$(count required)"
   [ "$EVENT" = SessionStart ] && [ "$SKILLS_CHANGED" -eq 1 ] && reload=1
-  if [ ${#F_SEV[@]} -eq 0 ] && [ ${#WROTE[@]} -eq 0 ] && [ ${#REMOVED[@]} -eq 0 ] && [ ${#RESTART[@]} -eq 0 ]; then
-    [ "$reload" -eq 1 ] && printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","reloadSkills":true}}\n'
-    return 0
-  fi
-  context="agent-toolkit doctor:"
-  for i in "${!F_SEV[@]}"; do
-    mapfile -t fixes <<<"${F_FIX[i]}"
-    if [ -n "${F_FIX[i]}" ]; then
-      context+=$'\n'"$(mark "${F_SEV[i]}") ${F_TEXT[i]}. Fix (${F_WHO[i]}): $(join "; then " "${fixes[@]}")"
-    else
-      context+=$'\n'"$(mark "${F_SEV[i]}") ${F_TEXT[i]}. Who acts: ${F_WHO[i]}"
-    fi
-  done
   for i in "${WROTE[@]}"; do
-    context+=$'\n'"wrote $i"
+    CONTEXT+=("wrote $i")
     names+=("${i%% *}")
   done
-  for i in "${REMOVED[@]}"; do context+=$'\n'"$i"; done
-  [ "$required" -eq 0 ] || message+=("$(plural "$required" problem). Ask Claude to fix it, or run ~/.claude/agent-toolkit/install.sh")
-  [ ${#WROTE[@]} -eq 0 ] || message+=("Updated $(join ", " "${names[@]}")")
+  for i in "${REMOVED[@]}"; do CONTEXT+=("$i"); done
+  [ "$required" -eq 0 ] || MESSAGE+=("$(plural "$required" problem). Ask Claude to fix it, or run ~/.claude/agent-toolkit/install.sh")
+  [ ${#WROTE[@]} -eq 0 ] || MESSAGE+=("Updated $(join ", " "${names[@]}")")
   if [ ${#RESTART[@]} -gt 0 ]; then
-    message+=("Restart Claude Code to load it")
-    context+=$'\n'"Restart Claude Code: $(restart_reasons)."
+    MESSAGE+=("Restart Claude Code to load it")
+    CONTEXT+=("Restart Claude Code: $(restart_reasons).")
   fi
-  printf '{'
-  if [ ${#message[@]} -gt 0 ]; then
-    printf '"systemMessage":%s,' "$(json_str "agent-toolkit: $(join ". " "${message[@]}")")"
-  fi
-  printf '"hookSpecificOutput":{"hookEventName":%s,"additionalContext":%s' "$(json_str "$EVENT")" "$(json_str "$context")"
-  [ "$reload" -eq 1 ] && printf ',"reloadSkills":true'
-  printf '}}\n'
+  hook_report "$EVENT" "agent-toolkit doctor:" "$reload"
 }
 
 # Claude Code drops the plain stdout of a hook that exits non-zero, so --sync

@@ -98,12 +98,12 @@ hook() { # home, command, payload → out, rc, run as Claude Code runs a hook
   out="$(HOME="$1" sh -c "$2" <"$TMP/hook.payload" 2>/dev/null)"
   rc=$?
 }
-lock_holder() { # home → holds the apply lock until killed; pid in $holder
+lock_holder() { # path → holds a flock on it until killed; pid in $holder
   python3 -c 'import fcntl, os, sys, time
 fd = os.open(sys.argv[1], os.O_RDONLY)
 fcntl.flock(fd, fcntl.LOCK_EX)
 open(sys.argv[2], "w").close()
-time.sleep(60)' "$1/.claude" "$TMP/locked" &
+time.sleep(60)' "$1" "$TMP/locked" &
   holder=$!
   for _ in $(seq 50); do [ -e "$TMP/locked" ] && break; sleep 0.1; done
   rm -f "$TMP/locked"
@@ -729,7 +729,7 @@ jq -e '.hooks.PreToolUse | length == 2' "$H/.claude/settings.json" >/dev/null 2>
 
 jq 'del(.hooks.PreToolUse)' "$H/.claude/settings.json" >"$TMP/s" && cp "$TMP/s" "$H/.claude/settings.json"
 id_before="$(file_id "$H/.claude/settings.json")"
-lock_holder "$H"
+lock_holder "$H/.claude"
 HOME="$H" sh -c "$SYNC" <"$TMP/hook.payload" >"$TMP/waiting.out" 2>&1 &
 waiting=$!
 sleep 1
@@ -741,13 +741,13 @@ check "and applies once it is released" "hooks/guard.sh" "$(js "$H" '[.hooks.Pre
 [[ "$(cat "$TMP/waiting.out")" != *"held the lock"* ]] && ok "without reporting the wait" || bad "without reporting the wait" "$(cat "$TMP/waiting.out")"
 jq 'del(.hooks.PreToolUse)' "$H/.claude/settings.json" >"$TMP/s" && cp "$TMP/s" "$H/.claude/settings.json"
 id_before="$(file_id "$H/.claude/settings.json")"
-lock_holder "$H"
+lock_holder "$H/.claude"
 hook "$H" "$SYNC" '{"hook_event_name":"SessionStart"}'
 kill "$holder" 2>/dev/null
 wait "$holder" 2>/dev/null
 same "a session start that cannot take the lock writes nothing" "$id_before" "$(file_id "$H/.claude/settings.json")"
 json_is "and still reports" '.hookSpecificOutput.additionalContext | test("held the lock for 5 seconds, so this session start applied nothing")'
-lock_holder "$H"
+lock_holder "$H/.claude"
 hook "$H" "$(command_for "$H" PostToolUse sync.sh)" \
   "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$ROOT/skills/toolkit/SKILL.md\"}}"
 kill "$holder" 2>/dev/null
@@ -1588,7 +1588,7 @@ copy_root "$QUEUED_X"
 copy_root "$QUEUED_Y"
 inst "$QUEUED_Y" "$H"
 ln -sfn "$QUEUED_X" "$H/.claude/agent-toolkit"
-lock_holder "$H"
+lock_holder "$H/.claude"
 printf '{"hook_event_name":"SessionStart"}' >"$TMP/queued.payload"
 HOME="$H" "$QUEUED_X/install.sh" --sync <"$TMP/queued.payload" >"$TMP/queued.out" 2>&1 &
 queued=$!
@@ -1861,7 +1861,7 @@ fi
 H="$(home queued-timeout)"
 inst "$QUEUED_Y" "$H"
 ln -sfn "$QUEUED_X" "$H/.claude/agent-toolkit"
-lock_holder "$H"
+lock_holder "$H/.claude"
 HOME="$H" "$QUEUED_X/install.sh" --sync <"$TMP/queued.payload" >"$TMP/queued.out" 2>&1 &
 queued=$!
 sleep 1

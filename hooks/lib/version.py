@@ -4,10 +4,14 @@ The installer stamps it, the status line compares against it, and the updater
 judges releases by it, so all three read it here. Contract:
 documentation/specs/install.md, Version identity.
 
-    python3 hooks/lib/version.py <root>    prints the version, or nothing
+    version.py root <dir>       the directory's version, or nothing
+    version.py release <text>   the release name a version or a name stands for
+    version.py same <a> <b>     exit 0 when the two are the same version
+    version.py newer <a> <b>    exit 0 when a is a later release than b
 
-Exit 3: git did not answer in time. Exit 4: git failed, with its message.
-Exit 5: VERSION or REVISION is there and will not read, named with the reason.
+root exits 3 when git did not answer in time, 4 when git failed, with its
+message, and 5 when VERSION or REVISION is there and will not read, named with
+the reason. release exits 1 when it is neither. Anything else exits 2.
 """
 
 import os
@@ -134,9 +138,9 @@ def of_root(root, timeout=5.0):
     return "v%s·%s" % (version, revision)
 
 
-if __name__ == "__main__":
+def _root_command(directory):
     try:
-        found = of_root(sys.argv[1])
+        found = of_root(directory)
     except subprocess.TimeoutExpired:
         sys.exit(3)
     except Unknown as e:
@@ -147,3 +151,21 @@ if __name__ == "__main__":
         sys.exit(5)
     if found:
         print(found)
+
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    if len(args) == 2 and args[0] == "root":
+        _root_command(args[1])
+    elif len(args) == 2 and args[0] == "release":
+        found = semantic(args[1])
+        if found is None:
+            sys.exit(1)
+        print("v%d.%d.%d" % found)
+    elif len(args) == 3 and args[0] == "same":
+        sys.exit(0 if same(args[1], args[2]) else 1)
+    elif len(args) == 3 and args[0] == "newer":
+        sys.exit(0 if newer(args[1], args[2]) else 1)
+    else:
+        print(__doc__.strip(), file=sys.stderr)
+        sys.exit(2)
