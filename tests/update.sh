@@ -340,12 +340,16 @@ up apply
 same "a directory planted at a release name is not installed" "$before" "$(readlink "$UH/.claude/agent-toolkit")"
 reports "and the machine says it declares no version of its own" "v9.9.9 declares no version of its own"
 
-mkdir -p "$TMP/elsewhere"
-cp "$ROOT/install.sh" "$TMP/elsewhere/install.sh"
-keep '.wanted = $w' --arg w "../../../..$TMP/elsewhere"
+# A whole version directory, sitting where a relative name reaches it. The record
+# is a file anything running as the user can write, so the name it holds is read
+# with the same suspicion as the track's line: refused before a path is built.
+copy_root "$UH/.claude/planted"
+printf '1.5.0\n' >"$UH/.claude/planted/VERSION"
+printf '%s\n' "${SHA:0:7}" >"$UH/.claude/planted/REVISION"
+keep '.wanted = "../planted"'
 up apply
-same "and a wanted release that is a path rather than a name reaches nothing" "$before" "$(readlink "$UH/.claude/agent-toolkit")"
-says_nothing "saying nothing, because a record nobody wrote on purpose says nothing"
+same "a wanted release that is a path rather than a name reaches nothing" "$before" "$(readlink "$UH/.claude/agent-toolkit")"
+says_nothing "and is refused before a path is built from it, so there is nothing to report"
 
 # ── a home reached through a link ────────────────────────────────────────────
 # The stable link resolves every component of its target and $HOME does not, so
@@ -368,8 +372,11 @@ case "$said" in
   *) ok "an activation through a linked home is not read as a failure" ;;
 esac
 same "and the release is live" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+# Wanted moves on, so the live directory is kept by the link alone.
 publish v1.6.0 ffffffff5555555555555555555555555555ffff v1.6.0
+keep ".checked_at -= 21601"
 out="$(PATH="$USTUBS:$PATH" HOME="$LINKED" "$UP" stage 2>&1)"
+same "the wanted release moves on" "v1.6.0" "$(kept .wanted)"
 [ -d "$(staged v1.5.0)" ] && ok "and pruning never takes the directory that is live" \
   || bad "pruning keeps the live directory through a linked home" "it removed it"
 
@@ -579,6 +586,24 @@ check "the download" "60 gh api repos/zo-el/agent-toolkit-v2/tarball/$SHA" "$bou
 check "the question of whether the commit is on main" "60 gh api repos/zo-el/agent-toolkit-v2/compare/main...$SHA" "$bounds"
 check "and the token read that comes before any of them" "10 gh auth token --hostname github.com" "$bounds"
 rm -f "$USTUBS/timeout"
+
+# ── a machine that cannot read a version ─────────────────────────────────────
+# One program answers every version question here, so a machine where it will not
+# run is told that rather than told its own files are wrong.
+UH="$(home update-readerless)"
+BROKEN_ROOT="$TMP/reader-broken"
+copy_root "$BROKEN_ROOT"
+printf 'def broken(\n' >>"$BROKEN_ROOT/hooks/lib/version.py"
+track v1.5.0
+out="$(PATH="$USTUBS:$PATH" HOME="$UH" "$BROKEN_ROOT/hooks/update.sh" apply 2>&1)"
+rc=$?
+reports "a machine whose version reader will not run says so" "! the toolkit cannot read a version on this machine"
+check "rather than saying the track it was given is wrong" "install.sh" "$out"
+case "$(jq -r '.hookSpecificOutput.additionalContext // ""' <<<"$out")" in
+  *"agent-toolkit-track holds"*) bad "a broken reader never blames the user's own file" "it did" ;;
+  *) ok "a broken reader never blames the user's own file" ;;
+esac
+track
 
 # ── rolling back ─────────────────────────────────────────────────────────────
 # A release marked a prerelease makes the one before it latest again, so a

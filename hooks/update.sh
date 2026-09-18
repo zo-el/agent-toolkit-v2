@@ -418,11 +418,11 @@ do_stage() {
     AGENT_TOOLKIT_STAGE_BOUNDED=1 timeout -k 10 "$STAGE_SECONDS" "$ROOT/hooks/update.sh" stage
     return 0
   fi
+  version_reader_works || return 0
   judge_track
   case "$TRACK_STATE" in off | bad) return 0 ;; esac
   read_record
   releases_dir || { record_write; return 0; }
-  version_reader_works || { version_reader_failed; return 0; }
   take_stage_lock || { record_lock_problem; return 0; }
   check_and_stage
   prune
@@ -631,12 +631,16 @@ report_record() {
 }
 
 do_apply() {
-  local required reader=0
+  local required
+  if ! version_reader_works; then
+    version_reader_failed
+    hook_report SessionStart "agent-toolkit updates:" 0
+    return 0
+  fi
   judge_track
   [ "$TRACK_STATE" = off ] && return 0
   read_record
-  version_reader_works && reader=1
-  if [ "$TRACK_STATE" != bad ] && [ "$reader" -eq 1 ]; then
+  if [ "$TRACK_STATE" != bad ]; then
     activate
     announce
     report_change
@@ -645,7 +649,6 @@ do_apply() {
   fi
   required="$(count required)"
   [ "$required" -eq 0 ] || MESSAGE+=("$(plural "$required" "update problem"). Ask Claude to fix it")
-  [ "$reader" -eq 1 ] || version_reader_failed
   hook_report SessionStart "agent-toolkit updates:" "$RELOAD"
   [ "$(recorded .replaced)" != true ] || record_set '.replaced = false'
   record_write
@@ -668,6 +671,11 @@ print_findings() {
 
 do_now() {
   local went
+  if ! version_reader_works; then
+    version_reader_failed
+    print_findings
+    return 1
+  fi
   judge_track
   if [ "$TRACK_STATE" = off ]; then
     echo "~/.claude/agent-toolkit-track says off, so this machine installs no release. Nothing changed."
@@ -675,11 +683,6 @@ do_now() {
   fi
   read_record
   if [ "$TRACK_STATE" = bad ]; then
-    print_findings
-    return 1
-  fi
-  if ! version_reader_works; then
-    version_reader_failed
     print_findings
     return 1
   fi
