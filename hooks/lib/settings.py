@@ -17,6 +17,7 @@ import errno
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -36,11 +37,12 @@ NOT_TOP_LEVEL_VALUES = {"hooks", "statusLine", "permissions", "sandbox", "env", 
 
 
 class SettingsError(Exception):
-    """kind is who can fix it: "user" or "install"."""
+    """kind is who can fix it: "user" or "install". fix is their command."""
 
-    def __init__(self, kind, reason):
+    def __init__(self, kind, reason, fix=""):
         super().__init__(reason)
         self.kind = kind
+        self.fix = fix
 
 
 def fingerprint(node):
@@ -143,12 +145,31 @@ def earlier_forms(item, request):
     return {fingerprint(f) for f in forms}
 
 
-def ledger_on_disk(request, write, result):
-    """The (values, members) the ledger holds, or None when there is none.
+def shell_path(path, home):
+    if home and path.startswith(home + "/"):
+        return "~/" + shlex.quote(path[len(home) + 1 :])
+    return shlex.quote(path)
 
-    A ledger that is there but will not read is not a machine that predates it:
-    rebuilding it would claim values the user set as the toolkit's. It is moved
-    aside and reported, and this apply retires nothing.
+
+def for_the_user(error, request):
+    """A failure in the file's own content. No command can know the right value,
+    so the fix opens the file; install.sh names the newest backup beside it."""
+    if error.fix:
+        return error
+    return SettingsError(
+        error.kind, str(error), '"${EDITOR:-vi}" %s' % shell_path(request["settings"], request.get("home", ""))
+    )
+
+
+def ledger_on_disk(request, write, result):
+    """The (values, members) the ledger holds, or None when there is none and
+    the file itself has to say what an earlier install wrote.
+
+    One that will not read is moved aside and reported, and then answers None
+    like a missing one: rebuilding from the file is what a deleted ledger
+    already does, and it claims nothing the toolkit's own wiring does not
+    vouch for. Anything narrower leaves retirement off for good, since the
+    ledger this run writes would hold only what this run changed.
     """
     path = request["ledger"]
     try:
@@ -171,7 +192,7 @@ def ledger_on_disk(request, write, result):
             except OSError as move_failed:
                 reason += ", and it cannot be moved aside: %s" % (move_failed.strerror or move_failed)
         result["ledger_unreadable"] = reason
-        return {}, set()
+        return None
 
 
 def free_name(directory, name):
@@ -315,7 +336,7 @@ def read_bytes(path):
     except FileNotFoundError:
         return None
     except OSError as e:
-        raise SettingsError("user", "cannot read %s: %s" % (path, e.strerror or e))
+        raise SettingsError("user", "cannot read %s: %s" % (path, e.strerror or e), "ls -l %s" % shlex.quote(path))
 
 
 def reject_constant(name):
@@ -419,7 +440,8 @@ def replace(path, data):
 
 
 def write_failed(error, fallback):
-    return SettingsError("user", "cannot write %s: %s" % (error.filename or fallback, error.strerror or error))
+    where = error.filename or fallback
+    return SettingsError("user", "cannot write %s: %s" % (where, error.strerror or error), "ls -ld %s" % shlex.quote(where))
 
 
 def run(request, write, read=None):
@@ -431,12 +453,15 @@ def run(request, write, read=None):
     on_disk = ledger_on_disk(request, write, result)
     for _ in range(ATTEMPTS):
         before = read(path)
-        current = parse(before)
-        merged, ledger, restart = merge(current, request, on_disk)
+        try:
+            current = parse(before)
+            merged, ledger, restart = merge(current, request, on_disk)
+        except SettingsError as e:
+            raise for_the_user(e, request)
         try:
             text = render(merged).encode("utf-8")
         except ValueError as e:
-            raise SettingsError("user", "settings.json holds a value JSON cannot carry: %s" % e)
+            raise for_the_user(SettingsError("user", "settings.json holds a value JSON cannot carry: %s" % e), request)
         changed = before is None or fingerprint(merged) != fingerprint(current)
         if not write:
             if changed:
@@ -516,7 +541,8 @@ def main():
         result = run(request, write=(mode == "apply"))
     except SettingsError as e:
         newest, when = newest_backup(request["backups"])
-        result = {"settings": "failed", "kind": e.kind, "reason": str(e), "newest_backup": newest, "backup_when": when}
+        result = {"settings": "failed", "kind": e.kind, "reason": str(e), "fix": e.fix,
+                  "newest_backup": newest, "backup_when": when}
     print(json.dumps(result, ensure_ascii=False))
 
 

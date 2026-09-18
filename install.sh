@@ -278,10 +278,13 @@ package_line() { # requirements
 
 GH_LOGIN="gh auth login --hostname github.com --git-protocol ssh --web"
 
-# Returns 1 when jq or python3 is missing.
+# Returns 1 when jq or python3 is missing. gh is checked with the token it
+# carries, which a session start skips: the same three lines every session
+# cannot be acted on from inside the session that would print them.
 check_tools() {
-  local missing=() stop=() rest=() t line
-  for t in jq python3 git flock gh; do have "$t" || missing+=("$t"); done
+  local missing=() stop=() rest=() t line tools=(jq python3 git flock)
+  [ "$MODE" = sync ] || tools+=(gh)
+  for t in "${tools[@]}"; do have "$t" || missing+=("$t"); done
   have python3 && ! python3 -c 'import sqlite3' >/dev/null 2>&1 && missing+=(sqlite3)
   [ ${#missing[@]} -gt 0 ] || return 0
   line="$(package_line "${missing[@]}")"
@@ -409,8 +412,12 @@ wiring_entries() {
 # A script whose #! line cannot run exits 127 before doing anything, which
 # Claude Code treats as a hook that let the call through.
 cannot_start() { # path → the reason on stdout, or nothing
-  local first prog arg
-  IFS= read -r first <"$1" || true
+  # A file that cannot be opened never runs the read, so first has to hold
+  # something: under set -u an unset one kills the subshell, and the caller
+  # reads the empty output as a script that starts fine.
+  local first="" prog arg
+  IFS= read -r first <"$1" 2>/dev/null || true
+  [ -n "$first" ] || { echo "it cannot be read" && return; }
   case "$first" in
     "#!"*) ;;
     *) echo "it has no #! line" && return ;;
@@ -427,9 +434,10 @@ cannot_start() { # path → the reason on stdout, or nothing
 # Runs a script the way exec would, through its #! line, without needing it to
 # be executable.
 via_shebang() { # path, arguments
-  local first words
-  IFS= read -r first <"$1"
+  local first="" words=()
+  IFS= read -r first <"$1" 2>/dev/null || true
   read -ra words <<<"${first#\#!}"
+  [ ${#words[@]} -gt 0 ] || return 127
   "${words[@]}" "$@"
 }
 
@@ -591,13 +599,15 @@ apply_launcher() {
   act "launcher ~/.claude/agent-toolkit-run" write_atomic "$LAUNCHER" 755 <"$ROOT/hooks/launcher.sh"
 }
 
-# Anything else at a skill's name is the user's.
-toolkit_link() {
-  case "$1" in
-    "$ROOT"/skills/* | "$STABLE"/skills/*) return 0 ;;
-    "$PREV_ROOT"/skills/*) [ -n "$PREV_ROOT" ] ;;
-    *) return 1 ;;
-  esac
+# A link the toolkit made points at a path under some version directory's
+# skills/, ending in the name it is linked as. Naming the version directories
+# this run knows about instead would leave a link into a third one unrecognised
+# for good: neither relinked nor removed, so every install repeats the same
+# finding and a retired skill goes on resolving. The previous generation nested
+# its skills a directory deeper, which is why only skills/ is anchored, not the
+# depth below it. Anything else at a skill's name is the user's.
+toolkit_link() { # name, target
+  case "$2" in /*/skills/*) [ "${2##*/}" = "$1" ] ;; *) return 1 ;; esac
 }
 
 apply_skills() {
@@ -617,7 +627,8 @@ apply_skills() {
     if [ -L "$dst" ]; then
       target="$(readlink "$dst")"
       [ "$target" = "$dir" ] && continue
-      if [ -e "$dst" ] && ! toolkit_link "$target"; then
+      # Dangling or not, a name the user's own link holds is theirs.
+      if ! toolkit_link "$name" "$target"; then
         skill_held "$name"
         continue
       fi
@@ -628,16 +639,18 @@ apply_skills() {
     act "link skill $name" link_atomic "$dir" "$dst" && SKILLS_CHANGED=1
   done < <(find "$ROOT/skills" -name SKILL.md -print0 2>/dev/null | sort -z)
 
-  # Only a link into a version directory is the toolkit's to remove. One the
-  # user made whose target moved away is theirs, dangling or not.
+  # A name this version directory no longer provides, still held by a link the
+  # toolkit made. Which version directory it points into does not matter: left
+  # alone, a retired skill goes on resolving out of whichever one it was.
   for dst in "$SKILLS_DST"/*; do
-    [ -L "$dst" ] && [ -z "${linked[$(basename "$dst")]:-}" ] || continue
+    name="$(basename "$dst")"
+    [ -L "$dst" ] && [ -z "${linked[$name]:-}" ] || continue
     target="$(readlink "$dst")"
-    toolkit_link "$target" || continue
-    if [ ! -e "$dst" ]; then
-      unlink_skill "unlink dangling skill $(basename "$dst")" "$dst"
-    elif [ -n "$PREV_ROOT" ] && [ "$PREV_ROOT" != "$ROOT" ] && [[ "$target" == "$PREV_ROOT"/skills/* ]]; then
-      unlink_skill "unlink skill $(basename "$dst") of the replaced version directory" "$dst"
+    toolkit_link "$name" "$target" || continue
+    if [ -e "$dst" ]; then
+      unlink_skill "unlink skill $name, which this version directory no longer has" "$dst"
+    else
+      unlink_skill "unlink dangling skill $name" "$dst"
     fi
   done
 }
@@ -669,7 +682,11 @@ apply_agents() {
   if [ -f "$MANIFEST" ]; then
     while IFS= read -r n; do
       case "$n" in "" | */* | .*) continue ;; esac
-      [ ! -f "$ROOT/agents/$n" ] && [ -e "$AGENTS_DST/$n" ] && act "remove retired agent $n" rm -f "$AGENTS_DST/$n"
+      [ ! -f "$ROOT/agents/$n" ] && [ -e "$AGENTS_DST/$n" ] || continue
+      saved="$(backup_name "$BACKUPS/agents/$n")"
+      act -q "back up the retired agents/$n to $(home_path "$saved")" backup_to "$AGENTS_DST/$n" "$saved" || continue
+      act "remove retired agent $n (backup: $(home_path "$saved"))" rm -f "$AGENTS_DST/$n" \
+        && REMOVED+=("remove retired agent $n (backup: $(home_path "$saved"))")
     done <"$MANIFEST"
   fi
   for n in "${names[@]}"; do
@@ -707,7 +724,7 @@ settings_request() {
 }
 
 apply_settings() {
-  local request result state reason newest aside saved shown lines
+  local request result state reason fix newest aside saved shown lines
   if ! request="$(settings_request)"; then
     finding required toolkit "install.sh does not build its own settings" "$ROOT/install.sh"
     return
@@ -721,6 +738,8 @@ apply_settings() {
   # types them.
   reason="$(jq -r '.reason // ""' <<<"$result")"
   reason="${reason//"$HOME"\//\~/}"
+  fix="$(jq -r '.fix // ""' <<<"$result")"
+  fix="${fix//"$HOME"\//\~/}"
   newest="$(jq -r '.newest_backup // ""' <<<"$result")"
   [ -z "$newest" ] || reason+=". The newest backup that parses is $(home_path "$newest"), from $(jq -r '.backup_when' <<<"$result")"
   saved="$(jq -r '.backup // ""' <<<"$result")"
@@ -737,15 +756,15 @@ apply_settings() {
       ;;
     failed)
       case "$(jq -r '.kind' <<<"$result")" in
-        user) finding required user "settings.json was left untouched: $reason" ;;
-        *) finding required install "settings.json was not applied: $reason" "$(install_command)" ;;
+        user) finding required user "settings.json was left untouched: $reason" "$fix" ;;
+        *) finding required install "settings.json was not applied: $reason" "${fix:-$(install_command)}" ;;
       esac
       ;;
   esac
   reason="$(jq -r '.ledger_unreadable // ""' <<<"$result")"
   if [ -n "$reason" ]; then
     aside="$(jq -r '.ledger_aside // ""' <<<"$result")"
-    finding required user "the ledger ~/.claude/agent-toolkit-applied.json does not read ($reason), so every toolkit value was set afresh and one the toolkit has stopped setting may stay${aside:+. The old ledger is kept at $(home_path "$aside")}"
+    finding advisory user "the ledger ~/.claude/agent-toolkit-applied.json does not read ($reason), so what the toolkit owns was read back from settings.json for this run, which can only vouch for what the file still holds${aside:+. The old ledger is kept at $(home_path "$aside")}"
   fi
   if [ "$(jq -r '.replaced_link // ""' <<<"$result")" != "" ]; then
     finding advisory user "settings.json was a link to $(jq -r '.replaced_link' <<<"$result") and is now a file, so the link's target no longer receives changes"

@@ -689,7 +689,17 @@ inst "$ROOT" "$H"
 exit_is "a settings.json the merge cannot apply to exits 1" 1
 same "and is never written" "$id_before" "$(file_id "$H/.claude/settings.json")"
 check "the finding gives the reason" "settings.json was left untouched: env is not an object" "$out"
+check "and a command that opens the file, since no command knows the right value" \
+  '"${EDITOR:-vi}" ~/.claude/settings.json' "$out"
 [[ "$out" != *"cp ~/.claude/backups"* ]] && ok "and offers no restore that would discard the file" || bad "and offers no restore" "$out"
+
+# The value the toolkit itself sets, in the shape a hand edit leaves it: every
+# apply fails on it until the user acts, so the finding has to name a command.
+printf '{"attribution": true}\n' >"$H/.claude/settings.json"
+inst "$ROOT" "$H"
+check "a toolkit-owned value edited to the wrong type names its own path" \
+  "settings.json was left untouched: attribution is not an object" "$out"
+check "and the same command" '"${EDITOR:-vi}" ~/.claude/settings.json' "$out"
 check "but names the newest backup that parses" ". The newest backup that parses is ~/.claude/backups/settings.json." "$out"
 
 H="$(home blank-settings)"
@@ -749,6 +759,24 @@ grep -q '|plugin uninstall' "$CLAUDE_CALLS" 2>/dev/null && bad "retiring a plugi
 check "including the replaced version directory from the approved directories" "null" \
   "$(jq --arg x "$EXTRA" '.permissions.additionalDirectories | index($x)' "$H/.claude/settings.json")"
 
+# Deleting the ledger recovers; corrupting it has to recover the same way, or
+# the ledger this run writes holds only what this run changed and nothing the
+# toolkit stops setting can ever be retired again.
+for state in deleted corrupt; do
+  H="$(home "ledger-$state")"
+  inst "$EXTRA" "$H"
+  check "($state: the five are set)" "[true,true,true,true,true]" "$(js "$H" "$five | tostring")"
+  case "$state" in
+    deleted) rm -f "$H/.claude/agent-toolkit-applied.json" ;;
+    corrupt) printf 'not json at all' >"$H/.claude/agent-toolkit-applied.json" ;;
+  esac
+  inst "$EXTRA" "$H"
+  exit_is "a $state ledger still applies, and the run goes on" 0
+  inst "$ROOT" "$H"
+  check "and the next version directory still retires all five" "[false,false,false,false,false]" \
+    "$(js "$H" "$five | tostring")"
+done
+
 H="$(home retire-kept-members)"
 printf '{"permissions": {"deny": ["Read(~/.toolkit-test)"], "additionalDirectories": ["/toolkit-test-dir"]}}\n' >"$H/.claude/settings.json"
 inst "$EXTRA" "$H"
@@ -792,6 +820,68 @@ check "the three attribution values are put back at session start" "[false,false
   "$(attribution_now "$H")"
 json_is "and the run says so rather than fixing it silently" \
   '.hookSpecificOutput.additionalContext | test("wrote settings.json")'
+
+# ── a name held across version directories ───────────────────────────────────
+# Two hops. A link into the version directory before last is still the
+# toolkit's: left unrecognised it is neither relinked nor removed, so the
+# finding repeats every session and the skill goes on resolving out of a
+# directory nothing points at.
+FIRST="$TMP/hop-one" SECOND="$TMP/hop-two"
+copy_root "$FIRST"
+copy_root "$SECOND"
+H="$(home two-hops)"
+inst "$FIRST" "$H"
+inst "$SECOND" "$H"
+inst "$ROOT" "$H"
+exit_is "a third version directory installs green over two earlier ones" 0
+same "and the skill points at it" "$ROOT/skills/toolkit" "$(readlink "$H/.claude/skills/toolkit")"
+[[ "$out" != *"is not the toolkit's"* ]] && ok "with no finding claiming the name is the user's" \
+  || bad "a link from two hops back is the toolkit's" "$out"
+
+# The same link, for a skill the newest version directory no longer has.
+RETIRING="$TMP/root-retiring-a-skill"
+copy_root "$RETIRING"
+rm -rf "$RETIRING/skills/backlog"
+H="$(home retire-skill-two-hops)"
+inst "$FIRST" "$H"
+inst "$SECOND" "$H"
+[ -L "$H/.claude/skills/backlog" ] && ok "a skill links through the second version directory" \
+  || bad "a skill links through the second" "$(ls -l "$H/.claude/skills")"
+inst "$RETIRING" "$H"
+[ ! -e "$H/.claude/skills/backlog" ] && [ ! -L "$H/.claude/skills/backlog" ] \
+  && ok "and is unlinked once a version directory stops providing it" \
+  || bad "a retired skill is unlinked whichever directory it points into" "$(ls -l "$H/.claude/skills")"
+check "which the report names" "unlink skill backlog" "$out"
+
+# A link the user made at a toolkit skill's name, whose target has gone. The
+# toolkit never made it, so it is left alone and the finding says so.
+H="$(home user-link-dangling)"
+mkdir -p "$TMP/user-skills" "$H/.claude/skills"
+ln -sfn "$TMP/user-skills/gone-toolkit" "$H/.claude/skills/toolkit"
+inst "$ROOT" "$H"
+same "a dangling link the user made at a skill's name is left untouched" \
+  "$TMP/user-skills/gone-toolkit" "$(readlink "$H/.claude/skills/toolkit")"
+check "and is a required finding, not a silent replacement" \
+  "skill toolkit is not installed: ~/.claude/skills/toolkit is not the toolkit's, and was left untouched" "$out"
+
+# ── a retired agent ──────────────────────────────────────────────────────────
+# A deletion the user never asked for: the skill path backs up and reports, and
+# an agent file is no less theirs to have kept notes in.
+RETIRED="$TMP/root-with-an-extra-agent"
+copy_root "$RETIRED"
+printf 'an agent that goes away\n' >"$RETIRED/agents/soon-retired.md"
+H="$(home retired-agent)"
+inst "$RETIRED" "$H"
+[ -f "$H/.claude/agents/soon-retired.md" ] || bad "the extra agent installs" "missing"
+rm -f "$RETIRED/agents/soon-retired.md"
+hook "$H" "$(command_for "$H" SessionStart install.sh)" '{"hook_event_name":"SessionStart"}'
+[ ! -e "$H/.claude/agents/soon-retired.md" ] && ok "a retired agent is removed at session start" \
+  || bad "a retired agent is removed" "still there"
+json_is "and the session start names the removal" \
+  '.hookSpecificOutput.additionalContext | test("remove retired agent soon-retired.md")'
+saved="$(ls "$H"/.claude/backups/agents/soon-retired.md.* 2>/dev/null | head -1)"
+[ -n "$saved" ] && grep -q 'an agent that goes away' "$saved" \
+  && ok "with the file kept in backups" || bad "a retired agent is backed up" "$(ls -R "$H/.claude/backups" 2>&1)"
 
 # ── upgrading an install that predates the ledger ────────────────────────────
 # The shape the previous install.sh leaves: absolute paths everywhere, no
@@ -988,6 +1078,24 @@ check "and drops the old location from the approved directories" "null" \
   "$(jq --arg v "$MOVABLE" '.permissions.additionalDirectories | index($v)' "$H/.claude/settings.json")"
 [ -z "$(find "$H/.claude/skills" -maxdepth 1 -lname "$MOVABLE/*")" ] && ok "and unlinks the old location's skills" || bad "and unlinks the old location's skills" "$(ls -l "$H/.claude/skills")"
 
+# ── a wired file that cannot be read ─────────────────────────────────────────
+# The root check opens every wired entry point. One it cannot read has to be a
+# finding, not two bash errors and a run that calls the directory healthy.
+if [ "$(id -u)" -ne 0 ]; then
+  UNREADABLE="$TMP/root-unreadable-hook"
+  copy_root "$UNREADABLE"
+  chmod 111 "$UNREADABLE/hooks/guard.sh"
+  H="$(home unreadable-hook)"
+  out="$(HOME="$H" "$UNREADABLE/install.sh" 2>&1)"
+  rc=$?
+  chmod 755 "$UNREADABLE/hooks/guard.sh"
+  exit_is "a wired entry point that cannot be read exits 1" 1
+  check "with a finding naming it" "hooks/guard.sh cannot start: it cannot be read" "$out"
+  [[ "$out" != *"unbound variable"* ]] && ok "and no bash error of its own" || bad "no bash error" "$out"
+else
+  skip "a wired entry point that cannot be read" "running as root, which reads anything"
+fi
+
 # ── a write that fails ───────────────────────────────────────────────────────
 # Root writes into a read-only directory regardless, so this is skipped there.
 VERSIONED="$TMP/versioned-root"
@@ -1181,6 +1289,20 @@ check "without git the finding is required, with the package line" "$(printf '�
 exit_is "and exits 1" 1
 check "while everything local still applies" "agent-toolkit-run" "$(js "$H" '.statusLine.command')"
 [ ! -e "$TMP/tool.calls" ] && ok "and still runs neither sudo nor the package manager" || bad "and still runs neither sudo nor the package manager" "$(cat "$TMP/tool.calls")"
+
+# gh is checked with the token it carries, and neither at a session start: the
+# same advisory in every session cannot be acted on from inside that session.
+H="$(home gh-at-session-start)"
+inst "$ROOT" "$H"
+make_farm "$TMP/farm-no-gh" gh
+printf '{"hook_event_name":"SessionStart"}' >"$TMP/hook.payload"
+out="$(HOME="$H" PATH="$(SCENARIO_FARM="$TMP/farm-no-gh" scenario without-gh =claude =jq =ssh-add)" \
+  sh -c "$(command_for "$H" SessionStart install.sh)" <"$TMP/hook.payload" 2>/dev/null)"
+[[ "$out" != *"gh is not on PATH"* ]] && ok "a session start says nothing about gh being absent" \
+  || bad "a session start skips the gh check" "$out"
+out="$(HOME="$H" PATH="$(SCENARIO_FARM="$TMP/farm-no-gh" scenario without-gh =claude =jq =ssh-add)" "$ROOT/install.sh" 2>&1)"
+check "while a full install still gives the advisory" \
+  "gh is not on PATH, so PR and release flows fail" "$out"
 
 H="$(home gh-no-token)"
 out="$(HOME="$H" GH_STUB_RC=1 "$ROOT/install.sh" 2>&1)"
