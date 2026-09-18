@@ -689,10 +689,10 @@ recheck
 printf '{"seals":"not a map"}\n' >"$UH/.claude/agent-toolkit-staging.json"
 rm -rf "$(staged v1.5.0)"
 up stage
-up apply
-reports "a seals map of another shape is a record that did not read" "did not read and was replaced"
-[ -n "$(kept '.seals["v1.5.0"]')" ] && ok "and the machine goes on sealing what it stages" \
+[ -n "$(kept '.seals["v1.5.0"]')" ] && ok "a replaced record seals what it stages next" \
   || bad "a replaced record seals again" "nothing was sealed"
+up apply
+reports "and the run says the record did not read" "did not read and was replaced"
 
 # A seal that cannot be taken stages nothing, rather than staging what it could
 # not describe.
@@ -841,6 +841,50 @@ case "$(jq -r '.hookSpecificOutput.additionalContext // ""' <<<"$out")" in
   *) ok "a broken reader never blames the user's own file" ;;
 esac
 track
+
+# ── what going live does to a seal ───────────────────────────────────────────
+# Going live is itself what changes a tree: the first hook the launcher runs from
+# it writes a bytecode cache inside it. A seal taken before that describes a tree
+# that no longer exists, so the activation drops it.
+UH="$(home update-livesealed)"
+publish v1.4.0 "$OLD" v1.4.0
+copy_root "$TMP/livesealed-v1.4.0"
+printf '1.4.0\n' >"$TMP/livesealed-v1.4.0/VERSION"
+printf '%s\n' "${OLD:0:7}" >"$TMP/livesealed-v1.4.0/REVISION"
+PATH="$USTUBS:$PATH" HOME="$UH" "$TMP/livesealed-v1.4.0/install.sh" >/dev/null 2>&1
+publish v1.5.0 "$SHA" v1.5.0
+recheck
+[ -n "$(kept '.seals["v1.5.0"]')" ] && ok "a staged release carries a seal" || bad "a staged release is sealed" "it is not"
+up apply
+same "and the activation that ran it drops that seal" "" "$(kept '.seals["v1.5.0"]')"
+
+# The case this exists for: a rollback, then the same release again. Without the
+# drop, the folder would still be there, still staged, and its seal would no
+# longer match the tree the launcher had written into.
+publish v1.4.0 "$OLD" v1.4.0
+recheck
+up apply
+same "a rollback takes the machine back" "$(staged v1.4.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+publish v1.5.0 "$SHA" v1.5.0
+recheck
+up apply
+said="$(jq -r '.hookSpecificOutput.additionalContext // ""' <<<"$out" 2>/dev/null)"
+case "$said" in
+  *altered*) bad "and rolling forward again never reads as tampering" "$said" ;;
+  *) ok "and rolling forward again never reads as tampering" ;;
+esac
+[ -z "$(find "$UH/.claude/agent-toolkit-releases" -maxdepth 1 -name '.altered.*' -print -quit)" ] \
+  && ok "so nothing is set aside on a healthy machine" || bad "nothing is set aside" "a folder was"
+# Unsealed rather than altered, which Activating answers by discarding it. The
+# cost is the one download the next check makes.
+forget_calls
+recheck
+case "$(asked)" in
+  *tarball*) ok "the folder it kept is discarded and fetched again" ;;
+  *) bad "a rolled forward release is fetched again" "it asked for no tarball" ;;
+esac
+up apply
+same "and the release is live again" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
 
 # ── rolling back ─────────────────────────────────────────────────────────────
 # A release marked a prerelease makes the one before it latest again, so a

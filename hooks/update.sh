@@ -625,7 +625,11 @@ install_from() { # version directory
   # Install keeps no note of the directory it moved off, so the activation that
   # moved is what records it, for pruning to keep one version to fall back to.
   [ "$before" = "$after" ] || record_set '.previous = $p' --arg p "$before"
-  record_set '.bad = [.bad[]? | select(. != $v)]' --arg v "$WANTED"
+  # Going live is itself what changes a tree: the first hook the launcher runs
+  # from it writes a bytecode cache inside it, within seconds. A seal taken
+  # before that cannot describe the tree afterwards, so a release chosen again
+  # after a rollback is simply unsealed, and is staged afresh.
+  record_set '.bad = [.bad[]? | select(. != $v)] | del(.seals[$v])' --arg v "$WANTED"
   return 0
 }
 

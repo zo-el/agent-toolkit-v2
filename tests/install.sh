@@ -784,6 +784,19 @@ inst "$WT" "$H" --sync
 [ "$rc" = 0 ] && [ -z "$out" ] && ok "and --sync from one says nothing and changes nothing" \
   || bad "--sync from a worktree says nothing" "exit $rc: $out"
 
+# A machine installed from a worktree before this rule existed keeps working: the
+# doctor is not what tells it, because a doctor that refused would leave it with
+# no doctor at all until somebody ran a full install.
+ln -sfn "$WT" "$H/.claude/agent-toolkit"
+rm -f "$H/.claude/skills/toolkit"
+inst "$WT" "$H" --sync
+[ -L "$H/.claude/skills/toolkit" ] && ok "and a machine already live from one still gets its doctor" \
+  || bad "a live worktree root still syncs" "exit $rc: $out"
+case "$out" in
+  *"every agent may write"*) bad "which never refuses at a session start" "it refused: $out" ;;
+  *) ok "which never refuses at a session start" ;;
+esac
+
 # ── version identity ─────────────────────────────────────────────────────────
 H="$(home version)"
 RELEASE="$TMP/release-v1.5.0"
