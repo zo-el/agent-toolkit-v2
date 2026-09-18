@@ -102,7 +102,7 @@ Agents can reach the session while they work, and should when they are genuinely
 
 - Independent work → spawn every agent in one message so they run at once.
 - Dependent work → one agent, verify, then the next.
-- Never two agents writing in the same repo at once. Split by directory, give each `isolation: worktree`, or sequence them.
+- Never two agents writing in the same repo at once. Split by directory, give each `isolation: worktree`, or sequence them. A worktree arrives with no submodule checked out, so init them first, and message `main` when the repo the brief names is still not there.
 - Start each agent's description with its lane: `Payments rework: build the parser`.
 
 ## Tasks
@@ -188,7 +188,7 @@ Say so and ask which wins, before acting on either reading. Quote the line and s
 - Confirm the cause before writing the fix.
 - Scale the checking to what the change can break. Never skip the floor: it builds, it's tested, references are swept.
 - Say what actually happened. Tests failed → show it. A step was skipped → say so.
-- A result carries the environment it was measured in, so every measurement happens inside whatever wrapper pins the project's toolchain (`nix develop -c`, a container, a venv). A green measured outside it is not green.
+- A result carries the environment it was measured in, so every measurement happens inside whatever wrapper pins the project's toolchain (`nix develop -c`, a container, a venv). A green measured outside it is not green, and a check runs through the repo's own entry point, `make test` and the scripts beside it, which carries the build dependencies a direct invocation skips.
 - Iterate against the targeted test rather than the whole suite. The full gate set runs before you hand back, and again after any fix it forced.
 - A review measures a pinned range: `<base>..<head>` by sha, with the base recorded before the work started. Nothing commits to that range while the review runs. The brief carries the goal and the range, not the author's verdict: a reviewer handed a conclusion tends to confirm it.
 
