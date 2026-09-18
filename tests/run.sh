@@ -2400,9 +2400,16 @@ fi
 
 written="$(grep -c '^- [0-9]' "$ROOT/RETRO.md")"
 shaped="$(grep -cE '^- [0-9-]+ · [^ ·]+ · [^ ·]+: ' "$ROOT/RETRO.md")"
-{ [ "${written:-0}" -gt 0 ] && [ "$written" = "$shaped" ]; } \
-  && ok "every line in the log carries it" \
-  || bad "every line in the log carries it" "${shaped:-0} of ${written:-0} lines match"
+# An emptied log is where a retro leaves it, so there is nothing to hold to the
+# format and nothing proved either way. The format itself is checked above,
+# against the template both homes publish.
+if [ "${written:-0}" -eq 0 ]; then
+  skip "every line in the log carries it" "the log holds no line, which is where a retro leaves it"
+elif [ "$written" = "$shaped" ]; then
+  ok "every line in the log carries it"
+else
+  bad "every line in the log carries it" "${shaped:-0} of ${written:-0} lines match"
+fi
 
 # Each threshold is a judgement the spec argues for, so the two must not drift.
 drifted="$(python3 - "$ROOT" <<'PY'

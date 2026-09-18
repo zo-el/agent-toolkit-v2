@@ -28,7 +28,7 @@ Nothing off the shelf fits, for one structural reason each. Git hook frameworks 
 - `git diff --cached` works in a repository with no commits. `git diff HEAD` does not, and is the fallback's trigger.
 - Only added lines can ever be examined. 285 em dashes are tracked in this repo at HEAD, 31 of them in `CLAUDE.md`; a whole file scan is all noise.
 - The double hyphen is a false positive machine here. Every ` -- ` tracked in this repo is a shell end of options marker (`git checkout --`, `realpath -m --`, `printf --`, `grep -F --`), and none is punctuation.
-- The failure being caught is measured. 943 changelog bullets across 50 files under `git_repo/unyt*` have a median length of 94 characters and a p90 of 217, against a rule whose own example is 44. `RETRO.md` records a +326 comment drift surviving a whole feature because nothing counted it.
+- The failure being caught is measured. 943 changelog bullets across 50 files under `git_repo/unyt*` have a median length of 94 characters and a p90 of 217, against a rule whose own example is 44. A +326 comment drift survived a whole feature because nothing counted it.
 - Comment drift is measured too, over 2658 commits across fourteen repositories, each counted by this hook's own `comment_drift`. 83% add no net comment lines at all. Of the rest, the band from +1 to +5 falls away steeply and from +6 upward the histogram is flat, which is a second population rather than a tail of the first. Net drift scales with the size of the commit carrying it, at a median 5.2% of its changed lines, so a flat threshold is really a cap on commit size. Read by hand, every one of this repository's own commits between +6 and +19 carries comments that earn their place, which is the work a threshold of 3 was denying.
 - The hook costs about 2ms of its own work per Bash call, on top of a 12ms Python interpreter start. `shlex`, `subprocess` and `traceback` are imported where they are used, because at that scale their import time is most of the cost.
 - Repository config is executable. `--no-ext-diff` and `--no-textconv` cover the external diff driver and textconv; `core.fsmonitor` and the rest are turned off on the command line, where a repository cannot re-enable them. A clean filter still runs when a worktree file has to be read, which is what the commit itself is about to do.
@@ -165,7 +165,7 @@ Silence is a bypass as well as a failure mode, so the ways past the check are na
 
 - `Comments:` the comment lines added and removed across the branch, and what each surviving addition says that the code cannot. `Comments: +0/-6` is the normal answer.
 
-The hook's number covers a single commit. The drift `RETRO.md` records accumulated across a whole feature, which is what the branch wide count catches. There is no `Changelog:` line: the hook covers the mechanical half, and a fourth required line is ceremony.
+The hook's number covers a single commit. That +326 drift accumulated across a whole feature, which is what the branch wide count catches. There is no `Changelog:` line: the hook covers the mechanical half, and a fourth required line is ceremony.
 
 ## Thresholds
 
