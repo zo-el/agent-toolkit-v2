@@ -16,7 +16,7 @@ Follow [`INSTALL.md`](INSTALL.md).
 | ------------- | ---------------------------------------------------------------------- |
 | `CLAUDE.md` | the agreement: the CTO loop, tasks, code and writing style, the gates |
 | `agents/` | architect · developer · reviewer · project-manager · researcher |
-| `skills/` | `backlog` · `toolkit` (change this repo) · `ui-review` (screenshot galleries) |
+| `skills/` | `backlog` · `diagnose` (the bug loop) · `toolkit` (change this repo) · `ui-review` (screenshot galleries) |
 | `hooks/` | the guard, the style check, the statusline, the task line, the retro recorder, the formatter |
 | `INSTALL.md` | how to install, and what install touches |
 | `install.sh` | the installer, and the doctor that runs at every session start |

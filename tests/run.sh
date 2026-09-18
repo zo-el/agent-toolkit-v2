@@ -2353,6 +2353,24 @@ for want in "$BLOCKED_LINE" "${HINT%%. Tools*}"; do
   grep -qF "$want" "$ROOT/README.md" && ok "README publishes: $want" \
     || bad "README publishes: $want" "README.md does not carry it"
 done
+
+# The skills row is the only index of what is here, so a skill missing from it
+# is a skill nobody reaches for. The row itself must exist, or every name would
+# match the same nothing.
+row="$(grep -F '| `skills/` |' "$ROOT/README.md")"
+unlisted=""
+for s in "$ROOT"/skills/*/SKILL.md; do
+  name="$(basename "$(dirname "$s")")"
+  case "$row" in *"\`$name\`"*) ;; *) unlisted="$unlisted $name" ;; esac
+done
+if [ -z "$row" ]; then
+  bad "the README names every skill" "README.md carries no skills row"
+elif [ -n "$unlisted" ]; then
+  bad "the README names every skill" "not named:$unlisted"
+else
+  ok "the README names every skill"
+fi
+
 written="$(grep -c '^- [0-9]' "$ROOT/RETRO.md")"
 shaped="$(grep -cE '^- [0-9-]+ · [^ ·]+ · [^ ·]+: ' "$ROOT/RETRO.md")"
 { [ "${written:-0}" -gt 0 ] && [ "$written" = "$shaped" ]; } \

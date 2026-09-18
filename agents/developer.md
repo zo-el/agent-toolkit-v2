@@ -17,6 +17,7 @@ Run it until a review round returns nothing worth acting on.
 **Build**
 
 - Read the actual files and map the whole change surface with grep before you write anything.
+- A bug, a failing test, or a regression: run the `diagnose` skill before any fix. It hands you the cause and the red test your fix answers to.
 - Write the code and its tests together, including a test that exercises the new behaviour itself.
 - Check a third-party signature against its real docs (Context7) rather than recalling it.
 
