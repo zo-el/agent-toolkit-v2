@@ -95,6 +95,7 @@ judge_track() {
 # One JSON object, replaced whole. Times are epoch seconds, so no run parses a
 # date and no locale decides what a machine does.
 RECORD_JSON="{}"
+RECORD_DIRTY=0
 
 read_record() {
   [ -e "$RECORD" ] || return 0
@@ -108,11 +109,12 @@ record_set() { # jq filter, then jq arguments
   local filter="$1" next
   shift
   next="$(jq -c "$@" "$filter" <<<"$RECORD_JSON" 2>/dev/null)" || return 1
-  RECORD_JSON="$next"
+  RECORD_JSON="$next" RECORD_DIRTY=1
 }
 
 record_write() {
   local tmp="$RECORD.$$"
+  [ "$RECORD_DIRTY" -eq 1 ] || return 0
   mkdir -p "$CLAUDE_DIR" 2>/dev/null || return 1
   printf '%s\n' "$RECORD_JSON" >"$tmp" 2>/dev/null && mv -T "$tmp" "$RECORD" 2>/dev/null && return 0
   rm -f "$tmp"
@@ -134,6 +136,187 @@ take_stage_lock() {
   : >>"$RELEASES/.stage.lock" 2>/dev/null || return 1
   exec 8<"$RELEASES/.stage.lock" 2>/dev/null || return 1
   flock -n 8 2>/dev/null
+}
+
+# ── GitHub ───────────────────────────────────────────────────────────────────
+# Every call bounded, so a hung network cannot hold a session start or outlive
+# the run that made it.
+GH_SECONDS=60
+GH_ERROR=""
+GH_404=0
+
+# The body lands in a file rather than on stdout: a caller reading it through a
+# command substitution would run this in a subshell, where GH_404 and GH_ERROR
+# would die with the subshell and every failure would read as an empty reason.
+gh_read() { # api arguments → 0 with the body in $WORK/body
+  GH_ERROR="" GH_404=0
+  timeout "$GH_SECONDS" gh api "$@" >"$WORK/body" 2>"$WORK/gh.err" && return 0
+  grep -q 'HTTP 404' "$WORK/gh.err" 2>/dev/null && GH_404=1
+  GH_ERROR="$(one_line <"$WORK/gh.err")"
+  return 1
+}
+
+body_field() { jq -r "$1 // empty" "$WORK/body" 2>/dev/null; }
+
+# gh is the whole of the machine's reach, so a machine without it, or without a
+# token, is told rather than left checking nothing in silence.
+gh_is_ready() {
+  have gh || {
+    record_failure advisory "the last update check failed: gh is not on PATH" "~/.claude/agent-toolkit/install.sh"
+    return 1
+  }
+  timeout 10 gh auth token --hostname github.com >/dev/null 2>&1 && return 0
+  record_failure advisory "the last update check failed: gh holds no token for github.com" "$GH_LOGIN"
+  return 1
+}
+
+# ── the cycle ────────────────────────────────────────────────────────────────
+COMMIT=""
+TARGET=""        # the version directory now should install from
+STAGE_REASON=""  # what now prints when there is nothing to install
+
+# A 404 is not an answer on its own: the repository is private, so a token that
+# cannot see it 404s exactly as a repository with no release does.
+resolve_release() {
+  local path tag
+  case "$TRACK_STATE" in
+    pin) path="repos/$REPO/releases/tags/$WANTED" ;;
+    *) path="repos/$REPO/releases/latest" ;;
+  esac
+  if ! gh_read "$path"; then
+    [ "$GH_404" -eq 1 ] || { record_failure advisory "the last update check failed: $GH_ERROR" ""; return 1; }
+    if ! gh_read "repos/$REPO"; then
+      record_failure advisory "the last update check failed: gh cannot see $REPO" "$GH_LOGIN"
+      return 1
+    fi
+    if [ "$TRACK_STATE" = pin ]; then
+      record_failure required "~/.claude/agent-toolkit-track names $WANTED, which nobody has published, so nothing is downloaded" \
+        "edit ~/.claude/agent-toolkit-track to a release that exists, or to latest"
+      return 1
+    fi
+    # Nothing is wrong with a repository whose first release is still to come.
+    check_succeeded
+    STAGE_REASON="no release has been published yet"
+    return 1
+  fi
+  tag="$(body_field .tag_name)"
+  if [ "$(version release "$tag")" != "$tag" ] || [ -z "$tag" ]; then
+    record_failure required "the release GitHub reports is tagged \"$(printf '%s' "$tag" | one_line)\", which is not a release name such as v1.5.0" ""
+    return 1
+  fi
+  WANTED="$tag"
+  resolve_commit
+}
+
+# An annotated tag carries the commit one object further in.
+resolve_commit() {
+  local kind
+  gh_read "repos/$REPO/git/ref/tags/$WANTED" \
+    || { record_failure advisory "the last update check failed: $GH_ERROR" ""; return 1; }
+  COMMIT="$(body_field .object.sha)"
+  kind="$(body_field .object.type)"
+  if [ "$kind" = tag ]; then
+    gh_read "repos/$REPO/git/tags/$COMMIT" \
+      || { record_failure advisory "the last update check failed: $GH_ERROR" ""; return 1; }
+    COMMIT="$(body_field .object.sha)"
+  fi
+  case "$COMMIT" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) return 0 ;;
+    *) record_failure advisory "the last update check failed: $WANTED carries no commit" "" ;;
+  esac
+  return 1
+}
+
+# Live, already staged, or marked bad: three ways there is nothing to download.
+# now ignores the bad mark, which is what a machine does after fixing the cause.
+judge_release() {
+  local live
+  live="$(version root "$(live_root)")"
+  if [ -n "$live" ] && [ "$(version release "$live")" = "$WANTED" ]; then
+    TARGET="$(live_root)"
+    STAGE_REASON="$WANTED is already the live version"
+    return 1
+  fi
+  if [ -d "$RELEASES/$WANTED" ]; then
+    TARGET="$RELEASES/$WANTED"
+    STAGE_REASON="$WANTED is already unpacked and waiting for the next session start"
+    return 1
+  fi
+  if [ "$MODE" != now ] && jq -e --arg v "$WANTED" 'any(.bad[]?; . == $v)' <<<"$RECORD_JSON" >/dev/null 2>&1; then
+    STAGE_REASON="$WANTED did not install here and is not tried again until the wanted release changes"
+    return 1
+  fi
+  return 0
+}
+
+download() {
+  timeout "$GH_SECONDS" gh api "repos/$REPO/tarball/$COMMIT" >"$WORK/archive.tgz" 2>"$WORK/gh.err" \
+    && [ -s "$WORK/archive.tgz" ] && return 0
+  record_failure advisory "the last update check failed: $WANTED would not download: $(one_line <"$WORK/gh.err")" ""
+  return 1
+}
+
+# The commit id a git archive carries, in its pax global header.
+archive_commit() {
+  python3 -c 'import sys, tarfile; print(tarfile.open(sys.argv[1]).pax_headers.get("comment", ""))' \
+    "$WORK/archive.tgz" 2>/dev/null
+}
+
+# On main, meaning the head of it or an ancestor of it. GitHub not answering is
+# an ordinary failure: one unlucky call must never tell the user their
+# repository has been tampered with.
+commit_is_on_main() {
+  gh_read "repos/$REPO/compare/main...$COMMIT" \
+    || { record_failure advisory "the last update check failed: $GH_ERROR" ""; return 1; }
+  case "$(body_field .status)" in
+    identical | behind) return 0 ;;
+  esac
+  record_failure required "$WANTED names commit ${COMMIT:0:7}, which is not on main, so nothing was installed" ""
+  return 1
+}
+
+# Four things, all of them before the rename that makes a release staged.
+verify_and_unpack() {
+  local carried declared
+  if ! mkdir -p "$WORK/root" || ! tar -xzf "$WORK/archive.tgz" -C "$WORK/root" --strip-components=1 2>"$WORK/tar.err"; then
+    record_failure advisory "the last update check failed: $WANTED would not unpack: $(one_line <"$WORK/tar.err")" ""
+    return 1
+  fi
+  carried="$(archive_commit)"
+  if [ "$carried" != "$COMMIT" ]; then
+    record_failure required "$WANTED names commit ${COMMIT:0:7} and its archive carries ${carried:0:7}, so nothing was installed" ""
+    return 1
+  fi
+  commit_is_on_main || return 1
+  printf '%s\n' "${COMMIT:0:7}" >"$WORK/root/REVISION" || return 1
+  declared="$(version root "$WORK/root")"
+  if [ "$(version release "$declared")" != "$WANTED" ]; then
+    record_failure required "$WANTED holds a tree declaring $(if [ -n "$declared" ]; then printf 'version %s' "$declared"; else printf 'no version'; fi), so nothing was installed: installing it would leave this machine at a version that is still not the wanted one" ""
+    return 1
+  fi
+  mv -T "$WORK/root" "$RELEASES/$WANTED" 2>/dev/null || {
+    record_failure advisory "the last update check failed: $WANTED would not move into ~/.claude/agent-toolkit-releases" \
+      "chmod u+rwx ~/.claude/agent-toolkit-releases"
+    return 1
+  }
+  TARGET="$RELEASES/$WANTED"
+  STAGE_REASON=""
+  return 0
+}
+
+check_succeeded() {
+  record_set ".succeeded_at = $(now_seconds) | del(.failure)"
+}
+
+# 0 when the wanted release is here to install, 1 when there is nothing to do.
+run_cycle() {
+  gh_is_ready || return 1
+  resolve_release || return 1
+  record_set '.wanted = $w | .commit = $c' --arg w "$WANTED" --arg c "$COMMIT"
+  check_succeeded
+  judge_release || return 1
+  download || return 1
+  verify_and_unpack || return 1
 }
 
 # ── stage ────────────────────────────────────────────────────────────────────
@@ -168,10 +351,30 @@ do_stage() {
   read_record
   releases_dir || { record_write; return 0; }
   take_stage_lock || return 0
-  started="$(now_seconds)"
-  check_is_due "$started" || return 0
-  record_set ".checked_at = $started | .first_check_at = (.first_check_at // $started)" || return 0
+  check_and_stage
   record_write
+}
+
+# The check and the download, under whatever lock the caller took. TARGET names
+# the version directory to install from when there is one.
+check_and_stage() {
+  local started
+  started="$(now_seconds)"
+  check_is_due "$started" || return 1
+  record_set ".checked_at = $started | .first_check_at = (.first_check_at // $started)" || return 1
+  workspace && run_cycle
+}
+
+# The archive and the tree it unpacks to, under a name no release ever has, so a
+# run killed partway leaves a folder pruning knows to remove.
+WORK=""
+workspace() {
+  WORK="$(mktemp -d "$RELEASES/.staging.XXXXXX" 2>/dev/null)" || {
+    record_failure advisory "the last update check failed: ~/.claude/agent-toolkit-releases holds no room to unpack a release" \
+      "df -h ~/.claude"
+    return 1
+  }
+  trap 'rm -rf "$WORK"' EXIT
 }
 
 # ── apply ────────────────────────────────────────────────────────────────────
@@ -226,8 +429,29 @@ do_now() {
     return 1
   fi
   read_record
-  [ "$TRACK_STATE" = bad ] || report_record
+  if [ "$TRACK_STATE" = bad ]; then
+    print_findings
+    return 1
+  fi
+  if ! releases_dir; then
+    record_write
+    report_record
+    print_findings
+    return 1
+  fi
+  if ! take_stage_lock; then
+    echo "another session is already downloading a release. Nothing changed."
+    return 1
+  fi
+  check_and_stage
+  record_write
+  if [ -n "$TARGET" ]; then
+    printf '%s is ready at %s\n' "$WANTED" "$TARGET"
+    return 1
+  fi
+  report_record
   print_findings
+  [ -z "$STAGE_REASON" ] || printf '%s. Nothing changed.\n' "$STAGE_REASON"
   return 1
 }
 
