@@ -147,13 +147,16 @@ The rename is what makes a release staged: a folder under a `v<version>` name is
 
 ### Verifying
 
-Three things, all of them before anything is staged:
+Four things, all of them before anything is staged:
 
 - the download decompresses whole;
 - the commit id the archive carries is the commit the release names;
-- that commit is the head of `main`, or an ancestor of it.
+- that commit is the head of `main`, or an ancestor of it;
+- the `VERSION` the archive carries is the version the release is named for.
 
 The third is the one that matters most: it is what makes *a person merged this* the condition for running on every machine, rather than *a person published a release*.
+
+**The fourth exists because the version is declared.** A release named for one version whose tree declares another would install, go live, and leave the machine at a version that is still not the wanted one, so every session start would stage and install it again for good. Nothing inside the archive can prove a declared version is the right one, and this is the one thing about it a machine can check: that the name and the tree agree.
 
 **A check that was not answered is not a check that failed.** GitHub saying the commit is not on `main` is a required finding, because the release is wrong. GitHub saying nothing, through a rate limit, a refusal or a read that did not complete, is an ordinary recorded failure: nothing is staged, and the next `apply` reports the cause. One unlucky call must never tell the user their repository has been tampered with.
 
@@ -213,7 +216,7 @@ A release the machine will not install is announced at most once, and the record
 | a release did not go live | required | user | `~/.claude/agent-toolkit/hooks/update.sh now`, once install's own reason is dealt with |
 | the last check failed | advisory | user | that failure's own fix |
 | no check has succeeded in seven days | advisory | user | `~/.claude/agent-toolkit/hooks/update.sh now` |
-| the archive was not the commit the release names, or the commit is not on `main` | required | user | nothing automatic: the release is wrong and the repository owner acts |
+| the archive was not the commit the release names, declares another version, or the commit is not on `main` | required | user | nothing automatic: the release is wrong and the repository owner acts |
 | the track holds something else | required | user | edit or remove `~/.claude/agent-toolkit-track` |
 | the track names a release nobody published | required | user | edit `~/.claude/agent-toolkit-track` to a release that exists, or to `latest` |
 | `gh` is missing, holds no token, or cannot see the repository | advisory | user | the same command install's requirement list names, which is where that text lives |
@@ -274,6 +277,7 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 | GitHub 404s `latest` but the repository reads | no release has been published. Nothing is reported |
 | the download is truncated, or will not decompress | nothing is staged, the reason is recorded, the next `apply` reports it |
 | the archive is not the commit the release names | nothing is staged. Required finding |
+| the archive declares a version the release is not named for | nothing is staged. Required finding naming both, since installing it would re-install on every session start for good |
 | the release's commit is not on `main` | nothing is staged. Required finding naming the release |
 | `stage` is killed partway | a part-written folder is left and pruned later. Nothing is staged, and the next `stage` starts again |
 | two stages overlap | the second takes no lock and exits |
