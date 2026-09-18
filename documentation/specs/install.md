@@ -6,7 +6,7 @@
 
 | Term | Meaning |
 | ------------------- | ------- |
-| version directory | the directory holding one version of the toolkit: a git checkout, or a release unpacked into a folder such as `~/.claude/agent-toolkit-releases/v<N>`. Install behaves the same for either |
+| version directory | the directory holding one version of the toolkit: a git checkout, or a release unpacked into a folder such as `~/.claude/agent-toolkit-releases/v<version>`. Install behaves the same for either |
 | stable link | `~/.claude/agent-toolkit`, a symlink to the installed version directory. Nothing else on the device names the version directory |
 | root checks | the checks that judge a version directory on its own, listed under Root checks |
 | launcher | `~/.claude/agent-toolkit-run`, a plain file outside every version directory. Every command the toolkit writes into settings runs through it |
@@ -75,13 +75,15 @@ The same rule holds when the directory is already live, as with a checkout updat
 
 ## Version identity
 
-A root's version is `v<count>·<sha>`: the commit count of its HEAD and its abbreviated commit id. Releases are named `v<count>`, so a checkout and a release compare directly.
+A root's version is `v<version>·<revision>`: the semantic version it declares, and the abbreviated commit id of the tree it holds. Releases are named for the semantic version alone, so a checkout and a release compare directly.
 
-1. When the root is the top level of its own git work tree, the version comes from that history. A repository in a parent directory never counts.
-2. Otherwise it comes from a `VERSION` file at the root holding that one line. A release's `VERSION` is written into its folder when the release arrives.
-3. Otherwise the root has no version. It installs normally, and the stamp is removed.
+1. The semantic version is the one line of `VERSION` at the root, three dot separated numbers. The file is tracked, so a checkout and a release cut from the same commit declare the same thing.
+2. The revision comes from the root's own git history when the root is the top level of its own work tree, and otherwise from `REVISION`, written beside `VERSION` when a release is unpacked. A repository in a parent directory never counts.
+3. A root missing either half, or holding either in any other form, has no version. It installs normally, and the stamp is removed.
 
-A `VERSION` line in any other form counts as no version. Two versions are equal when their counts match and one sha is a prefix of the other. The stamp and the status line's freshness light both read a root's version through this rule, implemented once.
+Two versions are **equal** when their semantic versions match and one revision is a prefix of the other, so a release abbreviated to one length still compares with a checkout abbreviated to another. One is **newer** than another when its semantic version is, by the ordering semantic versioning defines; the revision takes no part in that.
+
+The stamp and the status line's freshness light read equality through this rule, implemented once. A commit that bumps nothing still moves the revision, so the light still catches a checkout whose changes are not applied.
 
 ## Settings
 
@@ -236,7 +238,7 @@ It also states, once each:
 | a backup does not parse | it is never offered as the file to restore. The newest backup that does parse is |
 | a write inside `~/.claude` fails | earlier steps stay applied. The report names what did not apply. No version stamp |
 | a plugin fetch fails, or `claude` is missing or too old | required finding. Everything local still applies |
-| the version directory has no git history and no valid `VERSION` | installs. The stamp is removed |
+| the version directory declares no valid `VERSION`, or has neither git history nor a valid `REVISION` | installs. The stamp is removed |
 | an unknown argument | usage on stderr, exit `2`, nothing written |
 
 ## Rejected
@@ -244,6 +246,7 @@ It also states, once each:
 - **Distributing the toolkit as a plugin.** A plugin cannot ship CLAUDE.md, env, permissions or the status line, and its agents are namespaced (`plugin:developer`), which breaks every bare-name reference.
 - **The guide as the requirement list.** A second copy of what the script checks, held in step only by a test. The report already renders the list for this machine, with each fix.
 - **An inline fallback for the guard in `settings.json`.** It protects the guard alone, and session start still could not say the toolkit is gone.
+- **One file holding the whole version.** The semantic half is tracked and the revision half cannot be, since a release folder's tracked files have to stay identical to the commit they came from. Two files keep each half with whoever writes it: the pull request writes `VERSION`, and the updater writes `REVISION` into the folder it is still unpacking. Renaming the tracked file instead would move the better known name onto the half a person never edits.
 - **A hand-kept list of retired values.** It works only when whoever retires a value remembers to add it.
 - **Moving the stable link first and checking after.** A broken version would be live with nothing to roll back to.
 - **Warning at session start instead of applying.** A stale file keeps running dead hook paths until someone acts, and a hook that cannot start does not block the tool it guards.

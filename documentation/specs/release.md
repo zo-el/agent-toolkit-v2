@@ -8,11 +8,11 @@ Install is the other half of this and is not restated here: `documentation/specs
 
 | Term | Meaning |
 | ---------------- | ------- |
-| release | a published GitHub release named `v<count>`, whose tag points at one commit on `main` |
+| release | a published GitHub release named `v<version>`, whose tag points at one commit on `main` |
 | track | `~/.claude/agent-toolkit-track`, one line saying which release this machine follows |
 | wanted release | the release the track resolves to |
 | live version | the version directory the stable link points at, and the version it holds |
-| staged | a release unpacked at `~/.claude/agent-toolkit-releases/v<N>`, complete, with its `VERSION` holding the `v<count>·<sha>` line install reads |
+| staged | a release unpacked at `~/.claude/agent-toolkit-releases/v<version>`, complete, with the `REVISION` install reads written beside the `VERSION` the archive already carries |
 | record | `~/.claude/agent-toolkit-staging.json`, everything the updater remembers: the wanted release and its commit, when the last check began and whether it succeeded, the last failure and its cause, the versions marked bad, the version last reported live, the directory that was live before the current one, and the releases it has already announced |
 | notes source | the `## Changelog` section of the merged pull request that carried a commit, read in one place and defined below |
 | dev mode | the live version directory is a git work tree, so this machine's toolkit is a clone someone edits |
@@ -40,21 +40,22 @@ Rulesets and branch protection are not available on this plan, so no check can b
 
 A push to `main` runs the release workflow, which:
 
-1. checks out the pushed commit with its whole history, because the release name counts it;
+1. checks out the pushed commit as a work tree, at no depth behind it, because nothing counts commits;
 2. runs `tests/run.sh`, and goes no further unless its summary counts no failures and no skips;
 3. asks the notes source for that commit's changelog lines, and publishes nothing without them;
-4. publishes `v<count>` from that commit, with those lines as its notes.
+4. reads `VERSION` from that commit and publishes `v<version>` from it, with those lines as its notes.
 
 - **`tests/run.sh` is the whole gate.** It sources `tests/install.sh`, so the installer's cases run inside it. There is no second command.
 - **A skipped check is not a passed one.** The suite exits `0` with any number of skips and counts them in its last line. The gate is the suite's own counts of failures and skips, both at zero.
-- **A skip is the runner's to remove.** A check skips where `jscpd` and `npx` are both out of reach, where the tree carries no git history, and where the run is root, so the runner is none of those.
+- **A skip is the runner's to remove.** A check skips where `jscpd` and `npx` are both out of reach, where the tree is not a git work tree, and where the run is root, so the runner is none of those.
 - **A check that skips for a reason the runner cannot answer is changed, not tolerated.** The gate learns no list of accepted skips: a check with nothing to read reports a verdict on nothing to read, because a list of exceptions is a gate that stops meaning anything.
 - **The style gate is not a workflow check.** `hooks/style.py` denies a commit before it runs, which only the machine making that commit can do; once a merge has landed there is nothing left to deny. The suite covers the hook's own behaviour, and a `Style-ack:` trailer that cleared a finding is in the history for anyone to read.
-- **`v<count>`** is the commit count of the released commit. A version directory's version is `v<count>·<sha>`, so a release name is that version's count half and a release and a clone compare directly.
-- **A merge commit moves the count by the whole branch it merged**, so counts rise without being consecutive. Only the rising matters.
+- **The version is declared, not computed.** `VERSION` at the repository root holds one line of three dot separated numbers, and the release takes its name from the line the released commit carries. A version directory's version is `v<version>·<revision>`, so a release name is that version's semantic half and a release and a clone compare directly.
+- **The pull request that carries changelog lines bumps it**: the major when the new release needs the user to do something by hand, the minor when a user sees something new, the patch when it is a fix. One that says `none` leaves `VERSION` alone, so the bump and the changelog section are one decision rather than two.
+- **`VERSION` starts at `1.0.0`.** The toolkit is installed, in daily use, and has a published install contract, so a `0.x` line claiming no compatibility promise would be false, and the major would stop meaning what the bump rule says it means.
 - **The tag is lightweight and points at the released commit**, so one API call gives a machine the exact commit a release names.
-- **Runs are serialised**, so counts are published in the order they were merged.
-- **A run publishes nothing twice.** A `v<count>` that already exists ends the run without a release.
+- **Runs are serialised**, so releases are published in the order they were merged.
+- **A version publishes once**, and how the run ends depends on the commit the existing release names. The same commit means the work is already published, so the run succeeds saying so, which is what a re-run is. A different commit means the product changed and the bump was forgotten, so the run fails: a release that silently never happens is the failure this gate exists to prevent.
 - **Every run writes one line saying what it did**, released or not, where the run's own summary shows it.
 - **The workflow publishes as the repository's own token**, so the release and its tag start no further workflow run. Nothing depends on one.
 
@@ -96,7 +97,7 @@ The machine verifies the commit for itself either way, so immutability is a seco
 | Line | Meaning |
 | ------------------ | ------- |
 | absent, or `latest` | follow the release GitHub reports as latest |
-| `v<N>` | follow that release and no other |
+| `v<version>` | follow that release and no other |
 | `off` | check nothing, download nothing, apply nothing |
 
 - The file is the user's alone. Nothing in the toolkit writes it, and install neither reads it nor removes it.
@@ -128,10 +129,10 @@ The machine verifies the commit for itself either way, so immutability is a seco
 | judge | `stage`, `now` | stop when that release is live, already staged, or marked bad |
 | download | `stage`, `now` | fetch the source archive of that commit |
 | verify | `stage`, `now` | the archive is whole, and it is that commit, and that commit is on `main` |
-| unpack | `stage`, `now` | into a part-written folder, `VERSION` written, renamed to `~/.claude/agent-toolkit-releases/v<N>` |
+| unpack | `stage`, `now` | into a part-written folder, `REVISION` written beside the archive's `VERSION`, renamed to `~/.claude/agent-toolkit-releases/v<version>` |
 | activate | `apply`, `now` | run the staged folder's `install.sh` |
 
-The rename is what makes a release staged: a folder under a `v<N>` name is always complete, and a part-written one never has that name. The rename and the stable link's move are both atomic, so no reader ever sees half of either.
+The rename is what makes a release staged: a folder under a `v<version>` name is always complete, and a part-written one never has that name. The rename and the stable link's move are both atomic, so no reader ever sees half of either.
 
 ### Checking
 
@@ -185,8 +186,8 @@ A machine is in dev mode when its live version directory is a git work tree. Not
 
 - The updater checks, and does nothing else. It downloads nothing and activates nothing, so an edit in progress is never overwritten.
 - A machine leaves dev mode with `hooks/update.sh now`, which installs the wanted release over it. The clone is left on disk, untouched.
-- When the wanted release's count is above the clone's, the updater says so once, naming both versions and both ways forward: pull the clone, or install the release.
-- **The comparison is a count**, so a clone carrying work of its own can sit above the release while missing it, and is told nothing. A branch of any size puts it there. That is the right way to be wrong: a clone is somebody's work in progress, and a release it has not merged is not news.
+- When the wanted release's version is newer than the clone's, the updater says so once, naming both versions and both ways forward: pull the clone, or install the release.
+- **The comparison is the semantic version alone.** A clone whose `VERSION` is behind a published release is told, however much unmerged work sits on top of it, and one holding a bump nobody has released yet reads as newer and is told nothing. A clone at the same version is told nothing either: it is somebody's work in progress, and only a release it has not reached is news.
 
 ## Announcing once
 
@@ -198,10 +199,10 @@ A release the machine will not install is announced at most once, and the record
 
 ```json
 {
-  "systemMessage": "agent-toolkit: updated to v42. Restart Claude Code to load the new version",
+  "systemMessage": "agent-toolkit: updated to v1.5.0. Restart Claude Code to load the new version",
   "hookSpecificOutput": {
     "hookEventName": "SessionStart",
-    "additionalContext": "agent-toolkit updates:\nv42 is live, from v41·a1b2c3d\n! the last update check failed: gh holds no token for github.com. Fix (user): gh auth login --hostname github.com --web"
+    "additionalContext": "agent-toolkit updates:\nv1.5.0 is live, from v1.4.0·a1b2c3d\n! the last update check failed: gh holds no token for github.com. Fix (user): gh auth login --hostname github.com --web"
   }
 }
 ```
@@ -224,7 +225,7 @@ A release the machine will not install is announced at most once, and the record
 - **Silence is the normal state.** A machine at the wanted release whose last check succeeded prints nothing at all.
 - **The updater reports its own access failures**, rather than leaving them to the doctor. `--sync` skips the requirements a user can only satisfy outside Claude Code, `gh` among them, so a session start would otherwise skip the one thing that stops updates.
 - **`stage` reports nothing.** An async hook's output reaches nothing reliably and is killed at teardown in `-p` mode, so it records and `apply` reports. A failure is therefore reported at the session start after the one that hit it.
-- **The report names the live version and the wanted release whenever they differ**, which is the only place the two are distinguished. Which release a machine runs needs no mechanism of its own: a staged release carries `VERSION`, install stamps it, and the status line shows it, exactly as for a clone.
+- **The report names the live version and the wanted release whenever they differ**, which is the only place the two are distinguished. Which release a machine runs needs no mechanism of its own: a staged release carries the `VERSION` of the commit it was cut from and the `REVISION` the updater wrote beside it, install stamps both as one version, and the status line shows it, exactly as for a clone.
 
 ## Pruning
 
@@ -235,10 +236,10 @@ A release the machine will not install is announced at most once, and the record
 
 ## Bootstrap
 
-A machine with no toolkit gets its first release through `gh`, not through git: `gh auth login`, read the latest release's tag and commit, unpack that commit's archive into `~/.claude/agent-toolkit-releases/<tag>`, write its `VERSION`, and run `install.sh` from it. The updater takes over from there.
+A machine with no toolkit gets its first release through `gh`, not through git: `gh auth login`, read the latest release's tag and commit, unpack that commit's archive into `~/.claude/agent-toolkit-releases/<tag>`, write its `REVISION`, and run `install.sh` from it. The updater takes over from there.
 
 - **It needs no ssh key and no clone**, which is what makes it the way back when the stable link has nothing behind it.
-- **The `VERSION` line is part of it.** A folder without one has no version, so the first install stamps nothing and the status line shows no release.
+- **The `REVISION` line is part of it.** The archive carries `VERSION` already; without `REVISION` beside it the folder has no version, so the first install stamps nothing and the status line shows no release.
 - **A machine that will edit the toolkit clones instead**, and installing from the clone is what puts it in dev mode.
 
 ## The guide
@@ -292,7 +293,9 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 | the account's runner minutes are spent | no run, so no release. GitHub tells the account owner. Machines stay where they are and report nothing, because nothing on a machine is wrong. A merge that reaches no machine is visible on GitHub and nowhere else |
 | the merged pull request says `none` | no release. The run succeeds and its summary says so |
 | the commit reached `main` without a pull request, or the body carries no changelog section | no release, and the run fails |
-| `v<count>` already exists | no release. The run says so in its summary |
+| `v<version>` is already published, at the commit being run for | no release. The run succeeds and its summary says so |
+| `v<version>` is already published, at a different commit | no release, and the run fails. The product changed and `VERSION` was not bumped |
+| `VERSION` is missing, or is not three dot separated numbers | no release, and the run fails |
 
 ## Rejected
 
@@ -301,6 +304,7 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 - **chezmoi, or another dotfile manager.** It would replace `install.sh`, which is where the cost actually is: root checks, the launcher, the settings merge, the ledger.
 - **Generated release notes.** They list every merged pull request, chores included.
 - **Running the style gate in the workflow.** It is a `PreToolUse` deny on a commit that has not run yet, and after a merge there is nothing left to deny. Running it over a merged range would report findings on work already accepted, with no way to answer them but a second commit.
+- **The commit count as the version.** It cannot be forgotten, which a declared file can, but it numbers commits rather than releases, so two versions could be ordered without either having been published, and nothing in the number says whether the update asks anything of the user. It also needs the whole history wherever it is read.
 - **Reading the notes in more than one place.** One step answers for a release, so no other step in the workflow learns what a pull request is, and the source can change without them changing.
 - **Marking the previous release latest, to roll back in one step.** It rests on GitHub honouring that flag over its own date order, which its reference does not state. The prerelease flag rests on the definition of latest itself.
 - **A required check before merge.** Rulesets and branch protection answer 403 on this plan.
@@ -322,5 +326,5 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 | how the record is written | one JSON file through jq, or a directory of one-line files | `hooks/update.sh` |
 | how `stage` bounds itself | `timeout` around the whole run, or a deadline checked between steps | `hooks/update.sh` |
 | how `stage` takes its lock | `flock` through python as install does, or a directory rename | `hooks/update.sh` |
-| the runner image and the user it runs as | one on which the suite reports no failures and no skips, which needs a non-root user, a checkout carrying the whole history, and `jscpd` or `npx` reachable | the release workflow |
+| the runner image and the user it runs as | one on which the suite reports no failures and no skips, which needs a non-root user and `jscpd` or `npx` reachable | the release workflow |
 | whether the suite also runs on pull requests | a second workflow, against a budget of 2,000 runner minutes a month and a suite of about four | the workflows |
