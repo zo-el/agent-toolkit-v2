@@ -14,7 +14,7 @@ entry=${2-}
 if [ $# -ge 2 ]; then shift 2; else set --; fi
 link="$HOME/.claude/agent-toolkit"
 
-lead="agent-toolkit is unreachable, so its guard cannot judge this call"
+lead="agent-toolkit is unreachable, so its gate cannot judge this call"
 if [ -n "$entry" ] && [ -f "$link/$entry" ] && [ -x "$link/$entry" ]; then
   [ "$caller" = PreToolUse ] || exec "$link/$entry" "$@"
   # Claude Code lets the call through on any exit but 0 and 2, which is what a
@@ -26,7 +26,7 @@ if [ -n "$entry" ] && [ -f "$link/$entry" ] && [ -x "$link/$entry" ]; then
     [ -z "$out" ] || printf '%s\n' "$out"
     exit "$status"
   fi
-  lead="agent-toolkit's guard gave no verdict on this call"
+  lead="agent-toolkit's gate gave no verdict on this call"
   problem="$entry exited $status"
 else
   target=$(readlink "$link" 2>/dev/null)

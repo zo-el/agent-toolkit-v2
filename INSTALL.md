@@ -35,6 +35,8 @@ Repeat `./install.sh` until its last line counts 0 required findings.
 
 Or restart it, when the report says so. Sign in if asked.
 
+Notifications are the `claude-notifications-go` plugin's own, and install holds no view on them. `/claude-notifications-go:settings` is where you choose which events reach you.
+
 ## What install touches
 
 Only `~/.claude`, and Claude Code's plugins, which it fetches:

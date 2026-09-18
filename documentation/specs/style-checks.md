@@ -26,7 +26,7 @@ Nothing off the shelf fits, for one structural reason each. Git hook frameworks 
 - A hook entry's `if` field takes permission rule syntax (`Bash(git *)`) and tests each subcommand of a compound command. **`Bash(git commit *)` does not match `git -C <repo> commit`**, which is the form `CLAUDE.md` requires, so no narrowing may assume `commit` is the second word. The hook is wired on the whole `Bash` matcher and narrows itself.
 - At `PreToolUse` the commit has not run, so the content to check is the index, not a commit. `git commit -a` and `-am` stage tracked changes at commit time, so for those the content is the working tree instead.
 - `git diff --cached` works in a repository with no commits. `git diff HEAD` does not, and is the fallback's trigger.
-- Only added lines can ever be examined. 452 em dashes are tracked in this repo at HEAD, 31 of them in `CLAUDE.md`; a whole file scan is all noise.
+- Only added lines can ever be examined. 285 em dashes are tracked in this repo at HEAD, 31 of them in `CLAUDE.md`; a whole file scan is all noise.
 - The double hyphen is a false positive machine here. Every ` -- ` tracked in this repo is a shell end of options marker (`git checkout --`, `realpath -m --`, `printf --`, `grep -F --`), and none is punctuation.
 - The failure being caught is measured. 943 changelog bullets across 50 files under `git_repo/unyt*` have a median length of 94 characters and a p90 of 217, against a rule whose own example is 44. `RETRO.md` records a +326 comment drift surviving a whole feature because nothing counted it.
 - Comment drift is measured too, over 2658 commits across fourteen repositories, each counted by this hook's own `comment_drift`. 83% add no net comment lines at all. Of the rest, the band from +1 to +5 falls away steeply and from +6 upward the histogram is flat, which is a second population rather than a tail of the first. Net drift scales with the size of the commit carrying it, at a median 5.2% of its changed lines, so a flat threshold is really a cap on commit size. Read by hand, every one of this repository's own commits between +6 and +19 carries comments that earn their place, which is the work a threshold of 3 was denying.
@@ -36,7 +36,7 @@ Nothing off the shelf fits, for one structural reason each. Git hook frameworks 
 
 ## Where it lives
 
-`hooks/style.py`, wired synchronously at `PreToolUse[Bash]` alongside `hooks/guard.sh`, with its cases in `tests/run.sh`. Python because the work is unicode scanning and per language comment counting, stdlib only like every hook here. It never contends with the guard for a decision: the guard is silent on `git commit`, and this hook is silent on everything else.
+`hooks/style.py`, wired synchronously at `PreToolUse[Bash]` alongside `hooks/guard.sh`, with its cases in `tests/run.sh`. Python because the work is unicode scanning and per language comment counting, stdlib only like every hook here. It and the guard never disagree over a call: on a commit the guard speaks only about attribution and this hook only about writing, so a call both deny carries both reasons. This hook is silent on everything that is not a commit.
 
 No new rule in `CLAUDE.md`: all three are already there. `agents/developer.md` carries the `Comments:` return line, which is the judgement half.
 

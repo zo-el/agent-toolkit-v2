@@ -189,6 +189,9 @@ cat >"$FAKE/.claude/settings.json" <<'JSON'
 JSON
 inst "$ROOT" "$FAKE"
 exit_is "a full install on a fresh machine goes green" 0
+# The exit code alone counts no advisory, so a new one on a machine with nothing
+# to advise about would go unnoticed.
+check "with nothing left to report" "✓ 0 required findings, 0 advisory" "$out"
 check "a first install asks for a restart for the pointer, both directories, env and plugins" \
   "Restart Claude Code: env changed, plugins changed, ~/.claude/CLAUDE.md changed, ~/.claude/agents was created, ~/.claude/skills was created." "$out"
 settings() { js "$FAKE" "$1"; }
@@ -1378,19 +1381,27 @@ out="$(HOME="$H" CLAUDE_STUB_FAIL=add "$ROOT/install.sh" 2>&1)"
 check "a failing marketplace fetch carries its message too" "was not registered: ✘ Failed to add marketplace: the stub refused" "$out"
 
 # Which events notify is the plugin's setting and the user's decision, so the
-# doctor says the same thing either way. Asserted as identical output, which
-# holds for whichever key a view would read.
+# doctor says the same thing either way. Both paths a check could plausibly
+# read are written, because the report is what has to stay identical, whichever
+# file a view would have opened.
 H="$(home notifications)"
 # Installed first, so both runs compared below are the same idempotent report.
 inst "$ROOT" "$H"
 inst "$ROOT" "$H"
 silent="$out"
-mkdir -p "$H/.config/agent-notifications"
-printf '{"notifications":{"suppressForSubagents":false,"notifyOnSubagentStop":true}}\n' >"$H/.config/agent-notifications/config.json"
-inst "$ROOT" "$H"
-same "the doctor holds no view on the notification settings" "$silent" "$out" \
-  "the plugin's config changed what the doctor said: $out"
-exit_is "and the install is green either way" 0
+for ncfg in "$H/.config/agent-notifications/config.json" "$H/.claude/claude-notifications-go/config.json"; do
+  mkdir -p "$(dirname "$ncfg")"
+  printf '{"notifications":{"suppressForSubagents":false,"notifyOnSubagentStop":true}}\n' >"$ncfg"
+  # The settings a view would object to, or the case below passes on a file
+  # nothing would have flagged either.
+  jq -e '.notifications.suppressForSubagents == false and .notifications.notifyOnSubagentStop == true' \
+    "$ncfg" >/dev/null 2>&1 \
+    || bad "the notifications fixture is the one a view would flag" "$(cat "$ncfg" 2>/dev/null)"
+  inst "$ROOT" "$H"
+  same "the doctor holds no view on ~/${ncfg#"$H/"}" "$silent" "$out" \
+    "the plugin's config changed what the doctor said: $out"
+done
+exit_is "and the install is green with both of them there" 0
 
 # ── failure paths ────────────────────────────────────────────────────────────
 # A version directory whose gate would not hold never goes live.
