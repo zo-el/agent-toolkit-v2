@@ -233,19 +233,33 @@ esac
 # Glob and Grep are not tools this harness has, and an unknown name is dropped in
 # silence. Whole names, because BashOutput contains Bash, ListAgents contains
 # Agent, and neither searches. A duplicate key resolves to the last line.
-missing=""; unknown=""; blind=""
+missing=""; unknown=""; blind=""; armed=""; stated=0
 for a in "$ROOT"/agents/*.md; do
   n="$(basename "$a")"
   names=",$(grep '^tools:' "$a" | tail -1 | sed 's/^tools://; s/[[:space:]]//g'),"
   case "$names" in *,SendMessage,*) ;; *) missing="$missing $n" ;; esac
   case "$names" in *,Glob,* | *,Grep,*) unknown="$unknown $n" ;; esac
   case "$names" in *,Bash,* | *,Agent,*) ;; *) blind="$blind $n" ;; esac
+  grep -q '^Read-only\.' "$a" || continue
+  stated=$((stated + 1))
+  case "$names" in *,Write,* | *,Edit,* | *,NotebookEdit,*) armed="$armed $n" ;; esac
 done
 [ -z "$missing" ] && ok "every agent carries SendMessage" || bad "every agent carries SendMessage" "missing in:$missing"
 [ -z "$unknown" ] && ok "no agent asks for a tool the harness dropped" \
   || bad "no agent asks for a tool the harness dropped" "declared in:$unknown"
 [ -z "$blind" ] && ok "every agent can search a repo" \
   || bad "every agent can search a repo" "no Bash or Agent in:$blind"
+# A shell reaches further than a reader does, so the agents that carry one and
+# call themselves read-only are held to it by the allowlist, which is the
+# boundary a role cannot talk itself past. No such definition makes the check
+# vacuous, which is a failure rather than a pass.
+if [ "$stated" -eq 0 ]; then
+  bad "an agent that states it is read-only cannot write" "no definition states it"
+elif [ -n "$armed" ]; then
+  bad "an agent that states it is read-only cannot write" "a writing tool in:$armed"
+else
+  ok "an agent that states it is read-only cannot write"
+fi
 check "foreign env kept"      "keep"          "$(settings '.env.MY_VAR')"
 check "foreign key kept"      "dark"          "$(settings '.theme')"
 check "foreign hook kept"     "/usr/bin/true" "$(settings '[.hooks.PreToolUse[].hooks[].command] | join(" ")')"
