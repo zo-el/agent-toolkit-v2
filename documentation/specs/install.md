@@ -202,11 +202,7 @@ The list lives once, in `install.sh`. The doctor checks it, both reports render 
 
 `INSTALL.md` sits at the repo root and is the first thing a person or an agent reads. README's Install section links to it. It carries only what `install.sh` cannot check, and the loop around it:
 
-1. **Get the repo.** A person, in their own terminal. The repo is private, so GitHub access comes first:
-   - `gh auth login --hostname github.com --git-protocol ssh --web`, which can generate an SSH key and upload it.
-   - `git clone git@github.com:zo-el/agent-toolkit-v2.git ~/Documents/git-repo/agent-toolkit-v2`
-
-   One sentence says these need git and gh. No other line of the guide names a package. Any location works except `~/.claude/agent-toolkit`. An agent already holding the repo starts at step 2.
+1. **Get the toolkit.** A person, in their own terminal. The two ways in are `documentation/specs/release.md`'s, and either leaves a version directory to run install from. Both need `gh`, so `gh auth login --hostname github.com --git-protocol ssh --web` comes first, and the clone needs `git` as well. One sentence says so, and no other line of the guide names a package. A clone can live anywhere except `~/.claude/agent-toolkit`. An agent already holding the repo starts at step 2.
 2. **Run `./install.sh`** from the repo.
 3. **Do what it lists under Needs you.** A person runs those commands. An agent hands them to the user exactly as printed and runs none of them.
 4. **Run `./install.sh` again** until it ends with no required finding.
@@ -217,7 +213,7 @@ It also states, once each:
 - what install touches;
 - the bridge: install puts its files at `~/.claude/tools/penpot-mcp/` and does nothing else for it. The Penpot account, Node, the dependencies it fetches at its first run, and connecting the plugin in a browser are the user's, and no install check looks at any of them;
 - the exit codes;
-- updating: once a new version is in the version directory, the next session start on the machine applies it and says when to restart, and `./install.sh` applies it immediately;
+- updating: a session start applies whatever the version directory now holds, and `./install.sh` applies it immediately. How a new version reaches that directory is the release flow's, and `documentation/specs/release.md` names what the guide says about it;
 - moving the checkout: run `install.sh` from the new location.
 
 ## Failure

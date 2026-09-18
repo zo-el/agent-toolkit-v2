@@ -4,7 +4,7 @@ Linux only.
 
 ## 1. Get the toolkit
 
-In your own terminal. The repo is private, so GitHub access comes first, and both routes need `gh`.
+In your own terminal. Both routes need `gh`, so GitHub access comes first.
 
 ```bash
 gh auth login --hostname github.com --git-protocol ssh --web

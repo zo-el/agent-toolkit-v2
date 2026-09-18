@@ -56,6 +56,8 @@ A push to `main` runs the release workflow, which:
 - **The tag is lightweight and points at the released commit**, so one API call gives a machine the exact commit a release names.
 - **Runs are serialised**, so releases are published in the order they were merged.
 - **A version publishes once**, and how the run ends depends on the commit the existing release names. The same commit means the work is already published, so the run succeeds saying so, which is what a re-run is. A different commit means the product changed and the bump was forgotten, so the run fails: a release that silently never happens is the failure this gate exists to prevent.
+- **The same suite runs on a pull request**, as a second workflow. It gates nothing, since no check can be required before a merge, and it is there so an author sees a failing suite before the merge rather than after it.
+- **A job is given the permission it needs and no more.** The repository is public, so a pull request from a fork can start the suite job, and what runs in it is that branch's own code: that job may read the repository and nothing else. The release job may write, because publishing is what it is for, and only a push to `main` starts it, which no fork can cause. Neither checkout leaves its credentials in the tree for the code it is about to run.
 - **Every run writes one line saying what it did**, released or not, where the run's own summary shows it.
 - **The workflow publishes as the repository's own token**, so the release and its tag start no further workflow run. Nothing depends on one.
 
@@ -138,7 +140,7 @@ The rename is what makes a release staged: a folder under a `v<version>` name is
 
 - **Throttled to six hours.** A check that starts less than six hours after the last one began does nothing. A last check recorded in the future counts as never having happened, so a clock that was wrong once does not stop a machine checking for good. `now` ignores the throttle.
 - Two reads answer it: the release the track names, and the tag it carries. An annotated tag is followed to its commit.
-- **A 404 is not an answer on its own.** The repository is private, so a token that cannot see it 404s exactly as a repository with no release does. A 404 is resolved by reading the repository itself, and what the second read means depends on what was asked for:
+- **A 404 is not an answer on its own.** GitHub answers 404 rather than 403 for a repository a token cannot see, so a repository out of reach and a repository with no release give the same answer. Whether this one is reachable is a setting somebody can change, and a machine that read that setting once would be wrong the day it changed. A 404 is resolved by reading the repository itself, and what the second read means depends on what was asked for:
   - the repository 404s too: the token cannot see it, which is an access failure;
   - the repository reads and the track says `latest`: no release has been published yet, which is silence;
   - the repository reads and the track named a release: that release does not exist, which is a required finding naming the track's line. A machine pinned to a release nobody published would otherwise check every six hours forever and say nothing.
@@ -155,6 +157,8 @@ Four things, all of them before anything is staged:
 - the `VERSION` the archive carries is the version the release is named for.
 
 The third is the one that matters most: it is what makes *a person merged this* the condition for running on every machine, rather than *a person published a release*.
+
+**The four are not four independent attestations.** Every one of them is GitHub answering over one channel: the commit id an archive carries is a pax header the server writes rather than a hash binding the members beside it, and the on-`main` answer comes from the same place. What the design trusts is that channel and the account `gh` is logged into. The third check is what turns that trust into a rule about merges rather than about publishing.
 
 **The fourth exists because the version is declared.** A release named for one version whose tree declares another would install, go live, and leave the machine at a version that is still not the wanted one, so every session start would stage and install it again for good. Nothing inside the archive can prove a declared version is the right one, and this is the one thing about it a machine can check: that the name and the tree agree.
 
@@ -194,7 +198,9 @@ A machine is in dev mode when its live version directory is a git work tree. Not
 
 ## Announcing once
 
-A release the machine will not install is announced at most once, and the record holds which. A machine that is in dev mode, pinned, or behind by choice is told, and then left alone.
+A machine in dev mode is told once that a release exists which it is not going to install, and the record holds which release, so no later check says it again.
+
+**Dev mode is the only case.** A pinned machine installs the release it is pinned to, so there is nothing it is declining. A machine tracking `off` is told nothing whatever, which is the whole of what `off` means.
 
 ## Reports
 
@@ -220,7 +226,7 @@ A release the machine will not install is announced at most once, and the record
 | the track holds something else | required | user | edit or remove `~/.claude/agent-toolkit-track` |
 | the track names a release nobody published | required | user | edit `~/.claude/agent-toolkit-track` to a release that exists, or to `latest` |
 | `gh` is missing, holds no token, or cannot see the repository | advisory | user | the same command install's requirement list names, which is where that text lives |
-| the wanted release is not being installed here | advisory, announced once | user | the way forward for dev mode, a pin, or `off` |
+| a release exists that this clone will not install | advisory, announced once | user | pull the clone, or `~/.claude/agent-toolkit/hooks/update.sh now` to take the release instead |
 
 - `systemMessage` reaches the user: one line, present when the live version changed, when a release failed to go live, or when a required finding stands.
 - **A fix is printed as a command that runs from anywhere**, which for the updater means its path through the stable link. The report is read in a session whose working directory is a project, not the toolkit.
@@ -249,12 +255,12 @@ A machine with no toolkit gets its first release through `gh`, not through git: 
 
 `INSTALL.md` states each of these once:
 
-- **Step 1 gains the release route.** Two ways in, and which to pick: fetch the latest release to use the toolkit, clone it to work on it. Today the step offers only the clone.
+- **the two ways in, and which to pick**: fetch the latest release to use the toolkit, clone it to work on it;
 - the track file, its three forms, and that `off` means the machine stops being told anything;
-- `hooks/update.sh now` as update on demand, and as the way out of dev mode;
+- `hooks/update.sh now` as update on demand, and as the way a machine running a clone takes a release instead;
 - what updating does on its own: a release is found in the background and installed at the next session start or compaction, and the report says when to restart.
 
-The `Updating` section is replaced by the last two, because a version arriving on its own is now the ordinary case rather than a consequence of pulling the repo. `Moving the repo` is about a clone and stays as it is, and so does everything the guide says about install itself.
+Its `Updating` section is the last three, because a version arriving on its own is the ordinary case rather than a consequence of pulling the repo. `Moving the repo` is about a clone, and everything the guide says about install itself is `documentation/specs/install.md`'s.
 
 ## Guard
 
@@ -316,19 +322,8 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 - **Reporting from the async stage.** Its output reaches nothing reliably and is killed at teardown in `-p` mode.
 - **A clock alone as the silent-failure guard.** An expired token and a fortnight away from the machine look the same to a clock. The recorded failure names the cause.
 - **Install owning the update state.** How a version arrives is outside install, and that boundary is what lets install treat a clone and a release identically.
-- **Verifying by recomputing the tree.** It answers the same question as the commit id in the archive, and it stops being true the day the repository gains an `export-ignore`.
+- **Verifying by recomputing the tree.** It restates the trust Verifying already rests on rather than adding to it, and it stops being true the day the repository gains an `export-ignore`.
 - **A release asset instead of the source archive.** The archive of a commit is already fixed content, and an asset adds an upload step and a second thing to verify.
 - **A status line segment for a pending update.** It shows something that stops being true at the next session start.
 - **Applying at the `fork` session source.** A compaction is the point at which a session's context is rebuilt; a fork inherits one that is already running.
 - **A copy of the updater outside every version directory.** It is a second thing to keep in step, and the launcher already names the fix when the stable link dangles.
-
-## Decisions left to the build
-
-| Decision | Options | Where it lands |
-| -------- | ------- | -------------- |
-| where the `gh auth login` fix text lives | one copy in `install.sh` with the updater naming the requirement instead of repeating the command, or a small file both read | `install.sh`, `hooks/update.sh` |
-| how the record is written | one JSON file through jq, or a directory of one-line files | `hooks/update.sh` |
-| how `stage` bounds itself | `timeout` around the whole run, or a deadline checked between steps | `hooks/update.sh` |
-| how `stage` takes its lock | `flock` through python as install does, or a directory rename | `hooks/update.sh` |
-| the runner image and the user it runs as | one on which the suite reports no failures and no skips, which needs a non-root user and `jscpd` or `npx` reachable | the release workflow |
-| whether the suite also runs on pull requests | a second workflow, against a budget of 2,000 runner minutes a month and a suite of about four | the workflows |

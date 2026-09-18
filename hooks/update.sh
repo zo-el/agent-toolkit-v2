@@ -218,8 +218,9 @@ TARGET=""
 STAGE_REASON=""  # what now prints when there is nothing to install
 ACTIVATED=0
 
-# A 404 is not an answer on its own: the repository is private, so a token that
-# cannot see it 404s exactly as a repository with no release does.
+# A 404 is not an answer on its own: GitHub answers 404 rather than 403 for a
+# repository a token cannot see, so that and a repository with no release read
+# the same.
 resolve_release() {
   local path tag
   case "$TRACK_STATE" in
