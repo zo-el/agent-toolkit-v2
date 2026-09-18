@@ -705,7 +705,11 @@ wait "$holder" 2>/dev/null
 json_is "and an edit that cannot take it says so as an edit" \
   '.hookSpecificOutput.additionalContext | test("held the lock for 5 seconds, so this edit applied nothing")'
 
-cat >"$TMP/reread.py" <<'PY'
+# Every settings fixture drives lib/settings through the same request and differs
+# only in what it patches, so the preamble is written once and the body arrives
+# on stdin.
+settings_fixture() { # path
+  { cat <<'PY'
 import json
 import os
 import sys
@@ -714,11 +718,18 @@ sys.path.insert(0, sys.argv[1])
 from lib import settings
 
 home = sys.argv[2]
+os.makedirs(home, exist_ok=True)
 path = os.path.join(home, "settings.json")
 request = {
     "settings": path, "ledger": os.path.join(home, "ledger.json"), "backups": os.path.join(home, "backups"),
     "desired": {"env": {"TOOLKIT_VALUE": "1"}}, "absent": [], "home": home, "root": "/r", "prev_root": "",
 }
+PY
+    cat
+  } >"$1"
+}
+
+settings_fixture "$TMP/reread.py" <<'PY'
 reads = []
 
 
@@ -1653,21 +1664,7 @@ check "with neither value the user already held claimed as the toolkit's" "[]" \
 
 # The ledger written before the settings rename is what a value applied now
 # rests on, so a ledger write that fails after the rename loses nothing.
-cat >"$TMP/ledger-fails.py" <<'PY'
-import json
-import os
-import sys
-
-sys.path.insert(0, sys.argv[1])
-from lib import settings
-
-home = sys.argv[2]
-os.makedirs(home, exist_ok=True)
-path = os.path.join(home, "settings.json")
-request = {
-    "settings": path, "ledger": os.path.join(home, "ledger.json"), "backups": os.path.join(home, "backups"),
-    "desired": {"env": {"TOOLKIT_VALUE": "1"}}, "absent": [], "home": home, "root": "/r", "prev_root": "",
-}
+settings_fixture "$TMP/ledger-fails.py" <<'PY'
 real = settings.replace
 writes = []
 
