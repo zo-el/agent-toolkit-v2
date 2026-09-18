@@ -86,13 +86,15 @@ A `VERSION` line in any other form counts as no version. Two versions are equal 
 - **Current** means the merge would change no value. Key order, whitespace, and the position of a foreign entry in an array are not differences. A current file is never rewritten.
 - A write keeps every foreign key, value and hook entry, in the order they had.
 - **Toolkit-owned values are enforced.** One edited by hand is restored at the next apply. Changing one means changing the toolkit.
-- **A value the toolkit stops setting is removed** at the next apply: an `env` key, a `permissions.deny` rule, an `additionalDirectories` entry, an `enabledPlugins` entry, a top-level key. It stays when the ledger does not hold it with its current value, which covers two cases:
+- **A value the toolkit stops setting is removed** at the next apply: a top-level key, an `env` or `enabledPlugins` or `attribution` entry, `permissions.defaultMode`, a `permissions.deny` rule, an `additionalDirectories` entry. It stays when the ledger does not hold it with its current value, which covers two cases:
   - the user changed it after the toolkit wrote it;
   - it already held that value before the toolkit first wrote it.
 - On a machine whose install predates the ledger, every toolkit-owned value present at the first apply that writes a ledger counts as toolkit-written. So does a value an earlier version wrote in a form it no longer uses, such as an absolute-path permission rule now written with `~/`.
+- **A value the toolkit keeps unset is removed at every apply**, whoever set it. `env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` is the one, since agent teams spawn parallel sessions rather than subagents. It is not owned, so it is never recorded, and setting it again means changing the toolkit.
 - A hook entry and the status line are the toolkit's when their command runs the launcher or a path under the stable link, including entries written by the toolkit's previous generation. They need no ledger.
 - Removing a plugin's `enabledPlugins` entry does not uninstall the plugin.
-- A settings file that does not parse, or that the merge cannot apply to, is never written.
+- A settings file that does not parse, or that the merge cannot apply to, is never written. The finding carries the command that opens it, since no command can know the right value.
+- **A ledger that will not read recovers the way a missing one does**, from the file itself. It is moved aside, kept in backups, and reported as an advisory: rebuilding from the file can vouch only for what the file still holds. Retiring nothing instead would leave retirement off for good, because the ledger that run writes would hold only what that run changed.
 - Claude Code writes this file too, and honours no lock of install's. Immediately before the rename, install re-reads the file. If it changed since the merge began, install redoes the merge against the new content.
 - Applies are serialised across the machine. A `--sync` that cannot take the lock within 5 seconds applies nothing and still reports, and a full install waits up to 60 seconds for it.
 - **A ledger that does not parse never holds an apply back.** It is moved aside to a backup name and the run carries on as though there were none: every toolkit-owned value is set, and nothing is retired. The run reports it.
@@ -245,13 +247,3 @@ It also states, once each:
 - **Moving the stable link first and checking after.** A broken version would be live with nothing to roll back to.
 - **Warning at session start instead of applying.** A stale file keeps running dead hook paths until someone acts, and a hook that cannot start does not block the tool it guards.
 - **Allowing the checkout at the stable path.** One layout keeps the stable link free to point at any version directory.
-
-## Decisions left to the build
-
-| Decision | Options | Where it lands |
-| -------- | ------- | -------------- |
-| how the launcher learns its caller | an argument written into each command, or `hook_event_name` read from stdin on the failure path only | `install.sh` wiring and the launcher |
-| command form | shell form with the launcher path quoted, or exec form with `args` | `install.sh` wiring |
-| the ssh-agent check | a local probe of the agent the calling shell sees, such as `ssh-add -l`. Never a connection to GitHub | `install.sh` requirements |
-| package names for each package manager | per manager, verified against its repositories | `install.sh` requirements |
-| minimum Claude Code version | the lowest release with every CLI and hook surface the toolkit uses. `claude plugin install --json` alone needs 2.1.268 | `install.sh` requirements |

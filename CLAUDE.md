@@ -195,7 +195,7 @@ Show the plan before you ask: the commits, a diff summary, the exact target, and
 
 Never post publicly as the user — no PR or issue comments, no review replies. Answer review feedback with code. Anything that must be said publicly, you draft and the user posts.
 
-Commits carry the user's identity only, from the machine's gitconfig — never set `user.name`/`user.email`, never pass `-c user.email=`, never take an address from the session context, which can belong to a different account. No AI attribution in commits or PRs: the settings switch it off and the guard denies it, so nothing rests on remembering.
+Commits carry the user's identity only, from the machine's gitconfig. Never set `user.name`/`user.email`, never pass `-c user.email=`, never take an address from the session context, which can belong to a different account. No AI attribution in commits or PRs: the settings switch it off and the guard denies it, so nothing rests on remembering.
 
 One PR per branch: the first approved push opens it, later approved pushes update it. Open it once the task is done and tested locally.
 
