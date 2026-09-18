@@ -1,12 +1,13 @@
-"""A version directory's version, v<count>·<sha>.
+"""A version directory's version, v<version>·<revision>.
 
-The installer stamps it and the status line compares against it, so both read it
-here. Contract: documentation/specs/install.md, Version identity.
+The installer stamps it, the status line compares against it, and the updater
+judges releases by it, so all three read it here. Contract:
+documentation/specs/install.md, Version identity.
 
     python3 hooks/lib/version.py <root>    prints the version, or nothing
 
 Exit 3: git did not answer in time. Exit 4: git failed, with its message.
-Exit 5: the VERSION file is there and will not read, with the reason.
+Exit 5: VERSION or REVISION is there and will not read, named with the reason.
 """
 
 import os
@@ -14,7 +15,10 @@ import re
 import subprocess
 import sys
 
-LABEL = re.compile(r"v([0-9]+)·([0-9a-f]{4,40})")
+SEMANTIC = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+REVISION = re.compile(r"[0-9a-f]{4,40}")
+NAME = re.compile(r"v(%s)" % SEMANTIC.pattern)
+LABEL = re.compile(r"v(%s)·(%s)" % (SEMANTIC.pattern, REVISION.pattern))
 
 # A variable naming another repository would answer for that one instead.
 GIT_ENV_OVERRIDES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")
@@ -26,26 +30,67 @@ class Unknown(Exception):
 
 
 class Unreadable(Exception):
-    """The VERSION file is there and will not read, which is not no version
-    either."""
+    """A file holding half the version is there and will not read, which is not
+    no version either. It carries which file, because a reader that always said
+    VERSION would send the user to look at the wrong one."""
+
+    def __init__(self, name, reason):
+        super().__init__("%s cannot be read: %s" % (name, reason))
+        self.name = name
+
+
+def _triple(digits):
+    return tuple(int(n) for n in digits.split("."))
 
 
 def parse(label):
-    """(count, sha) for a well-formed label, or None."""
+    """((major, minor, patch), revision) for a well-formed label, or None."""
     match = LABEL.fullmatch(label) if isinstance(label, str) else None
-    return (int(match.group(1)), match.group(2)) if match else None
+    return (_triple(match.group(1)), match.group(2)) if match else None
+
+
+def semantic(text):
+    """The (major, minor, patch) of a release name, v1.5.0, or of a whole
+    version label, v1.5.0·a1b2c3d, or None. A release is named for the semantic
+    half alone, so one reading answers for a release and a version directory."""
+    match = NAME.fullmatch(text) if isinstance(text, str) else None
+    if match:
+        return _triple(match.group(1))
+    found = parse(text)
+    return found[0] if found else None
 
 
 def same(a, b):
-    """Counts match and one sha is a prefix of the other, so an abbreviation of
-    any length still compares equal."""
+    """Semantic versions equal and one revision a prefix of the other, so a
+    release abbreviated to one length compares with a checkout abbreviated to
+    another."""
     pa, pb = parse(a), parse(b)
     if not (pa and pb) or pa[0] != pb[0]:
         return False
     return pa[1].startswith(pb[1]) or pb[1].startswith(pa[1])
 
 
-def _from_git(root, timeout):
+def newer(a, b):
+    """a is a later release than b, by the ordering semantic versioning defines.
+    The revision takes no part: it says which tree, not which release, so either
+    side may be a bare release name."""
+    sa, sb = semantic(a), semantic(b)
+    return sa is not None and sb is not None and sa > sb
+
+
+def _line(root, name):
+    """The one line of a file at the root, None when it is not there."""
+    try:
+        with open(os.path.join(root, name), encoding="utf-8") as f:
+            content = f.read(256)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        raise Unreadable(name, getattr(e, "strerror", None) or e)
+    return content[:-1] if content.endswith("\n") else content
+
+
+def _revision_from_git(root, timeout):
     """The top level of a work tree is the directory holding .git, so a root
     without one is never read from a repository in a parent directory."""
     if not os.path.lexists(os.path.join(root, ".git")):
@@ -70,30 +115,23 @@ def _from_git(root, timeout):
 
     if os.path.realpath(git("rev-parse", "--show-toplevel")) != root:
         return None
-    label = "v%s·%s" % (git("rev-list", "--count", "HEAD"), git("rev-parse", "--short", "HEAD"))
-    return label if parse(label) else None
-
-
-def _from_file(root):
-    try:
-        with open(os.path.join(root, "VERSION"), encoding="utf-8") as f:
-            content = f.read(256)
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError) as e:
-        raise Unreadable(getattr(e, "strerror", None) or e)
-    line = content[:-1] if content.endswith("\n") else content
-    return line if parse(line) else None
+    return git("rev-parse", "--short", "HEAD")
 
 
 def of_root(root, timeout=5.0):
-    """The root's version, or None when it has none.
+    """The root's version, or None when either half is missing or malformed.
 
     Raises subprocess.TimeoutExpired when git does not answer in time, Unknown
     when git fails on a directory that holds a repository, and Unreadable when
-    a VERSION file is there and will not read."""
+    VERSION or REVISION is there and will not read."""
     root = os.path.realpath(root)
-    return _from_git(root, timeout) or _from_file(root)
+    version = _line(root, "VERSION")
+    if version is None or not SEMANTIC.fullmatch(version):
+        return None
+    revision = _revision_from_git(root, timeout) or _line(root, "REVISION")
+    if revision is None or not REVISION.fullmatch(revision):
+        return None
+    return "v%s·%s" % (version, revision)
 
 
 if __name__ == "__main__":

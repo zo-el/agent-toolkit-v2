@@ -930,8 +930,8 @@ apply_stamp() {
     3) finding advisory install "git did not report the version in time, so the version stamp was left as it was" "$(install_command)" && return ;;
     4) finding advisory user "git cannot read the version directory's history, so the version stamp was left as it was: $(printf '%s' "$out" | one_line)" \
       "git -C $(home_path "$ROOT") status" && return ;;
-    5) finding advisory user "the version directory's VERSION file cannot be read, so the version stamp was left as it was: $(printf '%s' "$out" | one_line)" \
-      "ls -l $(home_path "$ROOT")/VERSION" && return ;;
+    5) finding advisory user "the version stamp was left as it was: $(printf '%s' "$out" | one_line)" \
+      "ls -l $(home_path "$ROOT")" && return ;;
     *) finding advisory toolkit "hooks/lib/version.py failed, so the version stamp was left as it was" "$ROOT/hooks/lib/version.py"$'\n'"$(printf '%s' "$out" | tail -1)" && return ;;
   esac
   if [ -z "$out" ]; then

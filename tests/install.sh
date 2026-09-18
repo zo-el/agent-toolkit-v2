@@ -604,53 +604,80 @@ same "and changes nothing, the link included" "$before" "$(snapshot "$H")"
 
 # ── version identity ─────────────────────────────────────────────────────────
 H="$(home version)"
-RELEASE="$TMP/release-v7"
+RELEASE="$TMP/release-v1.5.0"
 copy_root "$RELEASE"
-printf 'v7·abc1234\n' >"$RELEASE/VERSION"
+printf '1.5.0\n' >"$RELEASE/VERSION"
+printf 'abc1234\n' >"$RELEASE/REVISION"
 inst "$RELEASE" "$H"
-same "a release's VERSION is stamped" "v7·abc1234" "$(cat "$H/.claude/agent-toolkit-version" 2>/dev/null)"
+same "a release's two halves are stamped as one version" "v1.5.0·abc1234" "$(cat "$H/.claude/agent-toolkit-version" 2>/dev/null)"
 printf '{"cwd":"/"}' >"$TMP/sl.payload"
 out="$(HOME="$H" python3 "$ROOT/hooks/statusline.py" <"$TMP/sl.payload" 2>&1)"
 case "$out" in
-  *"$(printf '\033[2m⬡ v7·abc1234\033[0m')") ok "the status line shows a matching release root with no ⚠ or ?" ;;
+  *"$(printf '\033[2m⬡ v1.5.0·abc1234\033[0m')") ok "the status line shows a matching release root with no ⚠ or ?" ;;
   *) bad "the status line shows a matching release root with no ⚠ or ?" "$(printf '%s' "$out" | cat -v)" ;;
 esac
-printf 'v8·abc1234\n' >"$RELEASE/VERSION"
+printf '1.6.0\n' >"$RELEASE/VERSION"
 check "and ⚠ once the version directory moves past the stamp" "⚠" "$(HOME="$H" python3 "$ROOT/hooks/statusline.py" <"$TMP/sl.payload" 2>&1)"
-printf '7-abc1234\n' >"$RELEASE/VERSION"
+# A commit that bumps nothing still moves the revision, which is what catches a
+# checkout whose edits are not applied.
+printf '1.5.0\n' >"$RELEASE/VERSION"
+printf 'abd1234\n' >"$RELEASE/REVISION"
+check "and on a moved revision under the same version" "⚠" "$(HOME="$H" python3 "$ROOT/hooks/statusline.py" <"$TMP/sl.payload" 2>&1)"
+printf '1.5\n' >"$RELEASE/VERSION"
+printf 'abc1234\n' >"$RELEASE/REVISION"
 inst "$RELEASE" "$H"
 [ ! -e "$H/.claude/agent-toolkit-version" ] && ok "a malformed VERSION removes the stamp" || bad "a malformed VERSION removes the stamp" "$(cat "$H/.claude/agent-toolkit-version")"
 exit_is "and still installs" 0
+printf '1.5.0\n' >"$RELEASE/VERSION"
+rm -f "$RELEASE/REVISION"
+inst "$RELEASE" "$H"
+[ ! -e "$H/.claude/agent-toolkit-version" ] && ok "and so does a VERSION with no revision beside it" || bad "a half version removes the stamp" "$(cat "$H/.claude/agent-toolkit-version")"
 
 PARENT="$TMP/parent-repo"
 rm -rf "$PARENT"
 mkdir -p "$PARENT"
 git -C "$PARENT" init -q && git -C "$PARENT" commit -q --allow-empty -m parent
 copy_root "$PARENT/toolkit"
-printf 'v1·abc1234\n' >"$H/.claude/agent-toolkit-version"
+printf 'v1.0.0·abc1234\n' >"$H/.claude/agent-toolkit-version"
 inst "$PARENT/toolkit" "$H"
 [ ! -e "$H/.claude/agent-toolkit-version" ] && ok "a copy inside a parent repository never takes the parent's version" \
   || bad "a copy inside a parent repository never takes the parent's version" "stamped $(cat "$H/.claude/agent-toolkit-version")"
 
 if [ -e "$ROOT/.git" ]; then
-  same "a checkout is stamped from its own history" \
-    "v$(git -C "$ROOT" rev-list --count HEAD)·$(git -C "$ROOT" rev-parse --short HEAD)" "$(cat "$FAKE/.claude/agent-toolkit-version")"
+  same "a checkout is stamped from its declared version and its own history" \
+    "v$(cat "$ROOT/VERSION")·$(git -C "$ROOT" rev-parse --short HEAD)" "$(cat "$FAKE/.claude/agent-toolkit-version")"
 else
-  skip "a checkout is stamped from its own history" "the suite is not running from a git checkout"
+  skip "a checkout is stamped from its declared version and its own history" "the suite is not running from a git checkout"
 fi
+
+# REVISION answers for a release, and a work tree answers for itself, so one
+# left lying in a clone is never what the clone is stamped with.
+CLONE="$TMP/clone-with-revision"
+copy_root "$CLONE"
+git -C "$CLONE" init -q && git -C "$CLONE" add -A >/dev/null 2>&1 && git -C "$CLONE" commit -q -m clone
+printf 'deadbee\n' >"$CLONE/REVISION"
+inst "$CLONE" "$H"
+same "a work tree ignores a REVISION left in it" \
+  "v$(cat "$CLONE/VERSION")·$(git -C "$CLONE" rev-parse --short HEAD)" "$(cat "$H/.claude/agent-toolkit-version" 2>/dev/null)"
 
 cat >"$TMP/version.py" <<'PY'
 import sys
 
 sys.path.insert(0, sys.argv[1])
-from lib.version import parse, same
+from lib.version import newer, parse, same, semantic
 
 print(" ".join(str(x) for x in [
-    same("v7·abc1234", "v7·abc1234ff00"), same("v7·abc1234", "v8·abc1234"),
-    same("v7·abc1234", "v7·abd1234"), parse("v7·abc1234\nv8·abc1234"), parse(" v7·abc1234"),
+    same("v1.5.0·abc1234", "v1.5.0·abc1234ff00"), same("v1.5.0·abc1234", "v1.6.0·abc1234"),
+    same("v1.5.0·abc1234", "v1.5.0·abd1234"),
+    newer("v1.6.0·abc1234", "v1.5.0·fff0000"), newer("v1.5.0·abc1234", "v1.5.0·abd1234"),
+    newer("v1.5.0·fff0000", "v1.5.0·abc1234"),
+    newer("v1.10.0", "v1.9.0"), newer("v1.5.0", "v1.5.0·abc1234"),
+    semantic("v1.5.0") == semantic("v1.5.0·abc1234"), semantic("1.5.0"),
+    parse("v1.5.0·abc1234\nv1.6.0·abc1234"), parse(" v1.5.0·abc1234"), parse("v1.5·abc1234"),
 ]))
 PY
-check "versions compare by count and sha prefix, and a label is exactly one line" "True False False None None" \
+check "equal by version and sha prefix, newer by version alone, and a label is exactly one line" \
+  "True False False True False False True False True None None None None" \
   "$(python3 "$TMP/version.py" "$ROOT/hooks")"
 
 # ── sync applies ─────────────────────────────────────────────────────────────
@@ -1229,7 +1256,7 @@ fi
 # Root writes into a read-only directory regardless, so this is skipped there.
 VERSIONED="$TMP/versioned-root"
 copy_root "$VERSIONED"
-printf 'v1·abc1234\n' >"$VERSIONED/VERSION"
+printf 'abc1234\n' >"$VERSIONED/REVISION"
 if [ "$(id -u)" -ne 0 ]; then
   H="$(home write-fails)"
   inst "$VERSIONED" "$H"
@@ -1249,7 +1276,7 @@ fi
 H="$(home stamp-with-finding)"
 UNVERSIONED="$TMP/unversioned-root"
 copy_root "$UNVERSIONED"
-printf 'v3·abc1234\n' >"$H/.claude/agent-toolkit-version"
+printf 'v0.9.0·abc1234\n' >"$H/.claude/agent-toolkit-version"
 out="$(HOME="$H" CLAUDE_STUB_VERSION=2.1.1 "$UNVERSIONED/install.sh" 2>&1)"
 [ ! -e "$H/.claude/agent-toolkit-version" ] && ok "a root with no version removes the stamp even while a required finding stands" \
   || bad "a root with no version removes the stamp even while a required finding stands" "$(cat "$H/.claude/agent-toolkit-version")"
@@ -1806,22 +1833,28 @@ PY
 check "every value a fresh install ledgers is one a later install can retire" "[]" \
   "$(python3 "$TMP/retirable.py" "$ROOT/hooks" "$H/.claude/agent-toolkit-applied.json")"
 
-# A VERSION file that will not read is not the same answer as no version: a
-# stamp that is right must not be removed on the strength of it.
+# A file that will not read is not the same answer as no version: a stamp that
+# is right must not be removed on the strength of it. Either half can be the one
+# that failed, and the finding names whichever it was.
 if [ "$(id -u)" -ne 0 ]; then
   H="$(home version-unreadable)"
   UNREADABLE_VERSION="$TMP/unreadable-version-root"
   copy_root "$UNREADABLE_VERSION"
-  printf 'v9·abc1234\n' >"$UNREADABLE_VERSION/VERSION"
+  printf '9.0.0\n' >"$UNREADABLE_VERSION/VERSION"
+  printf 'abc1234\n' >"$UNREADABLE_VERSION/REVISION"
   inst "$UNREADABLE_VERSION" "$H"
+  chmod 000 "$UNREADABLE_VERSION/REVISION"
+  inst "$UNREADABLE_VERSION" "$H"
+  chmod 644 "$UNREADABLE_VERSION/REVISION"
+  same "a REVISION that cannot be read keeps the stamp it had" "v9.0.0·abc1234" "$(cat "$H/.claude/agent-toolkit-version" 2>/dev/null)"
+  check "and names the half that failed" "the version stamp was left as it was: REVISION cannot be read: Permission denied" "$out"
+  exit_is "as an advisory" 0
   chmod 000 "$UNREADABLE_VERSION/VERSION"
   inst "$UNREADABLE_VERSION" "$H"
   chmod 644 "$UNREADABLE_VERSION/VERSION"
-  same "a VERSION that cannot be read keeps the stamp it had" "v9·abc1234" "$(cat "$H/.claude/agent-toolkit-version" 2>/dev/null)"
-  check "and says why" "the version directory's VERSION file cannot be read, so the version stamp was left as it was: Permission denied" "$out"
-  exit_is "as an advisory" 0
+  check "and names the other half when that is the one" "the version stamp was left as it was: VERSION cannot be read: Permission denied" "$out"
 else
-  skip "a VERSION that cannot be read keeps the stamp" "running as root, which reads anything"
+  skip "a version half that cannot be read keeps the stamp" "running as root, which reads anything"
 fi
 
 # A session start that gave up on the lock after the link moved still says nothing.
@@ -1886,7 +1919,7 @@ cmp -s "$ROOT/hooks/launcher.sh" "$H/.claude/agent-toolkit-run" && [ -x "$H/.cla
 # keeps the old bytes.
 H="$(home renames)"
 inst "$EXTRA" "$H"
-printf 'v0·abc1234\n' >"$H/.claude/agent-toolkit-version"
+printf 'v0.9.0·abc1234\n' >"$H/.claude/agent-toolkit-version"
 printf '# stale\n' >>"$H/.claude/agent-toolkit-run"
 printf 'stale\n' >"$H/.claude/CLAUDE.md"
 printf 'stale\n' >"$H/.claude/agents/developer.md"
