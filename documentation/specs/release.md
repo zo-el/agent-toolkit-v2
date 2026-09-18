@@ -234,7 +234,7 @@ A machine in dev mode is told once that a release exists which it is not going t
 - **Silence is the normal state.** A machine at the wanted release whose last check succeeded prints nothing at all.
 - **The updater reports its own access failures**, rather than leaving them to the doctor. `--sync` skips the requirements a user can only satisfy outside Claude Code, `gh` among them, so a session start would otherwise skip the one thing that stops updates.
 - **`stage` reports nothing.** An async hook's output reaches nothing reliably and is killed at teardown in `-p` mode, so it records and `apply` reports. A failure is therefore reported at the session start after the one that hit it.
-- **The report names the live version and the wanted release whenever they differ**, which is the only place the two are distinguished. Which release a machine runs needs no mechanism of its own: a staged release carries the `VERSION` of the commit it was cut from and the `REVISION` the updater wrote beside it, install stamps both as one version, and the status line shows it, exactly as for a clone.
+- **A report that is already speaking names the live version and the wanted release whenever they differ**, which is the only place the two are distinguished. It is a rider on a report, never a reason to make one, or a machine that is behind on purpose would break the silence at every start. Which release a machine runs needs no mechanism of its own: a staged release carries the `VERSION` of the commit it was cut from and the `REVISION` the updater wrote beside it, install stamps both as one version, and the status line shows it, exactly as for a clone.
 
 ## Pruning
 
