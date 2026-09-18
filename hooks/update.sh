@@ -355,15 +355,15 @@ verify_and_unpack() {
     record_failure advisory "the last update check failed: $WANTED could not be stamped with its revision" "df -h ~/.claude"
     return 1
   fi
-  seal="$(take_seal "$WORK/root")" || {
-    record_failure advisory "the last update check failed: $WANTED could not be sealed, so nothing was staged" "$INSTALL_AGAIN"
-    return 1
-  }
   declared="$(version root "$WORK/root")"
   if [ "$(version release "$declared")" != "$WANTED" ]; then
     record_failure required "$WANTED holds a tree declaring $(if [ -n "$declared" ]; then printf 'version %s' "$declared"; else printf 'no version'; fi), so nothing was installed: installing it would leave this machine at a version that is still not the wanted one" ""
     return 1
   fi
+  seal="$(take_seal "$WORK/root")" || {
+    record_failure advisory "the last update check failed: $WANTED could not be sealed, so nothing was staged" "$INSTALL_AGAIN"
+    return 1
+  }
   mv -T "$WORK/root" "$RELEASES/$WANTED" 2>/dev/null || {
     record_failure advisory "the last update check failed: $WANTED would not move into ~/.claude/agent-toolkit-releases" \
       "chmod u+rwx ~/.claude/agent-toolkit-releases"
@@ -532,11 +532,12 @@ apply_wanted() {
 # under a name no release has, so pruning never reaches it and nothing mistakes
 # it for a release.
 set_aside() { # the staged folder → where it was kept, or nothing
-  local kept n=0
-  kept="$RELEASES/.altered.$WANTED.$(now_seconds)"
+  local base kept n=0
+  base="$RELEASES/.altered.$WANTED.$(now_seconds)"
+  kept="$base"
   while [ -e "$kept" ]; do
     n=$((n + 1))
-    kept="$RELEASES/.altered.$WANTED.$(now_seconds).$n"
+    kept="$base.$n"
   done
   mv -T "$1" "$kept" 2>/dev/null && printf '%s' "$kept"
 }
@@ -773,7 +774,7 @@ do_now() {
       if ! seal_holds "$TARGET"; then
         record_write
         print_findings
-        printf '%s is not the tree this machine unpacked, so nothing was installed.\n' "$WANTED"
+        printf '%s was not installed: this machine cannot vouch for the tree it had staged.\n' "$WANTED"
         return 1
       fi
       ;;

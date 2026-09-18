@@ -617,7 +617,8 @@ recheck
 printf 'x\n' >>"$(staged v1.6.0)/CLAUDE.md"
 up now
 exit_is "now refuses an altered tree too" 1
-check "saying it is not the tree this machine unpacked" "not the tree this machine unpacked" "$out"
+check "saying it cannot vouch for the tree it had staged" "cannot vouch for the tree it had staged" "$out"
+check "and naming what happened to it above that" "was altered after this machine unpacked it" "$out"
 
 # A seal that cannot be taken stages nothing, rather than staging what it could
 # not describe.
