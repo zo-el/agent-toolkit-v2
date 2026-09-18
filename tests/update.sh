@@ -185,7 +185,6 @@ same "a second check inside six hours does nothing" "$before" "$(file_id "$UH/.c
 recheck
 [ "$(kept .checked_at)" -gt "$(($(date -u +%s) - 60))" ] && ok "and one after it runs" \
   || bad "and one after it runs" "checked_at is still $(kept .checked_at)"
-# A clock that was wrong once must not stop a machine checking for good.
 keep ".checked_at += 100000"
 up stage
 [ "$(kept .checked_at)" -lt "$(($(date -u +%s) + 60))" ] && ok "a check recorded in the future counts as never having happened" \
@@ -199,7 +198,6 @@ up apply
 says_nothing "and the next run says nothing, because it now reads"
 
 # ── overlapping stages ───────────────────────────────────────────────────────
-# The second takes no lock and exits, so staging never queues behind itself.
 keep ".checked_at -= 21601"
 before="$(kept .checked_at)"
 lock_holder "$UH/.claude/agent-toolkit-releases/.stage.lock"
@@ -283,8 +281,6 @@ recheck
 same "an annotated tag is followed to the commit it points at" "$SHA" "$(kept .commit)"
 
 # ── verifying ────────────────────────────────────────────────────────────────
-# A release this machine will not run, and the reason said out loud rather than
-# unpacked, installed, and repeated at every session start after that.
 refuses() { # release, name, expected finding text
   rm -rf "$(staged "$1")"
   recheck
@@ -396,7 +392,6 @@ up now
 exit_is "while the same machine with the lock back takes the release" 0
 
 # ── applying ─────────────────────────────────────────────────────────────────
-# A session start takes the release that is waiting, or costs nothing at all.
 UH="$(home update-apply)"
 publish v1.4.0 "$OLD" v1.4.0
 copy_root "$TMP/live-v1.4.0"
@@ -476,8 +471,6 @@ up apply
 same "and the next one activates" "$(staged v1.6.0)" "$(readlink "$UH/.claude/agent-toolkit")"
 
 # ── now ──────────────────────────────────────────────────────────────────────
-# The whole cycle in the foreground, which is what a person runs the moment
-# updates stop working.
 UH="$(home update-now)"
 publish v1.4.0 "$OLD" v1.4.0
 copy_root "$TMP/now-v1.4.0"
@@ -512,7 +505,6 @@ same "and leaving the live version exactly where it was" "$before" \
   "$(readlink "$UH/.claude/agent-toolkit") $(cat "$UH/.claude/agent-toolkit-version") $(snapshot "$UH/.claude/skills")"
 : >"$AT_GH_STATE/token"
 
-# A version apply will not touch again is exactly what now is for.
 publish v1.6.0 dddddddd3333333333333333333333333333dddd v1.6.0
 recheck
 rm -f "$(staged v1.6.0)/hooks/guard.sh"
@@ -526,7 +518,6 @@ same "so a machine that fixed the cause moves on" "$(staged v1.6.0)" "$(readlink
 same "and the mark is gone" "" "$(kept '.bad[0]')"
 
 # ── dev mode ─────────────────────────────────────────────────────────────────
-# A clone is somebody's work in progress: the updater reads it and leaves it be.
 UH="$(home update-dev)"
 CLONE="$TMP/dev-clone"
 copy_root "$CLONE"
@@ -551,8 +542,7 @@ same "the clone is still live" "$CLONE" "$(readlink "$UH/.claude/agent-toolkit")
 up apply
 says_nothing "and it is not told again"
 
-# The comparison is the semantic version alone, so a clone carrying work of its
-# own is not news, and one already at the release is not either.
+# The comparison is the semantic version alone.
 printf '1.5.0\n' >"$CLONE/VERSION"
 git -C "$CLONE" commit -qam bump
 keep 'del(.announced)'
@@ -626,8 +616,6 @@ fi
 chmod u+rwx "$UH/.claude/agent-toolkit-releases"
 
 # ── pruning ──────────────────────────────────────────────────────────────────
-# Three directories are worth keeping: the one that is live, the one that is
-# wanted, and the one the machine fell off, which is what it falls back to.
 UH="$(home update-prune)"
 publish v1.4.0 "$OLD" v1.4.0
 copy_root "$TMP/prune-v1.4.0"
@@ -650,7 +638,6 @@ recheck
 [ -d "$(staged v1.6.0)" ] && ok "the wanted one stays" || bad "the wanted one stays" "it went"
 [ -d "$(staged v1.4.0)" ] && ok "and the one live before it stays" || bad "the previous one stays" "it went"
 
-# A stage that was killed leaves a folder under a name no release ever has.
 mkdir -p "$UH/.claude/agent-toolkit-releases/.staging.old" "$UH/.claude/agent-toolkit-releases/.staging.new"
 touch -d '2 days ago' "$UH/.claude/agent-toolkit-releases/.staging.old"
 recheck

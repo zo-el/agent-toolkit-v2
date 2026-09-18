@@ -6,10 +6,7 @@
 # Exit 0: released, or there is nothing to release and that is an answer someone
 #         gave. Exit 1: the run must be loud, because main moved past a gate.
 # Exit 2: it was called wrongly.
-#
-# The notes come from one place, which is the only step here that knows what a
-# pull request is. The version comes from the released commit's own VERSION, read
-# through the same rule every machine reads a version by.
+
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"

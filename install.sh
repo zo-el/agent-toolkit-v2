@@ -22,9 +22,8 @@ AGENTS_DST="$CLAUDE_DIR/agents"
 MANIFEST="$AGENTS_DST/.toolkit-agents"
 BRIDGE_SRC="$ROOT/tools/penpot-mcp"
 BRIDGE_DST="$CLAUDE_DIR/tools/penpot-mcp"
-# What a whole bridge directory holds. Install copies every file it finds, so a
-# fifth travels on its own; these four are the evidence the directory arrived
-# whole, as skills/ and agents/ holding something is for the rest of the tree.
+# Install copies every file it finds, so a fifth travels on its own. These four
+# are the evidence the directory arrived whole.
 BRIDGE_FILES=(package.json package-lock.json start-bridge.sh check-bridge.sh)
 SCRATCH="/tmp/claude-$(id -u)"
 
@@ -64,8 +63,8 @@ PLUGINS=(
 # The retro recorder is the mirror image: async on every event, so it can neither
 # block a turn nor inject its stdout. The updater's stage half is the same shape,
 # because it is where the network lives; its apply half waits, because taking a
-# release is the one session start that has work to do. Neither runs at fork: a
-# fork inherits a context that is already running.
+# release is the one session start that has work to do, and it skips fork, which
+# inherits a context that is already running.
 WIRING='[
   {"event":"SessionStart","matcher":"startup|resume|clear|compact|fork",
    "hooks":[{"entry":"install.sh --sync"}]},

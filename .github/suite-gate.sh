@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# The suite, and the verdict over its summary. A skipped check is not a passed
-# one: the runner is meant to satisfy every check, so a skip is a broken runner
-# rather than a tolerated gap, and a gate that read a list of accepted skips
-# would stop meaning anything.
+# A skipped check is not a passed one: the runner is meant to satisfy every
+# check, so a skip is a broken runner rather than a tolerated gap, and a gate
+# that read a list of accepted skips would stop meaning anything.
 #
 #   .github/suite-gate.sh [command…]
 #

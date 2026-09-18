@@ -12,7 +12,8 @@ documentation/specs/install.md, Version identity.
 
 root exits 3 when git did not answer in time, 4 when git failed, with its
 message, and 5 when VERSION or REVISION is there and will not read, named with
-the reason. release exits 1 when it is neither. Anything else exits 2.
+the reason. release exits 1 when the text names no version at all. Anything
+else exits 2.
 """
 
 import os
@@ -84,7 +85,9 @@ def newer(a, b):
 
 
 def _line(root, name):
-    """The one line of a file at the root, None when it is not there."""
+    """At most 256 bytes, with one trailing newline stripped, so a file holding
+    more than a line never reads as the line it starts with. None when the file
+    is not there, and Unreadable when it is and will not read."""
     try:
         with open(os.path.join(root, name), encoding="utf-8") as f:
             content = f.read(256)

@@ -31,8 +31,7 @@ jobs:
       - name: The suite
         run: .github/suite-gate.sh
 
-      # Publishing, and the one line this run writes about what it did. Every
-      # decision it makes is in a script, because a decision only a workflow run
+      # Every decision is in a script, because a decision only a workflow run
       # can reach is one the suite cannot judge.
       - name: Publish
         env:

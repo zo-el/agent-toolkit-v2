@@ -605,8 +605,8 @@ inst "$UNLINKED" "$H" --sync
 same "and changes nothing, the link included" "$before" "$(snapshot "$H")"
 
 # ── the bridge ───────────────────────────────────────────────────────────────
-# Four files travel with the toolkit. What the bridge fetches at its first run is
-# the machine's, and no install goes near it.
+# What the bridge fetches at its first run is the machine's, and no install goes
+# near it.
 H="$(home bridge)"
 mkdir -p "$H/.claude/tools/penpot-mcp/node_modules/@penpot"
 printf 'fetched\n' >"$H/.claude/tools/penpot-mcp/node_modules/@penpot/marker"
@@ -1250,8 +1250,6 @@ while IFS=$'\037' read -r event matcher command; do
   esac
 done < <(wired "$SPACE" | grep -F 'agent-toolkit-run')
 
-# The updater is two halves with two shapes: one nobody waits on, where the
-# network lives, and one that waits, because taking a release has work to do.
 same "stage runs at every session start, whatever brought it about" "" \
   "$(wired "$SPACE" | awk -F'\037' '$3 ~ /update.sh stage/ { print $2 }')"
 same "and apply at the starts that rebuild a context, fork apart" "startup|resume|clear|compact" \

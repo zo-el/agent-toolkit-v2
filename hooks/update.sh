@@ -80,13 +80,11 @@ live_version() {
 }
 
 # ── the track ────────────────────────────────────────────────────────────────
-# latest, off, pin, or bad. WANTED carries the release name a pin names.
 TRACK_STATE=""
 WANTED=""
 
-# Surrounding blank space is not content, and a file with nothing in it says
-# nothing to misread, so it means what no file means. Everything else is
-# returned as written, for the finding that quotes it.
+# A file with nothing in it says nothing to misread, so it means what no file
+# means. Everything else is returned as written, for the finding that quotes it.
 track_line() {
   local raw
   raw="$(head -c 257 "$TRACK" 2>/dev/null)"
@@ -272,7 +270,6 @@ resolve_commit() {
   return 1
 }
 
-# Live, already staged, or marked bad: three ways there is nothing to download.
 # now ignores the bad mark, which is what a machine does after fixing the cause.
 judge_release() {
   local live
@@ -330,7 +327,7 @@ commit_is_on_main() {
   return 1
 }
 
-# Four things, all of them before the rename that makes a release staged.
+# All of it before the rename that makes a release staged.
 verify_and_unpack() {
   local carried declared
   if ! carried="$(archive_commit)"; then
@@ -377,7 +374,6 @@ in_dev_mode() {
   [ -n "$root" ] && version worktree "$root"
 }
 
-# 0 when the wanted release is here to install, 1 when there is nothing to do.
 run_cycle() {
   gh_is_ready || return 1
   resolve_release || return 1
@@ -407,10 +403,9 @@ releases_dir() {
   return 1
 }
 
-# Never inside the throttle, always for now, and always when the last check is
-# recorded in the future, so a clock that was wrong once does not stop a machine
-# checking for good.
-check_is_due() { # now
+# A last check recorded in the future counts as never having happened, so a clock
+# that was wrong once does not stop a machine checking for good.
+check_is_due() { # epoch seconds
   local last
   [ "$MODE" = now ] && return 0
   last="$(recorded .checked_at)"
@@ -434,9 +429,7 @@ do_stage() {
   record_write
 }
 
-# Only stage prunes, so no session start ever waits on a removal. Kept: the live
-# version directory, the wanted release, and the one live before the current one,
-# which is what a machine falls back to.
+# Only stage prunes, so no session start ever waits on a removal.
 prune() {
   local wanted previous entry real
   wanted="${WANTED:-$(recorded .wanted)}"
@@ -459,8 +452,7 @@ prune() {
   find "$RELEASES" -maxdepth 1 -name '.staging.*' -type d -mtime +0 -exec rm -rf {} + 2>/dev/null
 }
 
-# The check and the download, under whatever lock the caller took. TARGET names
-# the version directory to install from when there is one.
+# TARGET names the version directory to install from when there is one.
 check_and_stage() {
   local started
   started="$(now_seconds)"
@@ -525,9 +517,7 @@ listed() { # the record's field, the value
   jq -e --arg v "$2" "any($1[]?; . == \$v)" <<<"$RECORD_JSON" >/dev/null 2>&1
 }
 
-# Install from the staged folder, or leave the machine exactly as it is. Nothing
-# here is a report: whether anything is printed is the record's question, not
-# this run's.
+# Whether any of this is printed is the record's question rather than this run's.
 activate() {
   local staged line
   apply_wanted
@@ -556,9 +546,8 @@ activate() {
   while IFS= read -r line; do [ -z "$line" ] || LEAD+=("$line"); done <<<"$INSTALL_OUT"
 }
 
-# The install itself, and the bookkeeping either outcome leaves behind. 0 when
-# the stable link resolves to the directory afterwards, which is what went live
-# means.
+# 0 when the stable link resolves to the directory afterwards, which is what
+# went live means.
 INSTALL_OUT=""
 install_from() { # version directory
   local before after target
@@ -577,8 +566,7 @@ install_from() { # version directory
   return 0
 }
 
-# A release this machine will not install is said once, and the record holds
-# which, so a clone somebody is working in is told and then left alone.
+# A clone somebody is working in is told once and then left alone.
 announce() {
   local live
   [ -n "$WANTED" ] || return 0
@@ -623,7 +611,6 @@ report_behind() {
   LEAD+=("the wanted release is $WANTED and the live version is $live")
 }
 
-# Every finding the record holds about a run nobody was there to hear.
 report_record() {
   local text since
   text="$(recorded .failure.text)"

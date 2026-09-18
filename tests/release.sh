@@ -81,8 +81,7 @@ case "$(cat "$ROOT/CLAUDE.md")" in
 esac
 
 # ── the gate over the suite's summary ────────────────────────────────────────
-# A skipped check is not a passed one, and a suite that ran nothing is not one
-# either. The gate takes the command to judge, so these cases judge the gate.
+# The gate takes the command to judge, so these cases judge the gate itself.
 echo "suite-gate.sh"
 
 GATE_SH="$ROOT/.github/suite-gate.sh"
@@ -176,7 +175,6 @@ exit_is "a VERSION that is not three dot separated numbers fails the run" 1
 check "saying which file is wrong" "VERSION is missing, or is not three dot separated numbers" "$out"
 
 # ── the workflows ────────────────────────────────────────────────────────────
-# What only a run can prove is the run's own, but what the file says is not.
 echo "workflows"
 
 RELEASE_YML="$ROOT/.github/workflows/release.yml"

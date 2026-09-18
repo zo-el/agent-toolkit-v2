@@ -2531,10 +2531,7 @@ printf '%s\n' "${filled%%·*}" | grep -qE "$SHAPE" \
   || ok "and the shape turns down a line missing its fields"
 
 # Every bullet, not every dated one: a line that lost its date is what this
-# catches, and counting only dated lines would read it as an empty log. An
-# emptied log is where a retro leaves it, so no unshaped bullet is the verdict
-# rather than a reason to skip, and the fixture is what keeps it meaning
-# something over a file with nothing in it.
+# catches, and counting only dated lines would read it as an empty log.
 unshaped() { grep '^- ' "$1" | grep -cvE "$SHAPE"; }
 strays="$(unshaped "$ROOT/RETRO.md")"
 [ "$strays" -eq 0 ] && ok "every line in the log carries it" \

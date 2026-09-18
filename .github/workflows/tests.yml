@@ -2,8 +2,8 @@ name: Tests
 
 # The release workflow is the gate, and this is the same gate one step earlier:
 # nothing here can block a merge, since rulesets are not available on this plan,
-# but an author sees a failing suite before the merge rather than after it. The
-# suite runs in about four minutes against a budget of 2,000 a month.
+# but an author sees a failing suite before the merge rather than after it,
+# against a budget of 2,000 runner minutes a month.
 on:
   pull_request:
     branches: [main]
