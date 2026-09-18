@@ -412,12 +412,12 @@ wiring_entries() {
 # A script whose #! line cannot run exits 127 before doing anything, which
 # Claude Code treats as a hook that let the call through.
 cannot_start() { # path → the reason on stdout, or nothing
-  # A file that cannot be opened never runs the read, so first has to hold
-  # something: under set -u an unset one kills the subshell, and the caller
-  # reads the empty output as a script that starts fine.
+  # first is given a value because a read that never runs leaves it unset,
+  # which under set -u kills the subshell and leaves the caller reading the
+  # empty output as a script that starts fine.
   local first="" prog arg
+  [ -r "$1" ] || { echo "it cannot be read" && return; }
   IFS= read -r first <"$1" 2>/dev/null || true
-  [ -n "$first" ] || { echo "it cannot be read" && return; }
   case "$first" in
     "#!"*) ;;
     *) echo "it has no #! line" && return ;;
@@ -739,7 +739,6 @@ apply_settings() {
   reason="$(jq -r '.reason // ""' <<<"$result")"
   reason="${reason//"$HOME"\//\~/}"
   fix="$(jq -r '.fix // ""' <<<"$result")"
-  fix="${fix//"$HOME"\//\~/}"
   newest="$(jq -r '.newest_backup // ""' <<<"$result")"
   [ -z "$newest" ] || reason+=". The newest backup that parses is $(home_path "$newest"), from $(jq -r '.backup_when' <<<"$result")"
   saved="$(jq -r '.backup // ""' <<<"$result")"
