@@ -339,7 +339,18 @@ check "foreign env kept"      "keep"          "$(settings '.env.MY_VAR')"
 check "foreign key kept"      "dark"          "$(settings '.theme')"
 check "foreign hook kept"     "/usr/bin/true" "$(settings '[.hooks.PreToolUse[].hooks[].command] | join(" ")')"
 check "foreign dir kept"      "/my/own/dir"   "$(settings '.permissions.additionalDirectories | join(" ")')"
-check "the version directory is approved" "$ROOT" "$(settings '.permissions.additionalDirectories | join(" ")')"
+# The list is the agents' own working state. Approving ~/.claude would approve a
+# silent write to the credentials file, the transcripts, the plugin store and
+# settings.json itself, which is an agent rewriting its own permissions.
+approved="$(settings '.permissions.additionalDirectories | join(" ")')"
+check "the scratchpad is approved" "/tmp/claude-$(id -u)" "$approved"
+check "and the worktrees an agent is given" "$FAKE/.claude/worktrees" "$approved"
+check "and the directory the bridge fills" "$FAKE/.claude/tools" "$approved"
+check "a clone is approved, because the toolkit skill edits one" "$ROOT" "$approved"
+case " $approved " in
+  *" $FAKE/.claude "*) bad "~/.claude itself is not approved" "it is: $approved" ;;
+  *) ok "~/.claude itself is not approved" ;;
+esac
 check "credentials denied through ~/" "Read(~/.claude/.credentials.json)" "$(settings '.permissions.deny | join(" ")')"
 check "review plugin enabled" "true" "$(settings '.enabledPlugins["pr-review-toolkit@claude-plugins-official"]')"
 same "the stable link points at the version directory" "$ROOT" "$(readlink "$FAKE/.claude/agent-toolkit")"
@@ -649,6 +660,36 @@ inst "$BRIDGELESS" "$H"
 exit_is "nor does one whose bridge script cannot start" 1
 check "saying why" "✗ tools/penpot-mcp/start-bridge.sh cannot start: it has no #! line" "$(block Toolkit)"
 
+# A release directory is approved for nobody: a staged tree is one activation
+# away from running, and a live one is running already.
+H="$(home approved-release)"
+RELEASE_ROOT="$TMP/approved-release-root"
+copy_root "$RELEASE_ROOT"
+printf '1.5.0\n' >"$RELEASE_ROOT/VERSION"
+printf 'abc1234\n' >"$RELEASE_ROOT/REVISION"
+inst "$RELEASE_ROOT" "$H"
+approved="$(js "$H" '.permissions.additionalDirectories | join(" ")')"
+case " $approved " in
+  *" $RELEASE_ROOT "*) bad "a version directory that is not a work tree is approved for nobody" "it is: $approved" ;;
+  *) ok "a version directory that is not a work tree is approved for nobody" ;;
+esac
+check "while the agents' own directories still are" "$H/.claude/worktrees" "$approved"
+
+# The wholesale entry the previous generation wrote is retired at the next apply,
+# which is what every toolkit-owned value it stops setting gets.
+H="$(home approved-retire)"
+WHOLESALE="$TMP/wholesale-root"
+copy_root "$WHOLESALE"
+patch_desired "$WHOLESALE" '.desired.permissions.additionalDirectories += [$ENV.HOME]'
+inst "$WHOLESALE" "$H"
+check "a home that was installed with ~/.claude approved has it" "$H/.claude" \
+  "$(js "$H" '.permissions.additionalDirectories | join(" ")')"
+inst "$ROOT" "$H"
+case " $(js "$H" '.permissions.additionalDirectories | join(" ")') " in
+  *" $H/.claude "*) bad "and the next install takes it away" "it is still approved" ;;
+  *) ok "and the next install takes it away" ;;
+esac
+
 # ── version identity ─────────────────────────────────────────────────────────
 H="$(home version)"
 RELEASE="$TMP/release-v1.5.0"
@@ -938,8 +979,22 @@ check "and the next install from one without them removes all five" "[false,fals
 check "and asks for a restart for the plugin entry" "plugins changed" "$out"
 grep -q '|plugin uninstall' "$CLAUDE_CALLS" 2>/dev/null && bad "retiring a plugin entry uninstalls nothing" "$(cat "$CLAUDE_CALLS")" \
   || ok "retiring a plugin entry uninstalls nothing"
-check "including the replaced version directory from the approved directories" "null" \
-  "$(jq --arg x "$EXTRA" '.permissions.additionalDirectories | index($x)' "$H/.claude/settings.json")"
+# A clone is approved while it is the one installed, and dropped when another
+# takes over. Both roots are work trees, because a release is approved for nobody.
+H="$(home moved-clone)"
+for clone in "$TMP/clone-one" "$TMP/clone-two"; do
+  copy_root "$clone"
+  git -C "$clone" init -q && git -C "$clone" add -A >/dev/null 2>&1 && git -C "$clone" commit -q -m clone
+done
+inst "$TMP/clone-one" "$H"
+check "the clone installed from is approved" "$TMP/clone-one" "$(js "$H" '.permissions.additionalDirectories | join(" ")')"
+inst "$TMP/clone-two" "$H"
+approved="$(js "$H" '.permissions.additionalDirectories | join(" ")')"
+check "and installing from another approves that one" "$TMP/clone-two" "$approved"
+case " $approved " in
+  *" $TMP/clone-one "*) bad "while the one it replaced is dropped" "it is still approved" ;;
+  *) ok "while the one it replaced is dropped" ;;
+esac
 
 # Deleting the ledger recovers; corrupting it has to recover the same way, or
 # the ledger this run writes holds only what this run changed and nothing the
@@ -1080,7 +1135,7 @@ cat >"$H/.claude/settings.json" <<JSON
   "isolatePeerMachines": true,
   "permissions": {
     "defaultMode": "auto",
-    "additionalDirectories": ["$H/.claude", "/tmp/claude-$(id -u)", "$ROOT"],
+    "additionalDirectories": ["/tmp/claude-$(id -u)", "$H/.claude/worktrees", "$H/.claude/tools", "$ROOT"],
     "deny": ["Read(/$H/.claude/.credentials.json)", "Read(/$H/.claude/settings*.json)",
              "Read(/$H/.claude/backups/settings.json.*)", "Read(/$H/.claude/backups/.claude.json.backup.*)"]
   },

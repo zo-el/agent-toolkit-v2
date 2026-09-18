@@ -113,11 +113,19 @@ def run($caller; $entry): "\"$HOME/.claude/agent-toolkit-run\" \($caller) \($ent
   permissions: {
     # Safe because the guard hook fires in every permission mode.
     defaultMode: "auto",
-    # A path inside one is approved before any rule is consulted, which is what
-    # stops a background agent stalling on a prompt.
-    additionalDirectories: [$claude_dir, $scratch, $root],
-    # ~/.claude is approved wholesale above, and these files carry tokens. A
-    # deny governs the Read tool only, so jq and python still reach settings.
+    # The agents' own working state, and nothing else. A path inside one is
+    # approved before any rule is consulted, which is what stops a background
+    # agent stalling on a prompt, and it approves writing as readily as reading:
+    # ~/.claude holds the credentials file, the transcripts, the plugin store and
+    # settings.json, so approving the parent approves a silent write to each.
+    #
+    # The version directory only where somebody edits it. On a machine installed
+    # from a release the same entry would hand every agent the code that runs at
+    # the next session start.
+    additionalDirectories: ([$scratch, $worktrees, $tools] + (if $work_tree then [$root] else [] end)),
+    # A path left off the list above is a question; a deny is never, and these
+    # are worth never. It governs the Read tool only, so jq and python still
+    # reach settings.
     deny: [
       "Read(~/.claude/.credentials.json)",
       "Read(~/.claude/settings*.json)",
@@ -720,8 +728,12 @@ apply_agents() {
 }
 
 settings_request() {
-  local desired
-  desired="$(jq -n --arg claude_dir "$CLAUDE_DIR" --arg scratch "$SCRATCH" --arg root "$ROOT" \
+  local desired work_tree=false
+  # The same question dev mode asks, so a clone is approved and a release is not.
+  python3 "$ROOT/hooks/lib/version.py" worktree "$ROOT" >/dev/null 2>&1 && work_tree=true
+  desired="$(jq -n --arg scratch "$SCRATCH" --arg root "$ROOT" \
+    --arg worktrees "$CLAUDE_DIR/worktrees" --arg tools "$CLAUDE_DIR/tools" \
+    --argjson work_tree "$work_tree" \
     --arg statusline "$STATUSLINE_ENTRY" --argjson wiring "$WIRING" \
     --argjson plugins "$(printf '%s\n' "${PLUGINS[@]}" | jq -R 'split(" ")[0]' | jq -s .)" \
     "$DESIRED")" || return 1
