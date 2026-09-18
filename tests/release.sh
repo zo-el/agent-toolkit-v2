@@ -44,8 +44,15 @@ merged abc5 "$(printf '## Changelog\n\n\n')"
 notes abc5
 exit_is "and so is a section with nothing under it" 1
 notes abc6
-exit_is "as is a commit that reached main without a pull request" 1
+exit_is "a commit GitHub will not answer for is no answer at all" 1
 check "naming what GitHub would not say" "did not say which pull requests carried abc6" "$out"
+printf '[]\n' >"$AT_GH_STATE/pulls.abc9"
+notes abc9
+exit_is "and so is a commit that reached main without a pull request" 1
+check "saying that too" "abc9 reached main without a merged pull request" "$out"
+printf '[{"merged_at":null,"merge_commit_sha":"abca","body":"## Changelog\n\n- never merged"}]\n' >"$AT_GH_STATE/pulls.abca"
+notes abca
+exit_is "a pull request that was never merged carries nothing" 1
 
 # The section ends where the next heading begins, so the rest of a body is never
 # published as a changelog line.
@@ -65,11 +72,11 @@ check "saying what sets the repository" "GITHUB_REPOSITORY" "$out"
 # ── the rule that admits the block ───────────────────────────────────────────
 # The workflow reads a section CLAUDE.md has to allow, so the two are held
 # together here rather than by whoever remembers both.
-pr_rules="$(sed -n '/^Keep the PR itself short:/,/^$/p;/^- \*\*A `## Changelog` section\*\*/,+0p' "$ROOT/CLAUDE.md")"
+pr_rules="$(sed -n '/^Keep the PR itself short:/,/^## /p' "$ROOT/CLAUDE.md")"
 check "CLAUDE.md admits one changelog section in a PR body" '`## Changelog` section' "$pr_rules"
 check "and the single word none with it" "the single word \`none\`" "$pr_rules"
-case "$pr_rules" in
-  *"Nothing else: no change log"*) bad "and no longer forbids the block it admits" "the old line still stands" ;;
+case "$(cat "$ROOT/CLAUDE.md")" in
+  *"no change log"*) bad "and no longer forbids the block it admits" "the old line still stands" ;;
   *) ok "and no longer forbids the block it admits" ;;
 esac
 
@@ -102,6 +109,15 @@ exit_is "nor is one that said nothing at all" 1
 check "which the run says out loud" "nothing at all" "$(cat "$TMP/step")"
 summarised "1068 passed" 1
 exit_is "nor one that counted passes and still exited non-zero" 1
+check "and the suite's own output reaches the log whatever the verdict" "✓ a case" "$out"
+# Called with nothing to run it runs the suite, which is what the workflow does.
+check "the gate names tests/run.sh when it is given nothing to judge" "tests/run.sh" \
+  "$(sed -n '/^if \[ \$# -eq 0 \]/p' "$GATE_SH")"
+: >"$TMP/step"
+out="$(env -u GITHUB_STEP_SUMMARY "$GATE_SH" "$TMP/fake-suite" "7 passed" 2>&1)"
+rc=$?
+exit_is "and run by hand, with no summary to write to, it still judges" 0
+check "saying what it did on stdout" "the suite: 7 passed" "$out"
 
 # ── publishing ───────────────────────────────────────────────────────────────
 echo "publish-release.sh"
@@ -120,7 +136,7 @@ rm -f "$AT_GH_STATE/created"
 merged ffff1111 "$(printf 'goal\n\n## Changelog\n\n- the updater takes releases on its own\n')"
 run_publish ffff1111
 exit_is "a commit with entries and a version nobody has published is released" 0
-check "named for the version its own tree declares" "release create $DECLARED --target ffff1111" "$(created)"
+check "named for the version its own tree declares" "release create $DECLARED --repo zo-el/agent-toolkit-v2 --target ffff1111" "$(created)"
 check "and the run says what it did" "released $DECLARED at ffff111" "$(cat "$TMP/step")"
 
 rm -f "$AT_GH_STATE/created"
@@ -133,7 +149,8 @@ check "and says so" "says none" "$(cat "$TMP/step")"
 merged ffff3333 "$(printf 'no section here\n')"
 run_publish ffff3333
 exit_is "and a commit with no changelog section fails the run" 1
-check "loudly, because main moved without the gate" "carries no changelog section" "$(cat "$TMP/step")"
+check "loudly, because main moved without the gate, carrying the reader's own reason" \
+  "carries no ## Changelog section" "$(cat "$TMP/step")"
 
 # A version publishes once, and how the run ends depends on the commit the
 # release that already holds the name was cut from.
@@ -181,12 +198,17 @@ check "the same suite runs against a pull request" "$(printf 'on:\n  pull_reques
 # non-root user with npx within reach.
 runners="$(grep -h 'runs-on:' "$ROOT/.github/workflows"/*.yml | sort -u)"
 same "both workflows name the same runner image" "    runs-on: ubuntu-latest" "$runners"
+# A script a workflow runs has a #! line and the bit that lets it run. One that
+# is only ever sourced has neither, so the two cannot be confused.
 unrunnable=""
 for f in "$ROOT/.github"/*.sh; do
-  [ -x "$f" ] || unrunnable="$unrunnable ${f##*/}"
+  case "$(head -1 "$f")" in
+    "#!"*) [ -x "$f" ] || unrunnable="$unrunnable ${f##*/}" ;;
+    *) [ ! -x "$f" ] || unrunnable="$unrunnable ${f##*/}(sourced)" ;;
+  esac
 done
-[ -z "$unrunnable" ] && ok "every script a workflow runs is executable" \
-  || bad "every script a workflow runs is executable" "not executable:$unrunnable"
+[ -z "$unrunnable" ] && ok "every script a workflow runs is executable, and every library is not" \
+  || bad "every script a workflow runs is executable, and every library is not" "wrong:$unrunnable"
 
 # ── the guide's way in ───────────────────────────────────────────────────────
 # The one block a person copies out of INSTALL.md, run as it is written. A guide
@@ -222,3 +244,10 @@ case "$guide" in
     bad "and no longer says a version arrives by pulling the repo" "the old Updating section still stands" ;;
   *) ok "and no longer says a version arrives by pulling the repo" ;;
 esac
+
+# Both jobs run a pull request branch's own code, so neither is given more than
+# it needs and neither leaves a token in the checkout for that code to find.
+tests_yml="$(cat "$ROOT/.github/workflows/tests.yml")"
+check "the suite job may read the repository and no more" "$(printf 'permissions:\n  contents: read')" "$tests_yml"
+credentials="$(grep -hc 'persist-credentials: false' "$ROOT/.github/workflows"/*.yml | sort -u)"
+same "and neither checkout leaves its credentials behind" "1" "$credentials"

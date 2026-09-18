@@ -22,8 +22,9 @@ AGENTS_DST="$CLAUDE_DIR/agents"
 MANIFEST="$AGENTS_DST/.toolkit-agents"
 BRIDGE_SRC="$ROOT/tools/penpot-mcp"
 BRIDGE_DST="$CLAUDE_DIR/tools/penpot-mcp"
-# The Penpot bridge travels with the toolkit; what it fetches at its first run
-# does not, and outlives every version installed over it.
+# What a whole bridge directory holds. Install copies every file it finds, so a
+# fifth travels on its own; these four are the evidence the directory arrived
+# whole, as skills/ and agents/ holding something is for the rest of the tree.
 BRIDGE_FILES=(package.json package-lock.json start-bridge.sh check-bridge.sh)
 SCRATCH="/tmp/claude-$(id -u)"
 
@@ -181,19 +182,6 @@ restart_reasons() {
   local reasons
   mapfile -t reasons < <(printf '%s\n' "${RESTART[@]}" | LC_ALL=C sort -u)
   join ", " "${reasons[@]}"
-}
-
-shq() {
-  case "$1" in
-    "" | *[!A-Za-z0-9_./+:@%=-]*) printf "'%s'" "${1//\'/\'\\\'\'}" ;;
-    *) printf '%s' "$1" ;;
-  esac
-}
-home_path() {
-  case "$1" in
-    "$HOME"/*) printf '~/%s' "$(shq "${1#"$HOME"/}")" ;;
-    *) shq "$1" ;;
-  esac
 }
 
 install_command() {
@@ -830,11 +818,13 @@ apply_retro_marker() {
 # the dependencies and the build the bridge puts there at its first run are the
 # user's, and outlive every version installed over them.
 apply_bridge() {
-  local f mode
-  for f in "${BRIDGE_FILES[@]}"; do
-    if [ -x "$BRIDGE_SRC/$f" ]; then mode=755; else mode=644; fi
-    cmp -s "$BRIDGE_SRC/$f" "$BRIDGE_DST/$f" && [ "$(stat -c %a "$BRIDGE_DST/$f" 2>/dev/null)" = "$mode" ] && continue
-    act "bridge file ~/.claude/tools/penpot-mcp/$f" write_atomic "$BRIDGE_DST/$f" "$mode" <"$BRIDGE_SRC/$f"
+  local path f mode
+  for path in "$BRIDGE_SRC"/*; do
+    [ -f "$path" ] || continue
+    f="$(basename "$path")"
+    if [ -x "$path" ]; then mode=755; else mode=644; fi
+    cmp -s "$path" "$BRIDGE_DST/$f" && [ "$(stat -c %a "$BRIDGE_DST/$f" 2>/dev/null)" = "$mode" ] && continue
+    act "bridge file ~/.claude/tools/penpot-mcp/$f" write_atomic "$BRIDGE_DST/$f" "$mode" <"$path"
   done
 }
 

@@ -24,6 +24,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 1
+          # Publishing uses the token the Publish step is given, so the checkout
+          # leaves none behind for the suite's own code to find.
+          persist-credentials: false
 
       - name: The suite
         run: .github/suite-gate.sh

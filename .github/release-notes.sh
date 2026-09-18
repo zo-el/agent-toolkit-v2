@@ -13,12 +13,15 @@
 # Exit 2: it was called wrongly.
 set -uo pipefail
 
+# shellcheck source=/dev/null
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib.sh"
+
 REPO="${GITHUB_REPOSITORY:-}"
 commit="${1-}"
-if [ -z "$REPO" ] || [ -z "$commit" ] || [ $# -ne 1 ]; then
+called_for_a_commit "$@" || {
   echo "usage: GITHUB_REPOSITORY=<owner/repo> release-notes.sh <commit>" >&2
   exit 2
-fi
+}
 
 no_answer() { printf '%s\n' "$1" >&2; exit 1; }
 

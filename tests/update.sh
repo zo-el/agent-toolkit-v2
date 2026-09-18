@@ -15,6 +15,7 @@ mkdir -p "$USTUBS" "$AT_GH_STATE"
 cat >"$USTUBS/gh" <<'SH'
 #!/usr/bin/env bash
 state="$AT_GH_STATE"
+printf '%s\n' "$*" >>"$state/calls"
 missing() { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
 case "${1:-} ${2:-}" in
   "auth token")
@@ -78,13 +79,19 @@ says_nothing() { # name
 }
 reports() { # name, expected substring of additionalContext
   local said
+  # Always 0: Claude Code drops the plain stdout of a hook that exits non-zero,
+  # so a report that arrives with a status is a report nobody reads.
+  [ "$rc" = 0 ] || bad "$1" "apply exited $rc"
   said="$(jq -r '.hookSpecificOutput.additionalContext // ""' <<<"$out" 2>/dev/null)"
   check "$1" "$2" "$said"
 }
 staged() { printf '%s' "$UH/.claude/agent-toolkit-releases/$1"; }
+asked() { cat "$AT_GH_STATE/calls" 2>/dev/null; }
+forget_calls() { : >"$AT_GH_STATE/calls"; }
 # The commit every fixture release is cut from, and the one tests/release.sh
 # publishes against too.
 SHA=b5df2e05bbd4f4cfffb524e25d11282ecb186db3
+OLD=aaaaaaa1111111111111111111111111111aaaa
 
 # A release as GitHub serves one: a real version directory, tarred the way git
 # archives one, carrying in its pax header the commit a machine verifies against.
@@ -121,7 +128,8 @@ exit_is "an unknown argument exits 2" 2
 check "and prints usage on stderr" "usage: update.sh" "$out"
 same "and writes nothing" "$before" "$(snapshot "$UH")"
 HOME="$UH" "$UP" stage apply >/dev/null 2>&1
-exit_is "two arguments exit 2" "$?"
+rc=$?
+exit_is "two arguments exit 2" 2
 up --help
 check "--help prints the usage" "stage   find a release" "$out"
 exit_is "and exits 0" 0
@@ -159,7 +167,9 @@ up apply
 says_nothing "blank space around the line is not content"
 track ""
 up apply
+recheck
 says_nothing "and an empty file means what no file means"
+same "so a machine with an empty one still follows latest" "" "$(kept .failure.text)"
 track
 
 # ── the record ───────────────────────────────────────────────────────────────
@@ -184,7 +194,7 @@ up stage
 printf 'not json at all\n' >"$UH/.claude/agent-toolkit-staging.json"
 up stage
 up apply
-reports "a record that will not read is replaced, and the run says so" "did not read and was replaced"
+reports "a record that will not read is replaced, and the run says so" "! ~/.claude/agent-toolkit-staging.json did not read and was replaced"
 up apply
 says_nothing "and the next run says nothing, because it now reads"
 
@@ -205,7 +215,7 @@ up stage
 # week has gone by without one succeeding.
 keep ".first_check_at -= 604801 | .checked_at -= 604801 | del(.succeeded_at)"
 up apply
-reports "a week of checks with none succeeding is said out loud" "no update check has succeeded in seven days"
+reports "a week of checks with none succeeding is said out loud" "! no update check has succeeded in seven days"
 check "with the command that tries now" "update.sh now" "$out"
 keep ".succeeded_at = .checked_at + 604800"
 up apply
@@ -217,13 +227,13 @@ rm -f "$AT_GH_STATE/token" "$AT_GH_STATE/repo"
 
 recheck
 up apply
-reports "a machine whose gh holds no token is told so" "gh holds no token for github.com"
+reports "a machine whose gh holds no token is told so" "! the last update check failed: gh holds no token for github.com"
 check "with the command that signs it in" "gh auth login --hostname github.com" "$out"
 
 : >"$AT_GH_STATE/token"
 recheck
 up apply
-reports "a token that cannot see the repository is not the same as no release" "gh cannot see zo-el/agent-toolkit-v2"
+reports "a token that cannot see the repository is not the same as no release" "! the last update check failed: gh cannot see zo-el/agent-toolkit-v2"
 
 : >"$AT_GH_STATE/repo"
 recheck
@@ -236,7 +246,7 @@ says_nothing "at the session start after it, too"
 track v9.9.9
 recheck
 up apply
-reports "a track naming a release nobody published is a finding of its own" "names v9.9.9, which nobody has published"
+reports "a track naming a release nobody published is a finding of its own" "✗ ~/.claude/agent-toolkit-track names v9.9.9, which nobody has published"
 check "with the fix against the track" "edit ~/.claude/agent-toolkit-track to a release that exists" "$out"
 track
 
@@ -255,9 +265,12 @@ same "and the record names the release and its commit" "v1.5.0 $SHA" "$(kept .wa
 [ -z "$(find "$UH/.claude/agent-toolkit-releases" -maxdepth 1 -name '.staging.*' -print -quit)" ] \
   && ok "and no part-written folder is left behind" || bad "no part-written folder is left" "one was"
 
-before="$(file_id "$(staged v1.5.0)")"
+forget_calls
 recheck
-same "a release already unpacked is not fetched again" "$before" "$(file_id "$(staged v1.5.0)")"
+case "$(asked)" in
+  *tarball*) bad "a release already unpacked is not fetched again" "it downloaded it again" ;;
+  *) ok "a release already unpacked is not fetched again" ;;
+esac
 rm -rf "$(staged v1.5.0)"
 recheck
 [ -d "$(staged v1.5.0)" ] && ok "and one deleted by hand is staged again at the next check" \
@@ -283,16 +296,17 @@ refuses() { # release, name, expected finding text
 publish v1.5.0 0000000000000000000000000000000000000000 v1.5.0
 cp "$AT_GH_STATE/tarball.$SHA" "$AT_GH_STATE/tarball.0000000000000000000000000000000000000000"
 refuses v1.5.0 "an archive carrying another commit is refused, naming both" \
-  "names commit 0000000 and its archive carries b5df2e0"
+  "✗ v1.5.0 names commit 0000000 and its archive carries b5df2e0"
 
 publish v1.5.0 "$SHA" v1.5.0 diverged
 refuses v1.5.0 "a commit that is not on main is refused, naming the release" \
-  "v1.5.0 names commit b5df2e0, which is not on main"
+  "✗ v1.5.0 names commit b5df2e0, which is not on main"
 
 publish v1.5.0 "$SHA" v1.5.0
 rm -f "$AT_GH_STATE/compare.$SHA"
 refuses v1.5.0 "and GitHub not answering is an ordinary failure, not a claim about the release" \
-  "the last update check failed"
+  "! the last update check failed"
+
 case "$(jq -r '.hookSpecificOutput.additionalContext // ""' <<<"$out")" in
   *"not on main"*) bad "one unlucky call never says the repository was tampered with" "it did" ;;
   *) ok "one unlucky call never says the repository was tampered with" ;;
@@ -300,17 +314,90 @@ esac
 
 publish v1.6.0 "$SHA" v1.5.0
 refuses v1.6.0 "a release whose tree declares another version is refused, naming both" \
-  "v1.6.0 holds a tree declaring version v1.5.0·b5df2e0"
+  "✗ v1.6.0 holds a tree declaring version v1.5.0·b5df2e0"
 
 publish v1.5.0 "$SHA" v1.5.0
 printf 'not a tarball at all\n' >"$AT_GH_STATE/tarball.$SHA"
-refuses v1.5.0 "an archive that will not decompress stages nothing" "would not unpack"
+refuses v1.5.0 "an archive that will not open stages nothing" "! the last update check failed: v1.5.0 would not open as an archive"
+# Half an archive still opens and still says which commit it is, so a truncated
+# download is caught by the extraction rather than by the header.
 publish v1.5.0 "$SHA" v1.5.0
+python3 -c 'import sys
+whole = open(sys.argv[1], "rb").read()
+open(sys.argv[1], "wb").write(whole[: len(whole) // 2])' "$AT_GH_STATE/tarball.$SHA"
+refuses v1.5.0 "and one that will not decompress whole stages nothing either" "! the last update check failed: v1.5.0 would not unpack"
+publish v1.5.0 "$SHA" v1.5.0
+
+# ── what a release folder has to be ──────────────────────────────────────────
+# A release is what this machine staged, not whatever sits at the path. Anything
+# under ~/.claude is writable by every process running as the user, this session
+# included, so activation asks the folder to be what its name says.
+UH="$(home update-planted)"
+publish v1.5.0 "$SHA" v1.5.0
+recheck
+up apply
+mkdir -p "$(staged v9.9.9)"
+cp "$ROOT/install.sh" "$(staged v9.9.9)/install.sh"
+keep '.wanted = "v9.9.9"'
+before="$(readlink "$UH/.claude/agent-toolkit")"
+up apply
+same "a directory planted at a release name is not installed" "$before" "$(readlink "$UH/.claude/agent-toolkit")"
+reports "and the machine says it declares no version of its own" "v9.9.9 declares no version of its own"
+
+mkdir -p "$TMP/elsewhere"
+cp "$ROOT/install.sh" "$TMP/elsewhere/install.sh"
+keep '.wanted = $w' --arg w "../../../..$TMP/elsewhere"
+up apply
+same "and a wanted release that is a path rather than a name reaches nothing" "$before" "$(readlink "$UH/.claude/agent-toolkit")"
+says_nothing "saying nothing, because a record nobody wrote on purpose says nothing"
+
+# ── a home reached through a link ────────────────────────────────────────────
+# The stable link resolves every component of its target and $HOME does not, so
+# every path the updater compares has to be resolved on both sides.
+UH="$(home update-realpath)"
+LINKED="$TMP/linked-home"
+rm -f "$LINKED"
+ln -s "$UH" "$LINKED"
+publish v1.4.0 "$OLD" v1.4.0
+copy_root "$TMP/link-v1.4.0"
+printf '1.4.0\n' >"$TMP/link-v1.4.0/VERSION"
+printf '%s\n' "${OLD:0:7}" >"$TMP/link-v1.4.0/REVISION"
+PATH="$USTUBS:$PATH" HOME="$LINKED" "$TMP/link-v1.4.0/install.sh" >/dev/null 2>&1
+publish v1.5.0 "$SHA" v1.5.0
+out="$(PATH="$USTUBS:$PATH" HOME="$LINKED" "$UP" stage 2>&1)"
+out="$(PATH="$USTUBS:$PATH" HOME="$LINKED" "$UP" apply 2>&1)"
+said="$(jq -r '.hookSpecificOutput.additionalContext // ""' <<<"$out" 2>/dev/null)"
+case "$said" in
+  *"did not go live"*) bad "an activation through a linked home is not read as a failure" "$said" ;;
+  *) ok "an activation through a linked home is not read as a failure" ;;
+esac
+same "and the release is live" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+publish v1.6.0 ffffffff5555555555555555555555555555ffff v1.6.0
+out="$(PATH="$USTUBS:$PATH" HOME="$LINKED" "$UP" stage 2>&1)"
+[ -d "$(staged v1.5.0)" ] && ok "and pruning never takes the directory that is live" \
+  || bad "pruning keeps the live directory through a linked home" "it removed it"
+
+# ── a lock that cannot be taken at all ───────────────────────────────────────
+# Held by another run is an answer. Anything else stops updates, and a machine
+# that stops updating in silence never starts again.
+UH="$(home update-lockless)"
+publish v1.5.0 "$SHA" v1.5.0
+mkdir -p "$UH/.claude/agent-toolkit-releases"
+mkdir -p "$UH/.claude/agent-toolkit-releases/.stage.lock"
+up stage
+up apply
+reports "a lock the machine cannot take at all is recorded" "cannot be written, so no update can be serialised"
+check "with a fix that reinstalls the toolkit" "install.sh" "$out"
+up now
+check "and now says the same rather than blaming another session" "cannot be written" "$out"
+exit_is "and exits 1 having changed nothing" 1
+rmdir "$UH/.claude/agent-toolkit-releases/.stage.lock"
+up now
+exit_is "while the same machine with the lock back takes the release" 0
 
 # ── applying ─────────────────────────────────────────────────────────────────
 # A session start takes the release that is waiting, or costs nothing at all.
 UH="$(home update-apply)"
-OLD=aaaaaaa1111111111111111111111111111aaaa
 publish v1.4.0 "$OLD" v1.4.0
 copy_root "$TMP/live-v1.4.0"
 printf '1.4.0\n' >"$TMP/live-v1.4.0/VERSION"
@@ -334,8 +421,10 @@ same "and the stamp is its version" "v1.5.0·${SHA:0:7}" "$(cat "$UH/.claude/age
 same "with the directory it moved off recorded, for pruning to keep" "$TMP/live-v1.4.0" "$(kept .previous)"
 reports "and install's own report travels with it" "agent-toolkit → $(staged v1.5.0)"
 
+forget_calls
 up apply
 says_nothing "the next session start says nothing, because this one was told"
+same "and apply asked GitHub for nothing, so no session start waits on the network" "" "$(asked)"
 # The folder is now both staged and live, which is the case that must cost no
 # install at all: a missing skill link is what an install would put back.
 rm -f "$UH/.claude/skills/toolkit"
@@ -355,7 +444,7 @@ recheck
 rm -f "$(staged v1.6.0)/hooks/guard.sh"
 before="$(snapshot "$UH/.claude/skills")"
 up apply
-reports "a release that fails its root checks is a required finding" "v1.6.0 did not go live"
+reports "a release that fails its root checks is a required finding" "✗ v1.6.0 did not go live"
 reports "carrying install's own reason" "hooks/guard.sh is missing from the version directory"
 reports "and naming both versions" "the wanted release is v1.6.0 and the live version is v1.5.0"
 check "with the command that tries again" "update.sh now" "$out"
@@ -364,9 +453,13 @@ same "and nothing under skills changed" "$before" "$(snapshot "$UH/.claude/skill
 same "the version is marked bad" "v1.6.0" "$(kept '.bad[0]')"
 
 up apply
+reports "a version marked bad is not installed again, and is said at every start" \
+  "✗ v1.6.0 did not go live, so this machine is still on v1.5.0·${SHA:0:7}"
+check "with the command that tries it once the cause is dealt with" \
+  "~/.claude/agent-toolkit/hooks/update.sh now" "$out"
 case "$(jq -r '.hookSpecificOutput.additionalContext // ""' <<<"$out")" in
-  *"install.sh"*) bad "a version marked bad is not installed again" "it ran install again" ;;
-  *) ok "a version marked bad is not installed again" ;;
+  *"Changed"*) bad "a version marked bad runs no install" "install ran again" ;;
+  *) ok "a version marked bad runs no install" ;;
 esac
 
 # ── one activation at a time ─────────────────────────────────────────────────
@@ -451,7 +544,7 @@ up stage
 same "though the check still happens, so the machine knows what is out there" "v1.5.0" "$(kept .wanted)"
 up apply
 reports "and the clone is told once, naming both versions" \
-  "v1.5.0 is published and this machine runs a clone at $CLONE_VERSION"
+  "! v1.5.0 is published and this machine runs a clone at $CLONE_VERSION"
 check "with the way to pull it" "git -C $CLONE pull" "$out"
 reports "and the way to install the release over it" "update.sh now installs the release over it"
 same "the clone is still live" "$CLONE" "$(readlink "$UH/.claude/agent-toolkit")"
@@ -496,6 +589,41 @@ check "the download" "60 gh api repos/zo-el/agent-toolkit-v2/tarball/$SHA" "$bou
 check "the question of whether the commit is on main" "60 gh api repos/zo-el/agent-toolkit-v2/compare/main...$SHA" "$bounds"
 check "and the token read that comes before any of them" "10 gh auth token --hostname github.com" "$bounds"
 rm -f "$USTUBS/timeout"
+
+# ── rolling back ─────────────────────────────────────────────────────────────
+# A release marked a prerelease makes the one before it latest again, so a
+# machine converges downwards at its next check and says so.
+UH="$(home update-rollback)"
+publish v1.5.0 "$SHA" v1.5.0
+recheck
+up apply
+same "the machine takes the newer release first" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+publish v1.4.0 "$OLD" v1.4.0
+recheck
+up apply
+same "and when latest goes back, so does the machine" "$(staged v1.4.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+reports "saying which version it came down from" "v1.4.0 is live, from v1.5.0·${SHA:0:7}"
+same "and the stamp follows it down" "v1.4.0·${OLD:0:7}" "$(cat "$UH/.claude/agent-toolkit-version")"
+
+# ── nowhere to put it ────────────────────────────────────────────────────────
+# The state a machine reaches on its own when a disk fills, and the fix it is
+# given for it.
+UH="$(home update-nowhere)"
+publish v1.5.0 "$SHA" v1.5.0
+mkdir -p "$UH/.claude/agent-toolkit-releases"
+chmod a-w "$UH/.claude/agent-toolkit-releases"
+if [ "$(id -u)" -ne 0 ]; then
+  up stage
+  up apply
+  reports "a releases directory that cannot be written is recorded" "! ~/.claude/agent-toolkit-releases cannot be written"
+  check "with the command that opens it" "chmod u+rwx ~/.claude/agent-toolkit-releases" "$out"
+  up now
+  exit_is "and now says the same and exits 1" 1
+  check "printing the reason" "cannot be written" "$out"
+else
+  skip "a releases directory that cannot be written" "running as root, which writes into any directory"
+fi
+chmod u+rwx "$UH/.claude/agent-toolkit-releases"
 
 # ── pruning ──────────────────────────────────────────────────────────────────
 # Three directories are worth keeping: the one that is live, the one that is

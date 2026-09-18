@@ -32,6 +32,7 @@ STALE=604800
 STAGE_SECONDS=300
 
 UPDATE_NOW="~/.claude/agent-toolkit/hooks/update.sh now"
+INSTALL_AGAIN="~/.claude/agent-toolkit/install.sh"
 
 usage() {
   cat <<'EOF'
@@ -51,9 +52,24 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 now_seconds() { date -u +%s; }
 
-version() { python3 "$ROOT/hooks/lib/version.py" "$@" 2>/dev/null; }
+# version.py prints the reason it could not answer on stdout, so a caller that
+# read stdout without the status would take that sentence for a version and go on
+# reinstalling a machine that is already where it should be.
+version() { # version.py arguments → its answer, or nothing when it did not answer
+  local out
+  out="$(python3 "$ROOT/hooks/lib/version.py" "$@" 2>/dev/null)" && printf '%s' "$out"
+}
 
-live_root() { (cd "$STABLE" 2>/dev/null && pwd -P); }
+# One program answers every version question, so a machine where it cannot run is
+# told that, rather than told its own track file and its own releases are wrong.
+version_reader_works() { version release v1.0.0 >/dev/null; }
+
+# Every path the updater compares goes through this, because the stable link
+# resolves every component of its target and $HOME does not: a home reached
+# through a symlink would otherwise make each comparison read as a difference.
+real_path() { (cd "$1" 2>/dev/null && pwd -P); }
+
+live_root() { real_path "$STABLE"; }
 
 # Nothing behind the stable link is not the working directory: a hook runs in a
 # project, which may well be a git work tree with a VERSION of its own.
@@ -121,9 +137,10 @@ record_set() { # jq filter, then jq arguments
 }
 
 record_write() {
-  local tmp="$RECORD.$$"
+  local tmp
   [ "$RECORD_DIRTY" -eq 1 ] || return 0
   mkdir -p "$CLAUDE_DIR" 2>/dev/null || return 1
+  tmp="$(mktemp "$CLAUDE_DIR/.agent-toolkit-staging.XXXXXX" 2>/dev/null)" || return 1
   printf '%s\n' "$RECORD_JSON" >"$tmp" 2>/dev/null && mv -T "$tmp" "$RECORD" 2>/dev/null && return 0
   rm -f "$tmp"
   return 1
@@ -137,12 +154,26 @@ record_failure() { # severity, text, fix
 }
 
 # ── locks ────────────────────────────────────────────────────────────────────
-# The updater's own, so staging never delays an install. flock missing is a
-# required finding of install's own requirement list, which is where it belongs:
-# a second report of it at every session start would say nothing new.
+# The updater's own locks, so staging never delays an install and no session
+# start waits out another session's activation. A lock held by another run is an
+# answer; anything else is a failure, and reading the two as one would leave a
+# machine that cannot lock at all updating in silence for good.
+LOCK_PROBLEM=""
+
+lock_is_takeable() { # the lock file
+  LOCK_PROBLEM=""
+  have flock || { LOCK_PROBLEM="flock is not on PATH, so no update can be serialised"; return 1; }
+  : >>"$1" 2>/dev/null && return 0
+  LOCK_PROBLEM="${1/#$HOME/\~} cannot be written, so no update can be serialised"
+  return 1
+}
+
 take_stage_lock() {
-  : >>"$RELEASES/.stage.lock" 2>/dev/null || return 1
-  exec 8<"$RELEASES/.stage.lock" 2>/dev/null || return 1
+  lock_is_takeable "$RELEASES/.stage.lock" || return 1
+  exec 8<"$RELEASES/.stage.lock" 2>/dev/null || {
+    LOCK_PROBLEM="~/.claude/agent-toolkit-releases/.stage.lock cannot be opened"
+    return 1
+  }
   flock -n 8 2>/dev/null
 }
 
@@ -166,11 +197,16 @@ gh_read() { # api arguments → 0 with the body in $WORK/body
 
 body_field() { jq -r "$1 // empty" "$WORK/body" 2>/dev/null; }
 
+gh_gave_no_answer() {
+  record_failure advisory "the last update check failed: $GH_ERROR" ""
+  return 1
+}
+
 # gh is the whole of the machine's reach, so a machine without it, or without a
 # token, is told rather than left checking nothing in silence.
 gh_is_ready() {
   have gh || {
-    record_failure advisory "the last update check failed: gh is not on PATH" "~/.claude/agent-toolkit/install.sh"
+    record_failure advisory "the last update check failed: gh is not on PATH" "$INSTALL_AGAIN"
     return 1
   }
   timeout 10 gh auth token --hostname github.com >/dev/null 2>&1 && return 0
@@ -180,10 +216,9 @@ gh_is_ready() {
 
 # ── the cycle ────────────────────────────────────────────────────────────────
 COMMIT=""
-TARGET=""        # the version directory now should install from
+TARGET=""
 STAGE_REASON=""  # what now prints when there is nothing to install
-PREVIOUS_ROOT="" # the version directory live before an activation moved off it
-ACTIVATED=0      # this run installed a release and it went live
+ACTIVATED=0
 
 # A 404 is not an answer on its own: the repository is private, so a token that
 # cannot see it 404s exactly as a repository with no release does.
@@ -194,7 +229,7 @@ resolve_release() {
     *) path="repos/$REPO/releases/latest" ;;
   esac
   if ! gh_read "$path"; then
-    [ "$GH_404" -eq 1 ] || { record_failure advisory "the last update check failed: $GH_ERROR" ""; return 1; }
+    [ "$GH_404" -eq 1 ] || gh_gave_no_answer || return 1
     if ! gh_read "repos/$REPO"; then
       record_failure advisory "the last update check failed: gh cannot see $REPO" "$GH_LOGIN"
       return 1
@@ -222,12 +257,12 @@ resolve_release() {
 resolve_commit() {
   local kind
   gh_read "repos/$REPO/git/ref/tags/$WANTED" \
-    || { record_failure advisory "the last update check failed: $GH_ERROR" ""; return 1; }
+    || gh_gave_no_answer || return 1
   COMMIT="$(body_field .object.sha)"
   kind="$(body_field .object.type)"
   if [ "$kind" = tag ]; then
     gh_read "repos/$REPO/git/tags/$COMMIT" \
-      || { record_failure advisory "the last update check failed: $GH_ERROR" ""; return 1; }
+      || gh_gave_no_answer || return 1
     COMMIT="$(body_field .object.sha)"
   fi
   case "$COMMIT" in
@@ -242,7 +277,7 @@ resolve_commit() {
 judge_release() {
   local live
   live="$(live_version)"
-  if [ -n "$live" ] && [ "$(version release "$live")" = "$WANTED" ]; then
+  if [ -n "$live" ] && [ "$(version release "$live")" = "$WANTED" ] && ! in_dev_mode; then
     TARGET="$(live_root)"
     STAGE_REASON="$WANTED is already the live version"
     return 1
@@ -252,7 +287,7 @@ judge_release() {
     STAGE_REASON="$WANTED is already unpacked and waiting for the next session start"
     return 1
   fi
-  if [ "$MODE" != now ] && jq -e --arg v "$WANTED" 'any(.bad[]?; . == $v)' <<<"$RECORD_JSON" >/dev/null 2>&1; then
+  if [ "$MODE" != now ] && listed .bad "$WANTED"; then
     STAGE_REASON="$WANTED did not install here and is not tried again until the wanted release changes"
     return 1
   fi
@@ -266,20 +301,30 @@ download() {
   return 1
 }
 
-# The commit id a git archive carries, in its pax global header.
+# The commit id a git archive carries, in its pax global header. Non-zero when
+# the file will not open at all, which is a question nobody answered rather than
+# an archive carrying the wrong commit.
 archive_commit() {
-  python3 -c 'import sys, tarfile; print(tarfile.open(sys.argv[1]).pax_headers.get("comment", ""))' \
-    "$WORK/archive.tgz" 2>/dev/null
+  python3 -c '
+import sys
+import tarfile
+
+try:
+    archive = tarfile.open(sys.argv[1])
+except Exception as reason:
+    print(reason, file=sys.stderr)
+    sys.exit(1)
+print(archive.pax_headers.get("comment", ""))' "$WORK/archive.tgz" 2>"$WORK/tar.err"
 }
 
 # On main, meaning the head of it or an ancestor of it. GitHub not answering is
 # an ordinary failure: one unlucky call must never tell the user their
 # repository has been tampered with.
 commit_is_on_main() {
-  gh_read "repos/$REPO/compare/main...$COMMIT" \
-    || { record_failure advisory "the last update check failed: $GH_ERROR" ""; return 1; }
+  gh_read "repos/$REPO/compare/main...$COMMIT" || gh_gave_no_answer || return 1
   case "$(body_field .status)" in
     identical | behind) return 0 ;;
+    "") GH_ERROR="GitHub did not say whether ${COMMIT:0:7} is on main"; gh_gave_no_answer; return 1 ;;
   esac
   record_failure required "$WANTED names commit ${COMMIT:0:7}, which is not on main, so nothing was installed" ""
   return 1
@@ -288,17 +333,23 @@ commit_is_on_main() {
 # Four things, all of them before the rename that makes a release staged.
 verify_and_unpack() {
   local carried declared
-  if ! mkdir -p "$WORK/root" || ! tar -xzf "$WORK/archive.tgz" -C "$WORK/root" --strip-components=1 2>"$WORK/tar.err"; then
-    record_failure advisory "the last update check failed: $WANTED would not unpack: $(one_line <"$WORK/tar.err")" ""
+  if ! carried="$(archive_commit)"; then
+    record_failure advisory "the last update check failed: $WANTED would not open as an archive: $(one_line <"$WORK/tar.err")" ""
     return 1
   fi
-  carried="$(archive_commit)"
   if [ "$carried" != "$COMMIT" ]; then
     record_failure required "$WANTED names commit ${COMMIT:0:7} and its archive carries ${carried:0:7}, so nothing was installed" ""
     return 1
   fi
   commit_is_on_main || return 1
-  printf '%s\n' "${COMMIT:0:7}" >"$WORK/root/REVISION" || return 1
+  if ! mkdir -p "$WORK/root" || ! tar -xzf "$WORK/archive.tgz" -C "$WORK/root" --strip-components=1 2>"$WORK/tar.err"; then
+    record_failure advisory "the last update check failed: $WANTED would not unpack: $(one_line <"$WORK/tar.err")" ""
+    return 1
+  fi
+  if ! printf '%s\n' "${COMMIT:0:7}" >"$WORK/root/REVISION"; then
+    record_failure advisory "the last update check failed: $WANTED could not be stamped with its revision" "df -h ~/.claude"
+    return 1
+  fi
   declared="$(version root "$WORK/root")"
   if [ "$(version release "$declared")" != "$WANTED" ]; then
     record_failure required "$WANTED holds a tree declaring $(if [ -n "$declared" ]; then printf 'version %s' "$declared"; else printf 'no version'; fi), so nothing was installed: installing it would leave this machine at a version that is still not the wanted one" ""
@@ -341,6 +392,11 @@ run_cycle() {
   verify_and_unpack || return 1
 }
 
+version_reader_failed() {
+  finding advisory user "the toolkit cannot read a version on this machine, so no release is checked for or installed" \
+    "$INSTALL_AGAIN"
+}
+
 # ── stage ────────────────────────────────────────────────────────────────────
 releases_dir() {
   local err
@@ -363,7 +419,6 @@ check_is_due() { # now
 }
 
 do_stage() {
-  local started
   if [ -z "${AGENT_TOOLKIT_STAGE_BOUNDED:-}" ] && have timeout; then
     AGENT_TOOLKIT_STAGE_BOUNDED=1 timeout -k 10 "$STAGE_SECONDS" "$ROOT/hooks/update.sh" stage
     return 0
@@ -372,7 +427,8 @@ do_stage() {
   case "$TRACK_STATE" in off | bad) return 0 ;; esac
   read_record
   releases_dir || { record_write; return 0; }
-  take_stage_lock || return 0
+  version_reader_works || { version_reader_failed; return 0; }
+  take_stage_lock || { record_lock_problem; return 0; }
   check_and_stage
   prune
   record_write
@@ -382,16 +438,20 @@ do_stage() {
 # version directory, the wanted release, and the one live before the current one,
 # which is what a machine falls back to.
 prune() {
-  local wanted previous entry
+  local wanted previous entry real
   wanted="${WANTED:-$(recorded .wanted)}"
+  # A run that never resolved a release does not know what to keep.
+  [ -n "$wanted" ] || return 0
   previous="$(recorded .previous)"
   for entry in "$RELEASES"/*; do
     [ -d "$entry" ] || continue
     [ "${entry##*/}" = "$wanted" ] && continue
-    [ "$entry" = "$previous" ] && continue
+    real="$(real_path "$entry")"
+    [ -n "$real" ] || continue
+    [ "$real" = "$previous" ] && continue
     # Read for each removal rather than once: another session can activate while
     # this loop runs, and the directory it moved to has to survive.
-    [ "$entry" = "$(live_root)" ] && continue
+    [ "$real" = "$(live_root)" ] && continue
     rm -rf "$entry"
   done
   # A part-written folder is a stage that was killed. A day is long enough that
@@ -406,6 +466,10 @@ check_and_stage() {
   started="$(now_seconds)"
   check_is_due "$started" || return 1
   record_set ".checked_at = $started | .first_check_at = (.first_check_at // $started)" || return 1
+  # Written now rather than only at the end: an async stage is killed at session
+  # teardown, and a check nobody recorded is a throttle and a staleness guard
+  # that never arm.
+  record_write
   workspace && run_cycle
 }
 
@@ -425,32 +489,65 @@ workspace() {
 RELOAD=0
 
 take_apply_lock() {
-  : >>"$RELEASES/.apply.lock" 2>/dev/null || return 1
-  exec 7<"$RELEASES/.apply.lock" 2>/dev/null || return 1
+  lock_is_takeable "$RELEASES/.apply.lock" || return 1
+  exec 7<"$RELEASES/.apply.lock" 2>/dev/null || {
+    LOCK_PROBLEM="~/.claude/agent-toolkit-releases/.apply.lock cannot be opened"
+    return 1
+  }
   flock -w 1 7 2>/dev/null
+}
+
+# A lock nobody else holds and this run still could not take is the machine's
+# problem, not a second session's, and it stops updates until someone acts.
+record_lock_problem() {
+  local text
+  [ -n "$LOCK_PROBLEM" ] || return 1
+  text="the last update check failed: $LOCK_PROBLEM"
+  finding advisory user "$text" "$INSTALL_AGAIN"
+  record_failure advisory "$text" "$INSTALL_AGAIN"
+  record_write
 }
 
 # apply makes no call of its own, so a machine following latest takes the release
 # the last check recorded.
 apply_wanted() {
-  [ "$TRACK_STATE" = pin ] || WANTED="$(recorded .wanted)"
+  local named
+  [ "$TRACK_STATE" = pin ] || {
+    named="$(recorded .wanted)"
+    # Through the same reading the track's line gets: a record is a file in a
+    # directory anything running as the user can write, and a name it was not
+    # asked for would resolve a path straight out of the releases directory.
+    [ "$(version release "$named")" = "$named" ] && WANTED="$named"
+  }
 }
 
-marked_bad() { jq -e --arg v "$1" 'any(.bad[]?; . == $v)' <<<"$RECORD_JSON" >/dev/null 2>&1; }
+listed() { # the record's field, the value
+  jq -e --arg v "$2" "any($1[]?; . == \$v)" <<<"$RECORD_JSON" >/dev/null 2>&1
+}
 
 # Install from the staged folder, or leave the machine exactly as it is. Nothing
 # here is a report: whether anything is printed is the record's question, not
 # this run's.
 activate() {
-  local staged before after out line
+  local staged line
   apply_wanted
   [ -n "$WANTED" ] || return 0
   staged="$RELEASES/$WANTED"
   [ -d "$staged" ] || return 0
-  marked_bad "$WANTED" && return 0
+  [ "$(version release "$(version root "$staged")")" = "$WANTED" ] || {
+    finding required user "~/.claude/agent-toolkit-releases/$WANTED declares no version of its own, so it was not installed" \
+      "rm -rf ~/.claude/agent-toolkit-releases/$(shq "$WANTED")"
+    return 0
+  }
   in_dev_mode && return 0
+  if listed .bad "$WANTED"; then
+    # Required, and said at every start: this machine is stuck until someone
+    # deals with install's own reason, which is not something to mention once.
+    finding required user "$WANTED did not go live, so this machine is still on $(live_version)" "$UPDATE_NOW"
+    return 0
+  fi
   version same "$(version root "$staged")" "$(live_version)" && return 0
-  take_apply_lock || return 0
+  take_apply_lock || { record_lock_problem; return 0; }
   if install_from "$staged"; then
     ACTIVATED=1
   else
@@ -464,11 +561,12 @@ activate() {
 # means.
 INSTALL_OUT=""
 install_from() { # version directory
-  local before after
+  local before after target
+  target="$(real_path "$1")"
   before="$(live_root)"
   INSTALL_OUT="$("$1/install.sh" 2>&1)"
   after="$(live_root)"
-  if [ "$after" != "$1" ]; then
+  if [ -z "$target" ] || [ "$after" != "$target" ]; then
     record_set '.bad = ((.bad // []) + [$v] | unique)' --arg v "$WANTED"
     return 1
   fi
@@ -476,6 +574,7 @@ install_from() { # version directory
   # moved is what records it, for pruning to keep one version to fall back to.
   [ "$before" = "$after" ] || record_set '.previous = $p' --arg p "$before"
   record_set '.bad = [.bad[]? | select(. != $v)]' --arg v "$WANTED"
+  return 0
 }
 
 # A release this machine will not install is said once, and the record holds
@@ -486,9 +585,9 @@ announce() {
   in_dev_mode || return 0
   live="$(live_version)"
   version newer "$WANTED" "$live" || return 0
-  jq -e --arg v "$WANTED" 'any(.announced[]?; . == $v)' <<<"$RECORD_JSON" >/dev/null 2>&1 && return 0
-  finding advisory user "$WANTED is published and this machine runs a clone at $live, which the updater never overwrites. $UPDATE_NOW installs the release over it" \
-    "git -C $(live_root) pull"
+  listed .announced "$WANTED" && return 0
+  finding advisory user "$WANTED is published and this machine runs a clone at $live, which the updater never overwrites. $UPDATE_NOW installs the release over it, and a track of $WANTED or of off settles it the other way" \
+    "git -C $(home_path "$(live_root)") pull"
   record_set '.announced = ((.announced // []) + [$v] | unique)' --arg v "$WANTED"
 }
 
@@ -528,7 +627,12 @@ report_behind() {
 report_record() {
   local text since
   text="$(recorded .failure.text)"
-  [ -z "$text" ] || finding "$(recorded .failure.severity)" user "$text" "$(recorded .failure.fix)"
+  # A severity the record does not hold is read as required: a finding nobody can
+  # grade is one nobody should be able to quieten by editing the file it came from.
+  [ -z "$text" ] || case "$(recorded .failure.severity)" in
+    advisory) finding advisory user "$text" "$(recorded .failure.fix)" ;;
+    *) finding required user "$text" "$(recorded .failure.fix)" ;;
+  esac
   [ "$(recorded .replaced)" != true ] \
     || finding advisory user "~/.claude/agent-toolkit-staging.json did not read and was replaced, so this machine has forgotten which releases it was already told about"
   # Measured from the first check this machine ever made, so a machine installed
@@ -540,12 +644,12 @@ report_record() {
 }
 
 do_apply() {
-  local required
+  local required reader=0
   judge_track
   [ "$TRACK_STATE" = off ] && return 0
   read_record
-  if [ "$TRACK_STATE" != bad ]; then
-    PREVIOUS_ROOT="$(live_root)"
+  version_reader_works && reader=1
+  if [ "$TRACK_STATE" != bad ] && [ "$reader" -eq 1 ]; then
     activate
     announce
     report_change
@@ -554,6 +658,7 @@ do_apply() {
   fi
   required="$(count required)"
   [ "$required" -eq 0 ] || MESSAGE+=("$(plural "$required" "update problem"). Ask Claude to fix it")
+  [ "$reader" -eq 1 ] || version_reader_failed
   hook_report SessionStart "agent-toolkit updates:" "$RELOAD"
   [ "$(recorded .replaced)" != true ] || record_set '.replaced = false'
   record_write
@@ -586,6 +691,11 @@ do_now() {
     print_findings
     return 1
   fi
+  if ! version_reader_works; then
+    version_reader_failed
+    print_findings
+    return 1
+  fi
   if ! releases_dir; then
     record_write
     report_record
@@ -593,7 +703,8 @@ do_now() {
     return 1
   fi
   if ! take_stage_lock; then
-    echo "another session is already downloading a release. Nothing changed."
+    record_lock_problem && print_findings \
+      || echo "another session is already downloading a release. Nothing changed."
     return 1
   fi
   check_and_stage
@@ -601,12 +712,19 @@ do_now() {
     record_write
     report_record
     print_findings
-    [ -z "$STAGE_REASON" ] || printf '%s. Nothing changed.\n' "$STAGE_REASON"
+    if [ -n "$STAGE_REASON" ]; then
+      printf '%s. Nothing changed.\n' "$STAGE_REASON"
+    elif [ ${#F_SEV[@]} -eq 0 ]; then
+      # now never exits without saying why: it is the command a person runs the
+      # moment updates stop working, and silence is the one answer that helps nobody.
+      echo "nothing could be fetched, and nothing recorded why. Nothing changed."
+    fi
     return 1
   fi
   if ! take_apply_lock; then
     record_write
-    echo "another session is already installing a release. Nothing changed."
+    record_lock_problem && print_findings \
+      || echo "another session is already installing a release. Nothing changed."
     return 1
   fi
   printf '%s is ready at %s. Installing it now.\n\n' "$WANTED" "$TARGET"

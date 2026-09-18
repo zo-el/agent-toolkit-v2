@@ -32,6 +32,22 @@ join() { # separator, items
 
 one_line() { tr '\n\t' '  ' | sed 's/  */ /g; s/^ //; s/ $//' | cut -c1-400; }
 
+# A fix is printed as a command the user runs as written, so a path with a space
+# in it has to survive being read back by a shell.
+shq() {
+  case "$1" in
+    "" | *[!A-Za-z0-9_./+:@%=-]*) printf "'%s'" "${1//\'/\'\\\'\'}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+home_path() {
+  case "$1" in
+    "$HOME"/*) printf '~/%s' "$(shq "${1#"$HOME"/}")" ;;
+    *) shq "$1" ;;
+  esac
+}
+
 json_str() {
   local s="$1"
   s="${s//\\/\\\\}" s="${s//\"/\\\"}" s="${s//$'\n'/\\n}" s="${s//$'\t'/\\t}" s="${s//$'\r'/}"

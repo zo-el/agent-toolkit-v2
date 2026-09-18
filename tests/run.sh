@@ -114,9 +114,22 @@ expect "downloading one is free"      silent "$(bash_payload 'gh release downloa
 expect "an unmethoded release read is free" silent \
   "$(bash_payload 'gh api repos/zo-el/agent-toolkit-v2/releases/latest --jq .tag_name')"
 expect "and an unmethoded ref read"   silent "$(bash_payload 'gh api repos/zo-el/agent-toolkit-v2/git/refs/tags/v1.0.0')"
-# A DELETE carries no field, so -X is the whole evidence that it mutates.
+# A DELETE carries no field, so -X is the whole evidence that it mutates. Both
+# flags take their value glued on as well as after a space, and gh's own docs
+# use both, so a pattern needing the space is one spelling away from letting a
+# deny through.
 expect "-X on a comment endpoint is still denied" deny \
   "$(bash_payload 'gh api -X DELETE repos/zo-el/agent-toolkit-v2/issues/comments/9')"
+expect "and glued to its method, which is the ordinary spelling" deny \
+  "$(bash_payload 'gh api -XDELETE repos/zo-el/agent-toolkit-v2/issues/comments/9')"
+expect "a glued field posts as the user too" deny \
+  "$(bash_payload 'gh api -XPOST repos/zo-el/agent-toolkit-v2/issues/1/comments -fbody=hi')"
+expect "a glued method on a release still asks" ask \
+  "$(bash_payload 'gh api -XDELETE repos/zo-el/agent-toolkit-v2/releases/9')"
+expect "and a lowercase one with it" ask \
+  "$(bash_payload 'gh api -X delete repos/zo-el/agent-toolkit-v2/git/refs/tags/v1.0.0')"
+expect "while a glued read is still free" silent \
+  "$(bash_payload 'gh api -XGET repos/zo-el/agent-toolkit-v2/releases/latest')"
 
 # ── attribution ──────────────────────────────────────────────────────────────
 # Absolute in CLAUDE.md, so the verdict is deny: there is nothing to approve.

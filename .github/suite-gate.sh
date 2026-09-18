@@ -12,12 +12,13 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-log="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/suite-gate.txt"
+# shellcheck source=/dev/null
+. "$ROOT/.github/lib.sh"
 
-say() {
-  printf '%s\n' "$1"
-  [ -z "${GITHUB_STEP_SUMMARY:-}" ] || printf '%s\n' "$1" >>"$GITHUB_STEP_SUMMARY"
-}
+# mktemp rather than a fixed name: a runner is shared, and a file of that name
+# belonging to somebody else would be what this printed as the suite's output.
+log="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/suite-gate.XXXXXX")"
+trap 'rm -f "$log"' EXIT
 
 if [ $# -eq 0 ]; then set -- "$ROOT/tests/run.sh"; fi
 "$@" >"$log" 2>&1
@@ -25,12 +26,12 @@ status=$?
 cat "$log"
 summary="$(tail -1 "$log" 2>/dev/null)"
 
-# A count that begins at zero is a suite that ran nothing, which is not a pass
-# either: jscpd and a bad path both exit 0 having read none of the tree.
 if [ "$status" -ne 0 ]; then
   say "no release: the suite exited $status, reporting \"${summary:-nothing at all}\""
   exit 1
 fi
+# A count that begins at zero is a suite that ran nothing, which is not a pass
+# either: jscpd and a bad path both exit 0 having read none of the tree.
 case "$summary" in
   [1-9]*' passed') say "the suite: $summary" ;;
   *)

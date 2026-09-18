@@ -622,9 +622,10 @@ done
   && ok "and leaves its scripts runnable" || bad "the bridge scripts are executable" "they are not"
 same "while its dependencies and its logs are left exactly as they were" "$untouched" \
   "$(snapshot "$H/.claude/tools/penpot-mcp/node_modules") $(cat "$H/.claude/tools/penpot-mcp/.pnpm-install.log")"
-before="$(file_id "$H/.claude/tools/penpot-mcp/package.json")"
+bridge_ids() { local f; for f in "$H"/.claude/tools/penpot-mcp/*; do printf '%s ' "$(file_id "$f")"; done; }
+before="$(bridge_ids)"
 inst "$ROOT" "$H"
-same "an install with the same files writes none of them again" "$before" "$(file_id "$H/.claude/tools/penpot-mcp/package.json")"
+same "an install with the same files writes none of them again" "$before" "$(bridge_ids)"
 printf 'edited\n' >"$H/.claude/tools/penpot-mcp/package.json"
 inst "$ROOT" "$H"
 cmp -s "$ROOT/tools/penpot-mcp/package.json" "$H/.claude/tools/penpot-mcp/package.json" \
@@ -1947,6 +1948,14 @@ wait "$holder" 2>/dev/null
 H="$(home missing-own-files)"
 inst "$ROOT" "$H"
 before="$(snapshot "$H")"
+for missing in hooks/lib/report.sh hooks/lib/requirements.sh; do
+  copy_root "$TMP/missing-root"
+  rm -f "$TMP/missing-root/$missing"
+  inst "$TMP/missing-root" "$H"
+  exit_is "a version directory without $missing exits 1" 1
+  check "saying which library it cannot start without" "$missing is missing from" "$out"
+done
+same "and neither of them changes anything either" "$before" "$(snapshot "$H")"
 for missing in hooks/launcher.sh hooks/lib/settings.py hooks/lib/version.py hooks/update.sh; do
   copy_root "$TMP/missing-root"
   rm -f "$TMP/missing-root/$missing"
