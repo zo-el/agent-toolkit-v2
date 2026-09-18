@@ -2,22 +2,44 @@
 
 Linux only.
 
-## 1. Get the repo
+## 1. Get the toolkit
 
-In your own terminal. The repo is private, so GitHub access comes first. These two commands need `git` and `gh`.
+In your own terminal. The repo is private, so GitHub access comes first, and both routes need `gh`.
 
 ```bash
 gh auth login --hostname github.com --git-protocol ssh --web
+```
+
+`gh auth login` can generate an SSH key and upload it for you.
+
+**To use the toolkit, fetch the latest release.** No clone, and no SSH key: this is also the way back when `~/.claude/agent-toolkit` points at nothing.
+
+```bash
+repo=zo-el/agent-toolkit-v2
+tag="$(gh api "repos/$repo/releases/latest" --jq .tag_name)"
+sha="$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.sha)"
+dir="$HOME/.claude/agent-toolkit-releases/$tag"
+mkdir -p "$dir"
+gh api "repos/$repo/tarball/$sha" | tar -xz -C "$dir" --strip-components=1
+printf '%s\n' "${sha:0:7}" >"$dir/REVISION"
+cd "$dir"
+```
+
+`REVISION` is half of what names a version, and the archive carries the other half. Without it the directory has no version, and the status line shows none. The updater takes over once install has run.
+
+**To work on the toolkit, clone it.** Installing from a clone is what puts a machine in dev mode, where updates leave it alone. This needs `git`.
+
+```bash
 git clone git@github.com:zo-el/agent-toolkit-v2.git ~/Documents/git-repo/agent-toolkit-v2
 ```
 
-`gh auth login` can generate an SSH key and upload it for you. The clone can live anywhere except `~/.claude/agent-toolkit`.
+The clone can live anywhere except `~/.claude/agent-toolkit`.
 
 An agent that already holds the repo starts at step 2.
 
 ## 2. Run the installer
 
-From the repo:
+From the directory step 1 left you in:
 
 ```bash
 ./install.sh
@@ -67,7 +89,25 @@ Spawning the `ui-developer` fetches `@playwright/mcp` into the npm cache, which 
 
 ## Updating
 
-Once a new version is in the repo, the next session start on the machine applies it and says when to restart. `./install.sh` applies it immediately.
+A release is found in the background at every session start and installed at the next session start or compaction. The report says when to restart, and that is the whole of it: nothing to run, and nothing to watch.
+
+On demand, whatever the six hour throttle says:
+
+```bash
+~/.claude/agent-toolkit/hooks/update.sh now
+```
+
+That is also how a machine installed from a clone takes a release instead. The clone is left on disk, untouched.
+
+`~/.claude/agent-toolkit-track` holds one line and is yours alone. Nothing in the toolkit writes it.
+
+| Line | What the machine follows |
+| ------------------- | ------------------------ |
+| absent, or `latest` | the release GitHub reports as latest |
+| `v1.5.0` | that release and no other |
+| `off` | nothing at all. It stops being told about releases, including that it is behind one |
+
+A machine running a clone is told once that a newer release exists, and then left alone: `git pull` is how it moves.
 
 ## Moving the repo
 

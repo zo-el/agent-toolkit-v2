@@ -1,39 +1,23 @@
 # The publishing half, sourced by tests/run.sh after tests/update.sh, whose
-# helpers these go on using. gh is a stub here too, so no case reaches GitHub and
-# none of them needs a pull request to exist anywhere.
+# helpers these go on using. The stub GitHub it built answers here too, so no
+# case reaches the network and none needs a pull request to exist anywhere.
 
 echo "release-notes.sh"
 
 NOTES="$ROOT/.github/release-notes.sh"
-export AT_PR_STATE="$TMP/pr-state"
-NSTUBS="$TMP/notes-stubs"
-mkdir -p "$NSTUBS" "$AT_PR_STATE"
-cat >"$NSTUBS/gh" <<'SH'
-#!/usr/bin/env bash
-[ "$1" = api ] || exit 1
-case "$2" in
-  */commits/*/pulls)
-    sha="${2#*/commits/}"
-    sha="${sha%/pulls}"
-    [ -s "$AT_PR_STATE/$sha" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
-    cat "$AT_PR_STATE/$sha" ;;
-  *) exit 1 ;;
-esac
-SH
-chmod +x "$NSTUBS/gh"
 
-# A merged pull request as GitHub reports it against the commit it landed.
+# The one stub GitHub tests/update.sh set up, asked about pull requests instead.
 merged() { # commit, body
-  python3 - "$AT_PR_STATE/$1" "$1" "$2" <<'PY'
+  python3 - "$AT_GH_STATE/pulls.$1" "$1" "$2" <<'JSON'
 import json
 import sys
 
 path, sha, body = sys.argv[1:]
 json.dump([{"merged_at": "2026-09-18T00:00:00Z", "merge_commit_sha": sha, "body": body}], open(path, "w"))
-PY
+JSON
 }
 notes() { # commit → out, rc
-  out="$(PATH="$NSTUBS:$PATH" GITHUB_REPOSITORY=zo-el/agent-toolkit-v2 "$NOTES" "$@" 2>&1)"
+  out="$(PATH="$USTUBS:$PATH" GITHUB_REPOSITORY=zo-el/agent-toolkit-v2 "$NOTES" "$@" 2>&1)"
   rc=$?
 }
 
@@ -73,7 +57,7 @@ notes abc8
 same "and a deeper heading inside it does not" "$(printf -- '- first\n- second\n### Detail\n- third')" "$out"
 
 # env -u rather than an empty value: a runner sets this, and the suite runs there.
-out="$(PATH="$NSTUBS:$PATH" env -u GITHUB_REPOSITORY "$NOTES" abc1 2>&1)"
+out="$(PATH="$USTUBS:$PATH" env -u GITHUB_REPOSITORY "$NOTES" abc1 2>&1)"
 rc=$?
 exit_is "the reader called outside a workflow exits 2" 2
 check "saying what sets the repository" "GITHUB_REPOSITORY" "$out"
@@ -123,90 +107,53 @@ exit_is "nor one that counted passes and still exited non-zero" 1
 echo "publish-release.sh"
 
 PUBLISH="$ROOT/.github/publish-release.sh"
-export AT_RELEASE_STATE="$TMP/release-state"
-mkdir -p "$AT_RELEASE_STATE"
-cat >"$NSTUBS/gh" <<'SH'
-#!/usr/bin/env bash
-state="$AT_RELEASE_STATE"
-case "$1 $2" in
-  "release view")
-    [ -e "$state/release.$3" ] || exit 1
-    echo "$3" ;;
-  "release create")
-    printf '%s\n' "$*" >>"$state/created"
-    : >"$state/release.$3" ;;
-  "api "*)
-    shift
-    path="$1"
-    shift
-    filter="."
-    while [ $# -gt 0 ]; do
-      [ "$1" = --jq ] && { filter="$2"; shift; }
-      shift
-    done
-    case "$path" in
-      */commits/*/pulls)
-        sha="${path#*/commits/}"
-        sha="${sha%/pulls}"
-        [ -s "$AT_PR_STATE/$sha" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
-        jq -r "$filter" "$AT_PR_STATE/$sha" ;;
-      */git/ref/tags/*)
-        tag="${path##*/}"
-        [ -s "$state/tag.$tag" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
-        jq -r "$filter" "$state/tag.$tag" ;;
-      *) exit 1 ;;
-    esac ;;
-  *) exit 1 ;;
-esac
-SH
-chmod +x "$NSTUBS/gh"
 
-publish() { # commit → out, rc, with the run's summary in $TMP/step
+run_publish() { # commit → out, rc, with the run's summary in $TMP/step
   : >"$TMP/step"
-  out="$(PATH="$NSTUBS:$PATH" GITHUB_REPOSITORY=zo-el/agent-toolkit-v2 GITHUB_STEP_SUMMARY="$TMP/step" "$PUBLISH" "$@" 2>&1)"
+  out="$(PATH="$USTUBS:$PATH" GITHUB_REPOSITORY=zo-el/agent-toolkit-v2 GITHUB_STEP_SUMMARY="$TMP/step" "$PUBLISH" "$@" 2>&1)"
   rc=$?
 }
-created() { cat "$AT_RELEASE_STATE/created" 2>/dev/null; }
+created() { cat "$AT_GH_STATE/created" 2>/dev/null; }
 
 DECLARED="v$(head -1 "$ROOT/VERSION")"
-rm -f "$AT_RELEASE_STATE/created"
+rm -f "$AT_GH_STATE/created"
 merged ffff1111 "$(printf 'goal\n\n## Changelog\n\n- the updater takes releases on its own\n')"
-publish ffff1111
+run_publish ffff1111
 exit_is "a commit with entries and a version nobody has published is released" 0
 check "named for the version its own tree declares" "release create $DECLARED --target ffff1111" "$(created)"
 check "and the run says what it did" "released $DECLARED at ffff111" "$(cat "$TMP/step")"
 
-rm -f "$AT_RELEASE_STATE/created"
+rm -f "$AT_GH_STATE/created"
 merged ffff2222 "$(printf 'goal\n\n## Changelog\n\nnone\n')"
-publish ffff2222
+run_publish ffff2222
 exit_is "a pull request saying none succeeds without a release" 0
 same "publishing nothing" "" "$(created)"
 check "and says so" "says none" "$(cat "$TMP/step")"
 
 merged ffff3333 "$(printf 'no section here\n')"
-publish ffff3333
+run_publish ffff3333
 exit_is "and a commit with no changelog section fails the run" 1
 check "loudly, because main moved without the gate" "carries no changelog section" "$(cat "$TMP/step")"
 
 # A version publishes once, and how the run ends depends on the commit the
 # release that already holds the name was cut from.
-printf '{"object":{"sha":"ffff1111"}}\n' >"$AT_RELEASE_STATE/tag.$DECLARED"
-rm -f "$AT_RELEASE_STATE/created"
-publish ffff1111
+printf '{"object":{"sha":"ffff1111"}}\n' >"$AT_GH_STATE/ref.$DECLARED"
+rm -f "$AT_GH_STATE/created"
+run_publish ffff1111
 exit_is "the same commit again is a re-run, and succeeds" 0
 same "publishing nothing a second time" "" "$(created)"
 check "saying it is already out" "already published, at this commit" "$(cat "$TMP/step")"
 merged ffff4444 "$(printf 'goal\n\n## Changelog\n\n- something a user sees\n')"
-publish ffff4444
+run_publish ffff4444
 exit_is "a different commit under a published version fails" 1
 check "because the product changed and the bump was forgotten" \
   "already published at ffff111, and this commit is ffff444" "$(cat "$TMP/step")"
 
-rm -f "$AT_RELEASE_STATE/release.$DECLARED" "$AT_RELEASE_STATE/tag.$DECLARED"
+rm -f "$AT_GH_STATE/release.$DECLARED" "$AT_GH_STATE/ref.$DECLARED"
 BADVERSION="$TMP/bad-version-root"
 copy_root "$BADVERSION"
 printf '1.5\n' >"$BADVERSION/VERSION"
-out="$(PATH="$NSTUBS:$PATH" GITHUB_REPOSITORY=zo-el/agent-toolkit-v2 GITHUB_STEP_SUMMARY="$TMP/step" "$BADVERSION/.github/publish-release.sh" ffff4444 2>&1)"
+out="$(PATH="$USTUBS:$PATH" GITHUB_REPOSITORY=zo-el/agent-toolkit-v2 GITHUB_STEP_SUMMARY="$TMP/step" "$BADVERSION/.github/publish-release.sh" ffff4444 2>&1)"
 rc=$?
 exit_is "a VERSION that is not three dot separated numbers fails the run" 1
 check "saying which file is wrong" "VERSION is missing, or is not three dot separated numbers" "$out"
@@ -237,3 +184,38 @@ for f in "$ROOT/.github"/*.sh; do
   [ -x "$f" ] || bad "every script a workflow runs is executable" "${f##*/} is not"
 done
 ok "every script a workflow runs is executable"
+
+# ── the guide's way in ───────────────────────────────────────────────────────
+# The one block a person copies out of INSTALL.md, run as it is written. A guide
+# whose commands do not work is worse than no guide.
+echo "INSTALL.md"
+
+GUIDE_HOME="$(home guide)"
+sed -n '/To use the toolkit, fetch the latest release/,/^```$/p' "$ROOT/INSTALL.md" \
+  | sed -n '/^```bash$/,/^```$/p' | sed '1d;$d' >"$TMP/bootstrap.sh"
+check "the guide carries a block that fetches the latest release" "gh api" "$(cat "$TMP/bootstrap.sh")"
+publish v1.5.0 "$SHA" v1.5.0
+out="$(cd "$TMP" && PATH="$USTUBS:$PATH" HOME="$GUIDE_HOME" bash "$TMP/bootstrap.sh" 2>&1)"
+rc=$?
+exit_is "and running it exactly as written works" 0
+BOOTSTRAPPED="$GUIDE_HOME/.claude/agent-toolkit-releases/v1.5.0"
+same "leaving a version directory that holds one whole version" "v1.5.0·${SHA:0:7}" \
+  "$(python3 "$ROOT/hooks/lib/version.py" root "$BOOTSTRAPPED" 2>/dev/null)"
+out="$(PATH="$USTUBS:$PATH" HOME="$GUIDE_HOME" "$BOOTSTRAPPED/install.sh" 2>&1)"
+rc=$?
+exit_is "which install.sh then installs from, green" 0
+same "and the machine is stamped with the release it fetched" "v1.5.0·${SHA:0:7}" \
+  "$(cat "$GUIDE_HOME/.claude/agent-toolkit-version" 2>/dev/null)"
+
+guide="$(cat "$ROOT/INSTALL.md")"
+check "the guide names the track file" "~/.claude/agent-toolkit-track" "$guide"
+check "and each of its three forms" '| `off` | nothing at all.' "$guide"
+check "saying what off costs" "including that it is behind one" "$guide"
+check "it names update on demand" "hooks/update.sh now" "$guide"
+check "and that it is the way out of a clone" "is also how a machine installed from a clone takes a release" "$guide"
+check "what updating does on its own" "installed at the next session start or compaction" "$guide"
+case "$guide" in
+  *"Once a new version is in the repo, the next session start"*)
+    bad "and no longer says a version arrives by pulling the repo" "the old Updating section still stands" ;;
+  *) ok "and no longer says a version arrives by pulling the repo" ;;
+esac

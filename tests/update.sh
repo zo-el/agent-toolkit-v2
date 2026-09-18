@@ -10,24 +10,45 @@ export AT_GH_STATE="$TMP/gh-state"
 USTUBS="$TMP/update-stubs"
 mkdir -p "$USTUBS" "$AT_GH_STATE"
 
+# One stub GitHub for every case here and in tests/release.sh: it answers with
+# whatever files $AT_GH_STATE holds, and records what it was asked to publish.
 cat >"$USTUBS/gh" <<'SH'
 #!/usr/bin/env bash
 state="$AT_GH_STATE"
-[ "$1 $2" = "auth token" ] && { [ -e "$state/token" ] && { echo gho_stub; exit 0; }; exit 1; }
-[ "$1" = api ] || exit 1
-shift
-path=""
-for a in "$@"; do case "$a" in -*) ;; *) path="$a"; break ;; esac; done
 missing() { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
-answer() { [ -s "$state/$1" ] || missing; cat "$state/$1"; }
+case "${1:-} ${2:-}" in
+  "auth token")
+    [ -e "$state/token" ] || exit 1
+    echo gho_stub
+    exit 0 ;;
+  "release view")
+    [ -e "$state/release.$3" ] || exit 1
+    echo "$3"
+    exit 0 ;;
+  "release create")
+    printf '%s\n' "$*" >>"$state/created"
+    : >"$state/release.$3"
+    exit 0 ;;
+esac
+[ "${1:-}" = api ] || exit 1
+shift
+path="$1"
+shift
+filter="."
+while [ $# -gt 0 ]; do
+  [ "$1" = --jq ] && { filter="$2"; shift; }
+  shift
+done
+answer() { [ -s "$state/$1" ] || missing; jq -r "$filter" "$state/$1"; }
 case "$path" in
   */releases/latest) answer latest ;;
   */releases/tags/*) answer "release.${path##*/}" ;;
   */git/ref/tags/*) answer "ref.${path##*/}" ;;
   */git/tags/*) answer "annotated.${path##*/}" ;;
   */compare/main...*) answer "compare.${path##*...}" ;;
-  */tarball/*) answer "tarball.${path##*/}" ;;
-  repos/*) [ -e "$state/repo" ] || missing; echo '{"full_name":"stub"}' ;;
+  */commits/*/pulls) sha="${path#*/commits/}"; answer "pulls.${sha%/pulls}" ;;
+  */tarball/*) [ -s "$state/tarball.${path##*/}" ] || missing; cat "$state/tarball.${path##*/}" ;;
+  repos/*) [ -e "$state/repo" ] || missing; printf '{"full_name":"stub"}\n' | jq -r "$filter" ;;
   *) missing ;;
 esac
 SH
@@ -61,6 +82,9 @@ reports() { # name, expected substring of additionalContext
   check "$1" "$2" "$said"
 }
 staged() { printf '%s' "$UH/.claude/agent-toolkit-releases/$1"; }
+# The commit every fixture release is cut from, and the one tests/release.sh
+# publishes against too.
+SHA=b5df2e05bbd4f4cfffb524e25d11282ecb186db3
 
 # A release as GitHub serves one: a real version directory, tarred the way git
 # archives one, carrying in its pax header the commit a machine verifies against.
@@ -189,7 +213,6 @@ says_nothing "and a check that did succeed inside the week is silent"
 
 # ── checking ─────────────────────────────────────────────────────────────────
 UH="$(home update-cycle)"
-SHA=b5df2e05bbd4f4cfffb524e25d11282ecb186db3
 rm -f "$AT_GH_STATE/token" "$AT_GH_STATE/repo"
 
 recheck
