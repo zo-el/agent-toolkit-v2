@@ -52,6 +52,8 @@ An `incomplete:` line in the window means the recorder could not read something,
 
 Guards read their payload from stdin. Write it to a file and redirect — `hooks/guard.sh < payload.json`. Piping the payload inline puts the dangerous-looking text on the command line, where the guard flags it as data it can't distinguish from a real invocation.
 
+A hook that stopped firing is read for its wiring, its executable bit, and what `|| true` swallows, before its logic is re-read.
+
 ## Landing it
 
 Commit in the toolkit repo. Then ask the user to approve the push — other machines only get the change once it's on origin.

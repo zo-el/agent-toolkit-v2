@@ -233,19 +233,106 @@ esac
 # Glob and Grep are not tools this harness has, and an unknown name is dropped in
 # silence. Whole names, because BashOutput contains Bash, ListAgents contains
 # Agent, and neither searches. A duplicate key resolves to the last line.
-missing=""; unknown=""; blind=""
+missing=""; unknown=""; blind=""; armed=""; loose=""; barred=0; shellless=""; claimed=0
+bare=""; undeclared=""; declaring=0; ragged=""; unused=""
 for a in "$ROOT"/agents/*.md; do
   n="$(basename "$a")"
-  names=",$(grep '^tools:' "$a" | tail -1 | sed 's/^tools://; s/[[:space:]]//g'),"
+  # Frontmatter only. Claude Code reads the allowlist and the servers from
+  # there, so a block that slipped below the closing --- is declared to nobody.
+  front="$(awk 'NR == 1 && $0 == "---" { inside = 1; next } inside && $0 == "---" { exit } inside' "$a")"
+  names=",$(printf '%s\n' "$front" | grep '^tools:' | tail -1 | sed 's/^tools://; s/[[:space:]]//g'),"
   case "$names" in *,SendMessage,*) ;; *) missing="$missing $n" ;; esac
   case "$names" in *,Glob,* | *,Grep,*) unknown="$unknown $n" ;; esac
   case "$names" in *,Bash,* | *,Agent,*) ;; *) blind="$blind $n" ;; esac
+  if grep -qF 'Repo history is yours to read directly' "$a"; then
+    claimed=$((claimed + 1))
+    case "$names" in *,Bash,*) ;; *) shellless="$shellless $n" ;; esac
+  fi
+  # A trailing space turns a frontmatter key into one nothing reads, and every
+  # check below reads these keys.
+  printf '%s\n' "$front" | grep -qE '[[:space:]]$' && ragged="$ragged $n"
+  # Both YAML spellings of a server block, since either is a real declaration.
+  servers="$(printf '%s\n' "$front" | awk '/^mcpServers:$/ { inside = 1; next } inside && /^[^ ]/ { exit } inside')"
+  [ -n "$servers" ] && declaring=$((declaring + 1))
+  named=" "
+  for tool in $(printf '%s' "$names" | tr ',' ' '); do
+    case "$tool" in
+      mcp__*__?*)
+        server="${tool#mcp__}"; server="${server%%__*}"
+        case "$named" in *" $server "*) continue ;; esac
+        named="$named$server "
+        # Both spellings of an entry: a name with its config under it, and a
+        # bare name referring to a server the device config already holds.
+        printf '%s\n' "$servers" | grep -qE "^ +(- )?$server:?$" || undeclared="$undeclared $n:$server" ;;
+      mcp__*)
+        [ -n "$servers" ] && bare="$bare $n:$tool" ;;
+    esac
+  done
+  # A server nobody names connects at spawn and contributes nothing.
+  for declared in $(printf '%s\n' "$servers" | sed -n 's/^ *- *\([a-z][a-z-]*\):\{0,1\}$/\1/p'); do
+    case "$named" in *" $declared "*) ;; *) unused="$unused $n:$declared" ;; esac
+  done
+  case "$names" in *,Write,* | *,Edit,* | *,NotebookEdit,*) edits=1 ;; *) edits=0 ;; esac
+  case "$(grep -F "| \`${n%.md}\` |" "$ROOT/README.md")" in
+    *"write anything"*)
+      barred=$((barred + 1))
+      [ "$edits" = 1 ] && armed="$armed $n" ;;
+    # A cell naming what may not be written is role text for the barred
+    # direction, since one tool name covers every file either way, but the agent
+    # still writes something, so it still needs a tool that writes.
+    *write*) [ "$edits" = 0 ] && loose="$loose $n" ;;
+    *)
+      [ "$edits" = 0 ] && loose="$loose $n" ;;
+  esac
 done
 [ -z "$missing" ] && ok "every agent carries SendMessage" || bad "every agent carries SendMessage" "missing in:$missing"
 [ -z "$unknown" ] && ok "no agent asks for a tool the harness dropped" \
   || bad "no agent asks for a tool the harness dropped" "declared in:$unknown"
 [ -z "$blind" ] && ok "every agent can search a repo" \
   || bad "every agent can search a repo" "no Bash or Agent in:$blind"
+# README's table says what each agent cannot do and its tools line is what stops
+# it, read from the table so that rewording a definition cannot take it out of
+# scope. A table barring nobody is vacuous, so it fails. Only an unqualified
+# "write anything" is a claim the allowlist can answer: a cell naming what may
+# not be written, production source against tests, is role text, because one
+# name covers every file either way. Bash is not held here either, since a shell
+# writes as well as reads.
+if [ "$barred" -eq 0 ]; then
+  bad "an agent the README bars from writing declares no editing tool" "the table bars none of them"
+elif [ -n "$armed" ]; then
+  bad "an agent the README bars from writing declares no editing tool" "an editing tool in:$armed"
+else
+  ok "an agent the README bars from writing declares no editing tool"
+fi
+[ -z "$loose" ] && ok "and one it says nothing about carries the tools to write" \
+  || bad "and one it says nothing about carries the tools to write" "no editing tool in:$loose"
+# Where a definition declares its own servers, a bare server name on the tools
+# line was measured not to resolve: it is dropped in silence, leaving the agent
+# without the tools its role is built on. That measurement says nothing about a
+# server the device config holds, which is how the project manager reaches
+# Linear, so those are not read here. A fully qualified name is answered for
+# either way: the server behind it has to be declared in the file that names it.
+if [ "$declaring" -eq 0 ]; then
+  skip "an MCP tool is named in full" "no definition declares a server of its own"
+elif [ -n "$bare" ]; then
+  bad "an MCP tool is named in full" "a server name with no tool behind it in:$bare"
+else
+  ok "an MCP tool is named in full"
+fi
+[ -z "$undeclared" ] && ok "and the server behind it is declared beside it" \
+  || bad "and the server behind it is declared beside it" "no mcpServers entry for:$undeclared"
+[ -z "$unused" ] && ok "and every server declared has a tool that names it" \
+  || bad "and every server declared has a tool that names it" "nothing names:$unused"
+[ -z "$ragged" ] && ok "and no frontmatter key ends in whitespace" \
+  || bad "and no frontmatter key ends in whitespace" "trailing whitespace in:$ragged"
+# Repo history is read with a shell, so a definition claiming it declares one.
+if [ "$claimed" -eq 0 ]; then
+  bad "an agent that reads repo history directly carries a shell" "no definition claims it"
+elif [ -n "$shellless" ]; then
+  bad "an agent that reads repo history directly carries a shell" "no Bash in:$shellless"
+else
+  ok "an agent that reads repo history directly carries a shell"
+fi
 check "foreign env kept"      "keep"          "$(settings '.env.MY_VAR')"
 check "foreign key kept"      "dark"          "$(settings '.theme')"
 check "foreign hook kept"     "/usr/bin/true" "$(settings '[.hooks.PreToolUse[].hooks[].command] | join(" ")')"
@@ -641,7 +728,11 @@ wait "$holder" 2>/dev/null
 json_is "and an edit that cannot take it says so as an edit" \
   '.hookSpecificOutput.additionalContext | test("held the lock for 5 seconds, so this edit applied nothing")'
 
-cat >"$TMP/reread.py" <<'PY'
+# Every settings fixture drives lib/settings through the same request and differs
+# only in what it patches, so the preamble is written once and the body arrives
+# on stdin.
+settings_fixture() { # path
+  { cat <<'PY'
 import json
 import os
 import sys
@@ -655,6 +746,12 @@ request = {
     "settings": path, "ledger": os.path.join(home, "ledger.json"), "backups": os.path.join(home, "backups"),
     "desired": {"env": {"TOOLKIT_VALUE": "1"}}, "absent": [], "home": home, "root": "/r", "prev_root": "",
 }
+PY
+    cat
+  } >"$1"
+}
+
+settings_fixture "$TMP/reread.py" <<'PY'
 reads = []
 
 
@@ -1589,21 +1686,7 @@ check "with neither value the user already held claimed as the toolkit's" "[]" \
 
 # The ledger written before the settings rename is what a value applied now
 # rests on, so a ledger write that fails after the rename loses nothing.
-cat >"$TMP/ledger-fails.py" <<'PY'
-import json
-import os
-import sys
-
-sys.path.insert(0, sys.argv[1])
-from lib import settings
-
-home = sys.argv[2]
-os.makedirs(home, exist_ok=True)
-path = os.path.join(home, "settings.json")
-request = {
-    "settings": path, "ledger": os.path.join(home, "ledger.json"), "backups": os.path.join(home, "backups"),
-    "desired": {"env": {"TOOLKIT_VALUE": "1"}}, "absent": [], "home": home, "root": "/r", "prev_root": "",
-}
+settings_fixture "$TMP/ledger-fails.py" <<'PY'
 real = settings.replace
 writes = []
 

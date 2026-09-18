@@ -37,6 +37,15 @@ Or restart it, when the report says so. Sign in if asked.
 
 Notifications are the `claude-notifications-go` plugin's own, and install holds no view on them. `/claude-notifications-go:settings` is where you choose which events reach you.
 
+## Penpot, for the ui-developer
+
+Optional, and separate from install: the `ui-developer` designs without it, from code and screenshots.
+
+- Node 22.
+- The bridge runs from its own directory, `~/.claude/tools/penpot-mcp`, started with `start-bridge.sh` there. `npx @penpot/mcp` does not work on a machine whose corepack looks for a `pnpm.cjs` that pnpm 12 no longer ships.
+- It serves the MCP endpoint at `http://localhost:4401/mcp` and the plugin manifest at `http://localhost:4400/manifest.json`.
+- Connecting the plugin, and keeping it open, is per session. The `ui-developer` prints those steps when its Penpot tools stop answering, so they live there rather than here.
+
 ## What install touches
 
 Only `~/.claude`, and Claude Code's plugins, which it fetches:
@@ -46,7 +55,7 @@ Only `~/.claude`, and Claude Code's plugins, which it fetches:
 - the toolkit's values in `~/.claude/settings.json`, with everything else kept and a backup in `~/.claude/backups` before each write
 - `~/.claude/CLAUDE.md`, replaced after a backup by one that imports the repo's `CLAUDE.md`
 
-It never runs `sudo`, installs a system package, or sets your git identity. `./install.sh --dry-run` prints every change it would make and writes nothing.
+Spawning the `ui-developer` fetches `@playwright/mcp` into the npm cache, which install itself does not. It never runs `sudo`, installs a system package, or sets your git identity. `./install.sh --dry-run` prints every change it would make and writes nothing.
 
 ## Exit codes
 

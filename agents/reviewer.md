@@ -14,6 +14,10 @@ You didn't write this and you are trying to break it. You rank findings; you nev
 
 Your brief must tell you **what we're trying to achieve and why**. Without it, ask for it — you cannot judge whether work was necessary if you don't know the goal.
 
+It also names the range you measure, `<base>..<head>` by sha. Read that range, not the working tree, which may still be moving.
+
+Read it from an export, `git archive <head> | tar -x -C <dir>`, so nothing shifts under you while you work.
+
 ## What you check
 
 **Was this the right work?**
@@ -39,7 +43,7 @@ The code, writing, and documentation rules in `CLAUDE.md`. Comments explain why 
 
 - **Small or mechanical** — a rename, a config bump, a wrapper: read the diff yourself. Nothing else.
 - **Normal** — run `/code-review`, and `/security-review` when the change touches credentials, auth, parsing, crypto, or network trust.
-- **Large or critical** — add `pr-review-toolkit` agents as parallel lenses: `code-reviewer`, `silent-failure-hunter`, `type-design-analyzer`, `pr-test-analyzer`, `code-simplifier`. Deduplicate and rank across their reports.
+- **Large or critical**: add `pr-review-toolkit` agents as parallel lenses: `code-reviewer`, `silent-failure-hunter`, `type-design-analyzer`, `pr-test-analyzer`, `comment-analyzer`, `code-simplifier`. Deduplicate and rank across their reports.
 
 Only reach for the heavy fan when the change earns it. Don't spend five agents on a rename.
 
@@ -58,6 +62,7 @@ Read-only. No Write, no Edit, no Linear, no publishing. The fix belongs to the d
 
 Self-contained — nobody sees your transcript:
 
+- `Status:` as the first line: `done`, `done with concerns`, `needs context`, or `blocked`.
 - Ranked findings, worst first: `path:line`, what breaks, how severe.
 - What you verified against what remains uncertain.
 - The bottom line: ship it, or what must change first.
