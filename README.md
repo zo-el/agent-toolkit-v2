@@ -8,19 +8,7 @@ The session is the CTO: it plans, delegates, verifies, and talks to me. Agents d
 
 ## Install
 
-```bash
-./install.sh          # preview first with: ./install.sh --dry-run
-```
-
-The installer enables two plugins but cannot install them. Once per machine:
-
-```bash
-claude plugin install pr-review-toolkit@claude-plugins-official --scope user
-```
-
-Notifications come from [claude-notifications-go](https://github.com/777genius/claude-notifications-go). Install it from its README, then `/claude-notifications-go:settings`. It fires when an agent finishes or needs you, and which of those reach you is its own setting.
-
-The checkout can live anywhere. Device config reaches it only through the `~/.claude/agent-toolkit` symlink, so moving it is one `./install.sh` from the new location. On another machine, `git pull` is the whole upgrade — the next session start re-links everything.
+Follow [`INSTALL.md`](INSTALL.md).
 
 ## What's here
 
@@ -29,8 +17,9 @@ The checkout can live anywhere. Device config reaches it only through the `~/.cl
 | `CLAUDE.md` | the agreement: the CTO loop, tasks, code and writing style, the gates |
 | `agents/` | architect · developer · reviewer · project-manager · researcher |
 | `skills/` | `backlog` · `toolkit` (change this repo) · `ui-review` (screenshot galleries) |
-| `hooks/` | the guard, the style check, the statusline, the task line, the retro recorder, the formatter, background process tracking |
-| `install.sh` | wiring and the doctor |
+| `hooks/` | the guard, the style check, the statusline, the task line, the retro recorder, the formatter |
+| `INSTALL.md` | how to install, and what install touches |
+| `install.sh` | the installer, and the doctor that runs at every session start |
 | `RETRO.md` | learnings written by hand, read alongside the retro digest |
 | `documentation/brief.md` | what this toolkit is for |
 
@@ -58,7 +47,8 @@ Two hooks gate a session. Both fire regardless of permission mode, inside subage
 
 [`hooks/guard.sh`](hooks/guard.sh) is the approval gate:
 
-- **denies** posting publicly as the user — PR and issue comments, review submissions.
+- **denies** posting publicly as the user: PR and issue comments, review submissions.
+- **denies** AI attribution in a commit or a pull request, alongside the `attribution` settings `install.sh` holds off.
 - **asks** before anything leaves the machine (push, PR, release, package publish), before Linear writes, before touching the device outside the workspace, and before the few git commands the reflog cannot undo.
 
 Everything else is silent. `permissions.defaultMode` is `auto` and `~/.claude`, the scratchpad, and this checkout are approved working directories, so an agent runs unattended instead of stalling on a prompt nobody is watching. `Read` is denied on the credentials and settings files, which carry API tokens.
@@ -97,7 +87,7 @@ It answers toolkit questions, not cost questions — every agent's `Retro:` line
 
 ## Statusline
 
-[`hooks/statusline.py`](hooks/statusline.py) shows: model · effort · context bar · lines changed · rate limits · tasks · background processes · branch and PR · directory · toolkit version.
+[`hooks/statusline.py`](hooks/statusline.py) shows: model · effort · context bar · lines changed · rate limits · tasks · branch and PR · directory · toolkit version.
 
 ```
 Opus 5 1M │ ⚡xhigh │ ▰▱▱▱▱▱▱▱ 18% 180k/1M │ +412/-96 │ ⏱ 63% 2h13m · 41% 3d2h │ ☰ 2/5 │ ⎇ main* #42 │ my-app │ ⬡ v10·12d438c
@@ -108,4 +98,4 @@ A segment with nothing to say takes no width, so the line stays short when littl
 - **`⏱ 63% 2h13m · 41% 3d2h`** — how much of each rate-limit window is used, and how long until it resets. The window's own length is deliberately not shown; a fixed `5h` label says nothing you can act on. Falls back to `5h` / `7d` labels only when the payload carries no reset time, since two bare percentages wouldn't say which is which.
 - **`☰ 2/5`** — tasks done out of open, from this session's own list. The platform clears the whole list once every task completes, so this only ever shows live work. A `?` means part of the list would not read, and the count is of what did; green is kept for a whole list with nothing left open.
 - **`⎇ main* #42`** — branch, dirty marker, and the open PR for it, coloured by review state.
-- **`⬡ v<count>·<sha>`** — the "are my changes applied?" light. A `⚠` means the repo has moved past the last install; a dim `?` means it couldn't be verified.
+- **`⬡ v<count>·<sha>`**: the "are my changes applied?" light. A `⚠` means the installed version directory is not at the version last applied; a dim `?` means that could not be verified.

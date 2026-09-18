@@ -511,6 +511,8 @@ HOOK_LABEL = re.compile(
 INTERPRETERS = frozenset(
     ("sh", "bash", "zsh", "dash", "env", "python", "python3", "node", "ruby", "perl")
 )
+# install.sh writes every toolkit hook as `<launcher> <caller> <entry point>`.
+LAUNCHER = "agent-toolkit-run"
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 ESCAPED_QUOTE = re.compile(r"\\+[\"']")
 # The colon is required. Without it "Retroactive correction: …" and a bold
@@ -673,15 +675,21 @@ def hook_label(command):
     """A label for a hook, from the only place a command names its script: the
     word it starts with, or the word after the interpreter that runs it.
 
-    `hookInfos[].command` is not always a command — in this store it sometimes
-    carries the user's prompt — and any rule that searches the whole string will
+    `hookInfos[].command` is not always a command. In this store it sometimes
+    carries the user's prompt, and any rule that searches the whole string will
     find the script a prompt happens to mention. A prompt does not begin with a
     script path; a hook command always does. The cost is a hook invoked as a
     bare executable, which reads as `unknown`.
+
+    A launcher command names its entry point after the caller, and the launcher
+    at the front is itself the proof that the word is a script.
     """
     tokens = str(command or "").split()
     if tokens and unquote(tokens[0]).rsplit("/", 1)[-1] in INTERPRETERS:
         tokens = tokens[1:]
+    if tokens and unquote(tokens[0]).rsplit("/", 1)[-1] == LAUNCHER:
+        entry = unquote(tokens[2]).rsplit("/", 1)[-1] if len(tokens) > 2 else ""
+        return entry if HOOK_LABEL.match(entry) else "unknown"
     return (script_name(tokens[0]) if tokens else None) or "unknown"
 
 

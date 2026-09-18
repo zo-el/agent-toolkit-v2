@@ -9,6 +9,8 @@ The toolkit is the instruction set every future session on every machine runs on
 
 Find the checkout with `readlink ~/.claude/agent-toolkit`.
 
+Run `install.sh` from that checkout only, never from a worktree or a copy: a full install points the device at the directory it runs from.
+
 ## Where a change goes
 
 | The change is… | It goes in… |
@@ -43,7 +45,7 @@ An `incomplete:` line in the window means the recorder could not read something,
 - **Skill added or renamed** — `ls -l ~/.claude/skills/<name>` shows the symlink. The session-start and on-edit hooks sync it automatically.
 - **Agent added or renamed** — agents are copied, not linked. Run `./install.sh`, then `ls ~/.claude/agents/`.
 - **Hook changed** — add the case to `tests/run.sh` and run the suite. All green before committing.
-- **Wiring changed** — `./install.sh --dry-run` shows the exact device-config diff. Then `./install.sh`.
+- **Wiring changed**: add the command's case to the launcher loop in `tests/install.sh`, which fails on any wired command it does not check. `./install.sh --dry-run` shows the exact device-config diff. Then `./install.sh`.
 - **Anything renamed** — grep the whole repo for the old name. README and `CLAUDE.md` are the usual stragglers.
 
 ## Probing a guard by hand
@@ -54,4 +56,4 @@ Guards read their payload from stdin. Write it to a file and redirect — `hooks
 
 Commit in the toolkit repo. Then ask the user to approve the push — other machines only get the change once it's on origin.
 
-On another machine, `git pull` is the whole upgrade. The next session start re-links skills and re-checks the wiring. A new machine is `git clone` plus `./install.sh`.
+On another machine, `git pull` brings the change in, and the next session start applies it and says when to restart. A new machine follows `INSTALL.md`.

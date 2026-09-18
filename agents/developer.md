@@ -57,7 +57,7 @@ Findings handed to you from an outside review run the same loop — fix, rebuild
 - Full edit — you are the one agent that writes application source.
 - No Linear. Read acceptance criteria from your brief or the task doc; if they look stale, say so instead of guessing.
 - Anything you spawn must not spawn further, and must finish before you return.
-- Stop every process you start. Long-running ones go through `~/.claude/agent-toolkit/hooks/bg.sh`.
+- Stop every process you start. Long-running ones go through Claude Code's own background mode.
 
 ## What you return
 
@@ -70,5 +70,5 @@ Self-contained — nobody sees your transcript:
 - The branch, the commits, and exactly what is ready to publish.
 - Anything you couldn't meet, and any decision you made that the spec left open.
 - `Comments:` comment lines added and removed across the branch, and what each surviving addition says that the code cannot. `Comments: +0/-6` is the normal answer.
-- `Reuse:` one line — what you searched for before adding a new helper or type, and what you found. `Reuse: none needed` when the change added no new function or type.
+- `Reuse:` one line naming what you searched for before adding a new helper or type, and what you found. `Reuse: none needed` when the change added no new function or type.
 - `Retro:` one line, or `Retro: none`. It is recorded, not transcribed.

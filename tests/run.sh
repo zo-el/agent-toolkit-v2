@@ -32,16 +32,16 @@ bash_payload() { # command, cwd
 tool_payload() { printf '{"tool_name":%s,"tool_input":{}}' "$(jq -Rn --arg t "$1" '$t')"; }
 
 # Both PreToolUse gates answer in the same shape, so one runner drives both and
-# $HOOK says which is under test. Payloads go through a file rather than a pipe:
+# $GATE names the one under test. Payloads go through a file rather than a pipe:
 # they name the very commands the guard flags, and a shell cannot tell a mention
 # from an invocation.
-HOOK="$ROOT/hooks/guard.sh"
-# The exit status and stderr are left in files: hook runs inside a command
+GATE="$ROOT/hooks/guard.sh"
+# The exit status and stderr are left in files: gate runs inside a command
 # substitution, so a variable it set would die with the subshell.
-hook() {
+gate() {
   printf '%s' "$1" > "$TMP/p.json"
-  "$HOOK" < "$TMP/p.json" 2> "$TMP/hook.err"
-  printf '%s' "$?" > "$TMP/hook.rc"
+  "$GATE" < "$TMP/p.json" 2> "$TMP/gate.err"
+  printf '%s' "$?" > "$TMP/gate.rc"
 }
 
 # No output at all is how a gate says "not my business".
@@ -52,9 +52,9 @@ decision() {
 
 expect() { # name, expected decision, payload
   local got rc err
-  got="$(decision "$(hook "$3")")"
-  rc="$(cat "$TMP/hook.rc" 2>/dev/null)"
-  err="$(cat "$TMP/hook.err" 2>/dev/null)"
+  got="$(decision "$(gate "$3")")"
+  rc="$(cat "$TMP/gate.rc" 2>/dev/null)"
+  err="$(cat "$TMP/gate.err" 2>/dev/null)"
   if [ "$got" != "$2" ]; then
     bad "$1" "expected $2, got $got"
   elif [ "$rc" != 0 ]; then
@@ -95,19 +95,106 @@ expect "linear write asks"            ask    "$(tool_payload 'mcp__linear__save_
 expect "linear delete asks"           ask    "$(tool_payload 'mcp__linear__delete_comment')"
 expect "non-linear mcp is free"       silent "$(tool_payload 'mcp__context7__query-docs')"
 
-# Without jq the guard must fail open rather than block every command. env -i so
-# it sees a bare environment, which is what a hook actually gets.
-stub_path "$TMP/nojq" bash grep sed awk cat printf
-printf '%s' "$(bash_payload 'git push')" > "$TMP/p.json"
-out="$(env -i PATH="$TMP/nojq" HOME="$TMP" "$ROOT/hooks/guard.sh" < "$TMP/p.json" 2>/dev/null)"
-[ -z "$out" ] && ok "fails open without jq" || bad "fails open without jq" "emitted a verdict: $out"
+# ── attribution ──────────────────────────────────────────────────────────────
+# Absolute in CLAUDE.md, so the verdict is deny: there is nothing to approve.
+# The forbidden strings are built from $session rather than typed whole, so no
+# line here holds both a writing command and a trailer the rule would refuse.
+session='Claude-Session'
+trailer="$session: https://claude.ai/code/session_01ABC"
+coauthor='Co-Authored-By: Claude <noreply@anthropic.com>'
+generated='🤖 Generated with [Claude Code](https://claude.com/claude-code)'
+commit_with() { printf 'git commit -m "feat: x\n\n%s"' "$1"; }
+heredoc() { printf "%s <<'MSG'\nfeat: x\n\n%s\nMSG" "$1" "$2"; }
+
+expect "a session trailer on a commit is denied" deny "$(bash_payload "$(commit_with "$trailer")")"
+expect "a Claude co-author line too"             deny "$(bash_payload "$(commit_with "$coauthor")")"
+expect "and the generated-with line"             deny "$(bash_payload "$(commit_with "$generated")")"
+expect "and a bare session URL"                  deny "$(bash_payload "$(commit_with 'see https://claude.ai/code/session_01ABC')")"
+expect "and the key with no URL behind it"       deny "$(bash_payload "$(commit_with "$session: 01ABC")")"
+expect "an amend that adds one"                  deny "$(bash_payload "$(printf 'git commit --amend -m "x\n\n%s"' "$trailer")")"
+expect "whatever the case and spacing"           deny "$(bash_payload "$(commit_with 'co-authored-by:Claude <x@y>')")"
+expect "a -C repo does not hide it"              deny "$(bash_payload "$(printf 'git -C /repo commit -q -m "x\n\n%s"' "$trailer")")"
+expect "a merge message carrying it"             deny "$(bash_payload "$(printf 'git merge --no-ff -m "x\n\n%s" feat/y' "$coauthor")")"
+expect "an annotated tag message"                deny "$(bash_payload "$(printf 'git tag -a v1 -m "v1\n\n%s"' "$trailer")")"
+expect "a PR body on create"                     deny "$(bash_payload "$(printf 'gh pr create --title x --body "goal\n\n%s"' "$trailer")")"
+expect "a PR body on edit"                       deny "$(bash_payload "$(printf 'gh pr edit 12 --body "%s"' "$trailer")")"
+expect "an inline heredoc message"               deny "$(bash_payload "$(heredoc 'git commit -F -' "$trailer")")"
+expect "a repo named before the pr subcommand"   deny "$(bash_payload "$(printf 'gh -R o/r pr create --body "%s"' "$trailer")")"
+
+# Neither the message nor the writing command has to come first, or be a whole
+# command of its own. Reading only the message meant a heredoc, a wrapper or a
+# condition anywhere ahead of the verb turned the rule off.
+expect "a heredoc written before the commit"     deny "$(bash_payload "$(printf 'cat <<EOF > notes.md\nnotes\nEOF\ngit commit -am "x\n\n%s"' "$coauthor")")"
+expect "a herestring before it"                  deny "$(bash_payload "$(printf 'cat <<<"x" && git commit -m "y\n%s"' "$trailer")")"
+expect "a commit inside an if condition"         deny "$(bash_payload "$(printf 'if git commit -m "x\n%s"; then echo ok; fi' "$trailer")")"
+expect "a negated commit"                        deny "$(bash_payload "$(printf '! git commit -m "x\n%s"' "$trailer")")"
+expect "a timed commit"                          deny "$(bash_payload "$(printf 'time git commit -m "x\n%s"' "$trailer")")"
+expect "a commit wrapped in env"                 deny "$(bash_payload "$(printf 'env X=1 git commit -m "x\n\n%s"' "$trailer")")"
+expect "a commit wrapped in bash -c"             deny "$(bash_payload "$(printf "bash -c 'git commit -m \"x\n%s\"'" "$coauthor")")"
+expect "a commit inside a backtick"              deny "$(bash_payload "$(printf '`git commit -m "x\n%s"`' "$trailer")")"
+expect "a commit on its own line"                deny "$(bash_payload "$(printf 'git add -A\ngit commit -m "x\n\n%s"' "$trailer")")"
+expect "a clean commit chained to a dirty PR"    deny "$(bash_payload "$(printf 'git commit -m "clean" && gh pr create --body "%s"' "$trailer")")"
+expect "a separator inside the subject"          deny "$(bash_payload "$(printf 'git commit -m "a & b\n\n%s"' "$trailer")")"
+expect "a pipe inside a PR body table"           deny "$(bash_payload "$(printf 'gh pr create --body "| a | b |\n\n%s"' "$trailer")")"
+
+# What bluntness costs, pinned so it stays a decision rather than a surprise.
+# Each of these is one command split in two, or one string built from a
+# variable, which is how this very block is written.
+expect "a fixture written beside a commit"       deny "$(bash_payload "$(printf "cat > fixture <<'EOF'\n%s\nEOF" "$(commit_with "$trailer")")")"
+expect "the same quoted inside a printf"         deny "$(bash_payload "printf '%s' '$(commit_with "$trailer")' > fixture")"
+expect "a grep for the words behind a commit"    deny "$(bash_payload "git commit -m 'feat: x' && grep -rn '$session:' .")"
+
+# A command that names no commit and no pull request is data, whatever it says.
+expect "grepping for the trailer is free"        silent "$(bash_payload "grep -rn '$trailer' .")"
+expect "printing it is free"                     silent "$(bash_payload "printf '%s\\n' '$coauthor'")"
+expect "reading history for the words is free"   silent "$(bash_payload 'git log -1 --format=%B | grep -i claude-session')"
+expect "and grepping a status for them"          silent "$(bash_payload "git status | grep commit '$session:'")"
+expect "a clean heredoc commit message"          silent "$(bash_payload "$(heredoc 'git commit -F -' 'The goal, and why.')")"
+expect "a clean tag message"                     silent "$(bash_payload "git tag -a v1 -m 'v1'")"
+expect "a clean PR still only asks"              ask    "$(bash_payload "gh pr create --title x --body 'the goal'")"
+
+# Without jq the guard reads the payload with python3 and gives the same
+# verdicts. env -i so it sees a bare environment, which is what a hook gets.
+stub_path "$TMP/nojq" bash grep sed tr cat python3
+bare() { # payload directory, payload → the guard's output, run with that PATH alone
+  printf '%s' "$2" > "$TMP/p.json"
+  env -i PATH="$1" HOME="$TMP" "$ROOT/hooks/guard.sh" < "$TMP/p.json" 2>/dev/null
+}
+out="$(bare "$TMP/nojq" "$(bash_payload 'git status')")"
+[ -z "$out" ] && ok "without jq a read-only command passes silently" || bad "without jq a read-only command passes" "emitted: $out"
+check "without jq a push still asks" ask "$(decision "$(bare "$TMP/nojq" "$(bash_payload 'git push origin main')")")"
+check "without jq a public comment is still denied" deny "$(decision "$(bare "$TMP/nojq" "$(bash_payload 'gh pr comment 12 --body hi')")")"
+
+check "without jq an attributed commit is still denied" deny \
+  "$(decision "$(bare "$TMP/nojq" "$(bash_payload "$(commit_with "$trailer")")")")"
+
+# A payload jq will not parse must not become an allow. python3 takes a lone
+# surrogate where jq refuses the whole document, so the call is still judged.
+lone='{"tool_name":"Bash","tool_input":{"command":"gh pr comment 12 --body \ud800"}}'
+printf '%s' "$lone" | jq -e . >/dev/null 2>&1 \
+  && bad "the fixture is a payload jq cannot parse" "jq parsed it" \
+  || ok "the fixture is a payload jq cannot parse"
+check "a payload only python3 can read is still judged" deny "$(decision "$(gate "$lone")")"
+
+# With no reader at all, and with a tool the rules themselves need, the gate
+# cannot say anything about the call, so it asks rather than waving it through.
+stub_path "$TMP/noreader" bash grep sed tr cat
+out="$(bare "$TMP/noreader" "$(bash_payload 'git push origin main')")"
+rc=$?
+{ [ "$rc" = 0 ] && [ "$(decision "$out")" = ask ]; } \
+  && ok "with neither jq nor python3 the guard asks and exits 0" \
+  || bad "with neither jq nor python3 the guard asks" "exit $rc: ${out:-<empty>}"
+check "naming what it could not do" "neither jq nor python3 can read the payload" "$out"
+stub_path "$TMP/nogrep" bash sed tr cat jq python3
+check "and asks when grep, which every rule needs, is gone" ask \
+  "$(decision "$(bare "$TMP/nogrep" "$(bash_payload 'git push origin main')")")"
 
 # ── style ────────────────────────────────────────────────────────────────────
 # The other gate. Every diff case runs against a real repository: the check
 # reads git, so a typed fixture would prove the parser and nothing else.
 echo "style.py"
 
-HOOK="$ROOT/hooks/style.py"
+GATE="$ROOT/hooks/style.py"
 # The two characters as bytes: a \u escape inside $'' needs bash 4.2, and
 # this suite runs on 3.2 as well.
 EM="$(printf '\xe2\x80\x94')"
@@ -128,12 +215,12 @@ git -C "$FX" config user.email "fixture@example.invalid"
 fx() { bash_payload "$1" "$FX"; }
 noted() { # name, expected stderr substring, payload
   local got err
-  got="$(decision "$(hook "$3")")"
-  err="$(cat "$TMP/hook.err" 2>/dev/null)"
+  got="$(decision "$(gate "$3")")"
+  err="$(cat "$TMP/gate.err" 2>/dev/null)"
   if [ "$got" != silent ]; then bad "$1" "expected silent, got $got"
   else check "$1" "$2" "$err"; fi
 }
-why() { printf '%s' "$(hook "$1")" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""' 2>/dev/null; }
+why() { printf '%s' "$(gate "$1")" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""' 2>/dev/null; }
 stage() {
   git -C "$FX" add -A >/dev/null 2>&1
   git -C "$FX" diff --cached --quiet HEAD 2>/dev/null \
@@ -365,14 +452,14 @@ git -C "$HOSTILE" add -A >/dev/null 2>&1
 rm -f "$TMP/payload-ran"
 # -am with no HEAD is what reaches the fallback: diff HEAD fails, and the
 # arguments are rebuilt.
-hook "$(bash_payload 'git commit -am first' "$HOSTILE")" >/dev/null
+gate "$(bash_payload 'git commit -am first' "$HOSTILE")" >/dev/null
 [ -e "$TMP/payload-ran" ] && bad "the no-HEAD fallback cannot run a program" "repository config ran it" \
                           || ok "the no-HEAD fallback cannot run a program"
 git -C "$HOSTILE" -c core.fsmonitor= commit -q -m base >/dev/null 2>&1
 printf 'x = 1\n# note\n' > "$HOSTILE/a.py"
 git -C "$HOSTILE" -c core.fsmonitor= add -A >/dev/null 2>&1
 rm -f "$TMP/payload-ran"
-hook "$(bash_payload 'git commit -m "second"' "$HOSTILE")" >/dev/null
+gate "$(bash_payload 'git commit -m "second"' "$HOSTILE")" >/dev/null
 [ -e "$TMP/payload-ran" ] && bad "nor can the ordinary one" "repository config ran it" \
                           || ok "nor can the ordinary one"
 
@@ -702,280 +789,14 @@ expect "and in the last paragraph it clears" silent \
 Style-ack: quoting an upstream title\"")"
 
 printf 'not json at all' > "$TMP/p.json"
-out="$("$HOOK" < "$TMP/p.json" 2>/dev/null)"
+out="$("$GATE" < "$TMP/p.json" 2>/dev/null)"
 [ -z "$out" ] && ok "input it cannot parse is silent" || bad "input it cannot parse is silent" "$out"
 
 fi
-HOOK="$ROOT/hooks/guard.sh"
+GATE="$ROOT/hooks/guard.sh"
 
 # ── installer ────────────────────────────────────────────────────────────────
-echo "install.sh"
-
-FAKE="$TMP/home"
-mkdir -p "$FAKE/.claude"
-run_install() { HOME="$FAKE" "$ROOT/install.sh" "$@" 2>&1; }
-settings() { jq -r "$1" "$FAKE/.claude/settings.json" 2>/dev/null; }
-
-# A foreign hook and a foreign key must survive every merge.
-cat > "$FAKE/.claude/settings.json" <<'JSON'
-{
-  "theme": "dark",
-  "env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1", "CLAUDE_CODE_ENABLE_TASKS": "false", "MY_VAR": "keep"},
-  "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "/usr/bin/true"}]}]},
-  "permissions": {"additionalDirectories": ["/my/own/dir"]}
-}
-JSON
-
-out="$(run_install --dry-run)"
-check "dry-run previews the settings change" "would change" "$out"
-check "dry-run writes nothing" "1" "$(jq -r '.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS' "$FAKE/.claude/settings.json")"
-
-out="$(run_install)"
-check "install reports green" "all checks green" "$out"
-check "statusline wired"      "statusline.py" "$(settings '.statusLine.command')"
-check "auto mode set"         "auto"          "$(settings '.permissions.defaultMode')"
-check "spawn depth set"       "2"             "$(settings '.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH')"
-check "todo tools enabled"    "1"             "$(settings '.env.CLAUDE_CODE_ENABLE_TODO_TOOLS')"
-check "tasks opt-out kept"    "false"         "$(settings '.env.CLAUDE_CODE_ENABLE_TASKS')"
-check "co-authored-by off"    "false"         "$(settings '.includeCoAuthoredBy')"
-check "agent teams removed"   "null"          "$(settings '.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS')"
-check "peer inbox refused"    "refuse"        "$(settings '.crossSessionInbound')"
-check "cross-machine gated"   "true"          "$(settings '.isolatePeerMachines')"
-# SendMessage must stay out of the deny list: denying it would also cut off an
-# agent messaging main, which is how it asks a question mid-run.
-case "$(settings '.permissions.deny | join(" ")')" in
-  *SendMessage*|*ListAgents*) bad "agents can still reach main" "SendMessage or ListAgents is denied" ;;
-  *)                          ok "agents can still reach main" ;;
-esac
-# Glob and Grep are not tools this harness has, and an unknown name is dropped in
-# silence. Whole names, because BashOutput contains Bash, ListAgents contains
-# Agent, and neither searches. A duplicate key resolves to the last line.
-missing=""; unknown=""; blind=""
-for a in "$ROOT"/agents/*.md; do
-  n="$(basename "$a")"
-  names=",$(grep '^tools:' "$a" | tail -1 | sed 's/^tools://; s/[[:space:]]//g'),"
-  case "$names" in *,SendMessage,*)  ;; *) missing="$missing $n" ;; esac
-  case "$names" in *,Glob,*|*,Grep,*)  unknown="$unknown $n" ;; esac
-  case "$names" in *,Bash,*|*,Agent,*) ;; *) blind="$blind $n" ;; esac
-done
-[ -z "$missing" ] && ok "every agent carries SendMessage" \
-                  || bad "every agent carries SendMessage" "missing in:$missing"
-[ -z "$unknown" ] && ok "no agent asks for a tool the harness dropped" \
-                  || bad "no agent asks for a tool the harness dropped" "declared in:$unknown"
-[ -z "$blind" ] && ok "every agent can search a repo" \
-                || bad "every agent can search a repo" "no Bash or Agent in:$blind"
-check "foreign env kept"      "keep"          "$(settings '.env.MY_VAR')"
-check "foreign key kept"      "dark"          "$(settings '.theme')"
-check "foreign hook kept"     "/usr/bin/true" "$(settings '[.hooks.PreToolUse[].hooks[].command] | join(" ")')"
-check "foreign dir kept"      "/my/own/dir"   "$(settings '.permissions.additionalDirectories | join(" ")')"
-check "checkout approved"     "$ROOT"         "$(settings '.permissions.additionalDirectories | join(" ")')"
-check "credentials denied"    ".credentials.json" "$(settings '.permissions.deny | join(" ")')"
-check "review plugin enabled" "true" "$(settings '.enabledPlugins["pr-review-toolkit@claude-plugins-official"]')"
-check "pointer written"       "$ROOT"         "$(readlink "$FAKE/.claude/agent-toolkit")"
-check "pointer imports CLAUDE.md" "agent-toolkit/CLAUDE.md" "$(cat "$FAKE/.claude/CLAUDE.md")"
-
-for want in "guard.sh" "style.py" "reap.sh" "format.sh" "sync.sh" "taskline.py" "install.sh --sync"; do
-  check "wires $want" "$want" "$(settings '[.hooks[][].hooks[].command] | join(" ")')"
-done
-check "linear matcher wired" "mcp__linear.*" "$(settings '[.hooks.PreToolUse[].matcher] | join(" ")')"
-
-# The doctor speaks by printing and exiting 1, which an async entry discards. An
-# empty matcher would cover all five sources and still reads red here, because
-# nothing tells it apart from the entry having gone.
-doctor="$FAKE/.claude/agent-toolkit/install.sh --sync"
-sync_matcher="$(settings "[.hooks.SessionStart[]
-  | select(any((.hooks // [])[]; (.command // \"\") == \"$doctor\"))
-  | .matcher // \"\"] | join(\"|\")")"
-unmatched=""
-for want in startup resume clear compact fork; do
-  case "|$sync_matcher|" in *"|$want|"*) ;; *) unmatched="$unmatched $want" ;; esac
-done
-[ -z "$unmatched" ] && ok "the doctor runs on every session source" \
-                    || bad "the doctor runs on every session source" \
-                       "not matched:$unmatched (matcher: ${sync_matcher:-<none>})"
-check "the doctor is wired synchronously" "[false]" \
-  "$(settings "[.hooks.SessionStart[].hooks[]
-     | select((.command // \"\") == \"$doctor\") | (.async // false)] | tostring")"
-
-# The recorder rides four events and no trigger is load-bearing, so all four
-# have to be there — and every one of them async, or a sweep could block a turn
-# or inject its stdout as context.
-for want in SessionStart PreCompact UserPromptSubmit SessionEnd; do
-  check "retro records on $want" "retro.py record" \
-    "$(settings "[.hooks.$want[].hooks[] | select((.command // \"\") | test(\"retro\")) | .command] | join(\" \")")"
-done
-check "the retro sweep is asynchronous everywhere" "[true,true,true,true]" \
-  "$(settings '[.hooks[][].hooks[] | select((.command // "") | test("retro")) | (.async // false)] | tostring')"
-check "the prompt trigger carries an interval" "--interval 900" \
-  "$(settings '[.hooks.UserPromptSubmit[].hooks[].command] | join(" ")')"
-[ -s "$FAKE/.claude/retro/since" ] && ok "install stamps the since marker" \
-                                   || bad "install stamps the since marker" "no ~/.claude/retro/since"
-# Rewriting it would let the whole pre-toolkit corpus in.
-marker="$(cat "$FAKE/.claude/retro/since")"
-run_install >/dev/null
-check "a re-install leaves the marker alone" "$marker" "$(cat "$FAKE/.claude/retro/since")"
-
-# Without sqlite3 the recorder is inert and everything else is unaffected, so
-# the doctor says so without failing the install.
-mkdir -p "$TMP/nosqlite"
-{ printf '#!/bin/sh\ncase "$*" in *"import sqlite3"*) exit 1 ;; esac\nexec %s "$@"\n' \
-    "$(command -v python3)"; } > "$TMP/nosqlite/python3"
-chmod +x "$TMP/nosqlite/python3"
-out="$(PATH="$TMP/nosqlite:$PATH" run_install)"
-check "the doctor flags a python without sqlite3" "no sqlite3 module" "$out"
-check "and the install is still green"            "all checks green"  "$out"
-
-# Which events notify is the plugin's setting and the user's decision, so the
-# doctor says the same thing either way. Asserted as identical output, which
-# holds for whichever key a view would read.
-ncfg="$FAKE/.claude/claude-notifications-go/config.json"
-mkdir -p "$(dirname "$ncfg")"
-rm -f "$ncfg"
-silent="$(run_install)"
-printf '{"notifications":{"suppressForSubagents":false,"notifyOnSubagentStop":true}}\n' > "$ncfg"
-grep -q '"suppressForSubagents":false' "$ncfg" \
-  || bad "the notifications fixture is the one a view would flag" "$(cat "$ncfg" 2>/dev/null)"
-out="$(run_install)"
-[ "$out" = "$silent" ] \
-  && check "the doctor holds no view on the notification settings" "all checks green" "$out" \
-  || bad "the doctor holds no view on the notification settings" \
-         "the plugin's config changed what the doctor said: $out"
-# An async hook's stdout is never injected as context, so an async taskline
-# would print into the void. Asserted as the whole array, which also pins that
-# exactly one entry runs it.
-check "taskline is wired synchronously" "[false]" \
-  "$(settings '[.hooks.UserPromptSubmit[].hooks[] | select((.command // "") | test("taskline")) | (.async // false)] | tostring')"
-# An async PreToolUse entry decides after the tool ran, so the gate would vanish.
-check "the style gate is wired synchronously" "[false]" \
-  "$(settings '[.hooks.PreToolUse[].hooks[] | select((.command // "") | test("style")) | (.async // false)] | tostring')"
-check "the style gate is on the Bash matcher" "style.py" \
-  "$(settings '[.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[].command] | join(" ")')"
-check "and is wired exactly once" "1" \
-  "$(settings '[.hooks[][].hooks[] | select((.command // "") | test("style"))] | length | tostring')"
-# An if field is permission rule syntax, and Bash(git commit *) does not match
-# git -C <repo> commit, which is the form CLAUDE.md requires.
-check "no hook narrows itself with an if" "[]" \
-  "$(settings '[.hooks[][] | select(has("if")), (.hooks[]? | select(has("if")))] | tostring')"
-
-linked="$(find "$FAKE/.claude/skills" -maxdepth 1 -type l | wc -l | tr -d ' ')"
-have="$(find "$ROOT/skills" -name SKILL.md | wc -l | tr -d ' ')"
-[ "$linked" = "$have" ] && ok "all $have skills linked" || bad "skills linked" "$linked of $have"
-
-copied="$(ls "$FAKE/.claude/agents"/*.md 2>/dev/null | wc -l | tr -d ' ')"
-agents="$(ls "$ROOT/agents"/*.md | wc -l | tr -d ' ')"
-[ "$copied" = "$agents" ] && ok "all $agents agents copied" || bad "agents copied" "$copied of $agents"
-
-out="$(run_install)"
-check "re-install is idempotent" "already current" "$out"
-
-# Replacing the checkout: links into the one we replaced still resolve, so they
-# survive the broken-link prune and would keep firing retired skills.
-OLD="$TMP/old-checkout"
-mkdir -p "$OLD/skills/retired" "$OLD/agents" "$OLD/hooks"
-touch "$OLD/skills/retired/SKILL.md"
-mkdir -p "$TMP/my-skills/mine-too"
-touch "$TMP/my-skills/mine-too/SKILL.md"
-ln -sfn "$OLD/skills/retired" "$FAKE/.claude/skills/retired"
-ln -sfn "$TMP/my-skills/mine-too" "$FAKE/.claude/skills/mine-too"   # the user's own, unrelated
-ln -sfn "$OLD" "$FAKE/.claude/agent-toolkit"
-run_install >/dev/null
-[ ! -e "$FAKE/.claude/skills/retired" ] && ok "stale checkout skill unlinked" || bad "stale checkout skill unlinked" "still linked"
-[ -L "$FAKE/.claude/skills/mine-too" ] && ok "unrelated skill link kept" || bad "unrelated skill link kept" "removed"
-rm -f "$FAKE/.claude/skills/mine-too"
-
-# A retired agent is pruned; one the user wrote is left alone.
-touch "$FAKE/.claude/agents/mine.md"
-echo "stale.md" >> "$FAKE/.claude/agents/.toolkit-agents"
-touch "$FAKE/.claude/agents/stale.md"
-run_install >/dev/null
-[ ! -e "$FAKE/.claude/agents/stale.md" ] && ok "retired agent pruned" || bad "retired agent pruned" "still there"
-[ -e "$FAKE/.claude/agents/mine.md" ] && ok "user agent untouched" || bad "user agent untouched" "deleted"
-
-# The doctor must notice its own wiring going missing, not just bad paths.
-jq 'del(.hooks.PreToolUse)' "$FAKE/.claude/settings.json" > "$TMP/s" && mv "$TMP/s" "$FAKE/.claude/settings.json"
-out="$(run_install --sync)"
-check "sync flags stale settings" "stale" "$out"
-run_install >/dev/null
-
-# ── switching off the previous generation ────────────────────────────────────
-# The whole point of the cutover: after installing over a v1 machine, nothing v1
-# may still be wired. A leftover skill or agent keeps instructing sessions from
-# a generation whose rules no longer hold.
-echo "switch from v1"
-
-# Names deliberately share no prefix: an assertion that matched one inside the
-# other would pass or fail for the wrong reason.
-V1="$TMP/old-checkout-v1"; V1HOME="$TMP/machine-on-v1"
-mkdir -p "$V1"/{hooks,agents} "$V1HOME/.claude"/{skills,agents}
-for s in orchestrating-subagents develop feature-spec linear-sync retro chore; do
-  mkdir -p "$V1/skills/group/$s" && touch "$V1/skills/group/$s/SKILL.md"
-done
-for a in architect-designer lead developer project-manager researcher reviewer; do
-  printf 'v1 agent\n' > "$V1/agents/$a.md"
-done
-for h in guard-git guard-config guard-linear format-on-edit sync-on-skill-edit reap-managed spawn-managed; do
-  printf '#!/bin/sh\n' > "$V1/hooks/$h.sh" && chmod +x "$V1/hooks/$h.sh"
-done
-printf '#!/bin/sh\n' > "$V1/install-skills.sh" && chmod +x "$V1/install-skills.sh"
-
-# Wire the fake home exactly as a v1 install leaves it.
-ln -sfn "$V1" "$V1HOME/.claude/agent-toolkit"
-for d in "$V1"/skills/group/*/; do ln -sfn "${d%/}" "$V1HOME/.claude/skills/$(basename "${d%/}")"; done
-for a in "$V1"/agents/*.md; do cp "$a" "$V1HOME/.claude/agents/"; basename "$a"; done > "$V1HOME/.claude/agents/.toolkit-agents"
-# ...plus things that are the user's, which must survive untouched.
-mkdir -p "$TMP/user-skill/my-skill" && touch "$TMP/user-skill/my-skill/SKILL.md"
-ln -sfn "$TMP/user-skill/my-skill" "$V1HOME/.claude/skills/my-skill"
-printf 'mine\n' > "$V1HOME/.claude/agents/my-agent.md"
-cat > "$V1HOME/.claude/settings.json" <<JSON
-{
-  "env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "3"},
-  "statusLine": {"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/statusline.py"},
-  "permissions": {"additionalDirectories": ["$V1"]},
-  "hooks": {
-    "SessionStart": [{"matcher": "startup", "hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/install.sh --sync"}]}],
-    "PreToolUse": [
-      {"matcher": "Bash", "hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/guard-git.sh"}]},
-      {"matcher": "Write|Edit|NotebookEdit", "hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/guard-config.sh"}]},
-      {"matcher": "mcp__linear.*", "hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/guard-linear.sh"}]}
-    ],
-    "SubagentStop": [{"hooks": [{"type": "command", "command": "$V1HOME/.claude/agent-toolkit/hooks/reap-managed.sh"}]}]
-  }
-}
-JSON
-printf '@%s/.claude/agent-toolkit/CLAUDE.md\n' "$V1HOME" > "$V1HOME/.claude/CLAUDE.md"
-
-HOME="$V1HOME" "$ROOT/install.sh" >/dev/null 2>&1
-v1s() { jq -r "$1" "$V1HOME/.claude/settings.json" 2>/dev/null; }
-
-left="$(ls -1 "$V1HOME/.claude/skills" | grep -Ex 'orchestrating-subagents|develop|feature-spec|linear-sync|retro|chore' | tr '\n' ' ')"
-[ -z "$left" ] && ok "v1 skills unlinked" || bad "v1 skills unlinked" "still present: $left"
-
-left="$(ls -1 "$V1HOME/.claude/agents" | grep -Ex 'architect-designer.md|lead.md' | tr '\n' ' ')"
-[ -z "$left" ] && ok "retired v1 agents pruned" || bad "retired v1 agents pruned" "still present: $left"
-
-grep -q 'v1 agent' "$V1HOME/.claude/agents/developer.md" \
-  && bad "shared agent names overwritten" "developer.md is still the v1 file" \
-  || ok "shared agent names overwritten"
-
-wired="$(v1s '[.hooks[][].hooks[].command] + [.statusLine.command] | join(" ")')"
-left=""
-for h in guard-git guard-config guard-linear format-on-edit sync-on-skill-edit reap-managed install-skills; do
-  case "$wired" in *"$h"*) left="$left $h" ;; esac
-done
-[ -z "$left" ] && ok "no v1 hook still wired" || bad "no v1 hook still wired" "wired:$left"
-
-check "v1 SubagentStop entry dropped" "null" "$(v1s '.hooks.SubagentStop')"
-check "v1 agent-teams flag dropped"   "null" "$(v1s '.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS')"
-check "v1 spawn depth replaced"       "2"    "$(v1s '.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH')"
-
-jq -e --arg v "$V1" '(.permissions.additionalDirectories | index($v)) == null' \
-  "$V1HOME/.claude/settings.json" >/dev/null 2>&1 \
-  && ok "old checkout dropped from approved dirs" \
-  || bad "old checkout dropped from approved dirs" "$V1 is still approved"
-
-[ -L "$V1HOME/.claude/skills/my-skill" ] && ok "user's own skill survives" || bad "user's own skill survives" "removed"
-grep -q mine "$V1HOME/.claude/agents/my-agent.md" 2>/dev/null && ok "user's own agent survives" || bad "user's own agent survives" "removed"
-check "pointer re-aimed at v2" "$ROOT" "$(readlink "$V1HOME/.claude/agent-toolkit")"
+. "$ROOT/tests/install.sh"
 
 # ── statusline ───────────────────────────────────────────────────────────────
 echo "statusline.py"
@@ -1525,6 +1346,7 @@ cat > "$RP/alpha/s-main.jsonl" <<'JSON'
 {"type":"system","subtype":"stop_hook_summary","timestamp":"2026-08-14T10:00:08.000Z","hookInfos":[{"command":"sh /home/x/.claude/agent-toolkit/hooks/taskline.py","durationMs":30}],"hookErrors":[]}
 {"type":"system","subtype":"stop_hook_summary","timestamp":"2026-08-14T10:00:09.000Z","hookInfos":[{"command":"bash \"${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh\"","durationMs":8}],"hookErrors":["Failed with non-blocking status code: /bin/sh: 1: /home/x/.claude/agent-toolkit/hooks/notify.sh: not found"]}
 {"type":"system","subtype":"stop_hook_summary","timestamp":"2026-08-14T10:00:10.000Z","hookInfos":[{"command":"Implement the CANARYHOOKPROSE feature end to end and prove it","durationMs":4}],"hookErrors":[]}
+{"type":"system","subtype":"stop_hook_summary","timestamp":"2026-08-14T10:00:11.000Z","hookInfos":[{"command":"\"$HOME/.claude/agent-toolkit-run\" PreToolUse hooks/guard.sh","durationMs":12},{"command":"\"$HOME/.claude/agent-toolkit-run\" SessionStart install.sh --sync","durationMs":40}],"hookErrors":[]}
 {"type":"system","subtype":"compact_boundary","timestamp":"2026-08-14T10:06:00.000Z","compactMetadata":{"trigger":"auto","preTokens":1000,"postTokens":100,"cumulativeDroppedTokens":900,"durationMs":5000}}
 {"type":"assistant","uuid":"a9","timestamp":"2026-08-14T10:07:00.000Z","message":{"id":"m9","content":[{"type":"text","text":"Retro: the session did the edits itself"}]}}
 {"type":"assistant","uuid":"a8","timestamp":"2026-08-14T10:07:30.000Z","message":{"id":"m8","content":[{"type":"text","text":"**Retroactive correction:** CANARYRETROPROSE, which is not a retro line\nRetrospective aside — CANARYRETROPROSE either"}]}}
@@ -1581,6 +1403,11 @@ sql "a hook's errors land on the same label as its runs" "1|1|8" \
 # prompt text, which nothing here may store.
 sql "a hook command that is not a command is labelled unknown" "1" \
   "SELECT n FROM hook_run WHERE segment_id='s-main#0' AND hook='unknown'"
+# Every toolkit hook runs through the launcher, so the entry point after the
+# caller is the only name in the command, with or without a directory.
+sql "a hook run through the launcher is labelled by its entry point" "1|1" \
+  "SELECT (SELECT n FROM hook_run WHERE segment_id='s-main#0' AND hook='guard.sh'),
+          (SELECT n FROM hook_run WHERE segment_id='s-main#0' AND hook='install.sh')"
 sql "the session's own retro line is captured" "main|the session did the edits itself" \
   "SELECT author,text FROM retro_line WHERE source_uuid='a9'"
 # "Retroactive" and "Retrospective" start with the word and are followed by
@@ -2423,7 +2250,7 @@ retro record >/dev/null; rc=$?
   && ok "an unreadable marker is left exactly as it is" \
   || bad "an unreadable marker is left exactly as it is" "exit $rc, now: $(cat "$RH/.claude/retro/since")"
 check "and the doctor is what says so" "retro/since is not a timestamp" \
-  "$(HOME="$RH" "$ROOT/install.sh" --sync 2>&1)"
+  "$(HOME="$RH" "$ROOT/install.sh" --dry-run 2>&1)"
 
 # Put the fixtures back inside the window; the marker it wrote is now, which
 # would make every one of them older than the store.
@@ -2553,33 +2380,6 @@ PY
 )"
 [ -z "$drifted" ] && ok "the spec's thresholds are the hook's" \
                   || bad "the spec's thresholds are the hook's" "$drifted"
-
-# ── bg + reap ────────────────────────────────────────────────────────────────
-echo "bg.sh + reap.sh"
-
-reg="$FAKE/.claude/bg-procs"
-out="$(HOME="$FAKE" "$ROOT/hooks/bg.sh" -- sleep 300)"
-pid="$(printf '%s' "$out" | awk '{print $3}')"
-[ -f "$reg/$pid.json" ] && ok "registers the process" || bad "registers the process" "no $reg/$pid.json"
-
-# No owner recorded and no session ending: it must be left alone, not killed.
-printf '{"hook_event_name":"SubagentStop"}' | HOME="$FAKE" "$ROOT/hooks/reap.sh"
-kill -0 "$pid" 2>/dev/null && ok "spares a process it cannot judge" || bad "spares a process it cannot judge" "killed pid $pid"
-
-# Another session ending must not touch it.
-printf '{"hook_event_name":"SessionEnd","session_id":"someone-else"}' | HOME="$FAKE" "$ROOT/hooks/reap.sh"
-kill -0 "$pid" 2>/dev/null && ok "another session does not reap it" || bad "another session does not reap it" "killed pid $pid"
-
-# Its own session ending does.
-sess="$(jq -r '.session' "$reg/$pid.json")"
-printf '{"hook_event_name":"SessionEnd","session_id":"%s"}' "$sess" | HOME="$FAKE" "$ROOT/hooks/reap.sh"
-kill -0 "$pid" 2>/dev/null && bad "own session reaps it" "pid $pid survived" || ok "own session reaps it"
-[ ! -f "$reg/$pid.json" ] && ok "registry entry cleared" || bad "registry entry cleared" "still there"
-
-# A recycled pid must be pruned, never signalled.
-printf '{"pid":%d,"start":"999999","owner":"","owner_start":"","session":"x","cmd":["sleep"]}' 1 > "$reg/1.json"
-printf '{"hook_event_name":"SessionEnd","session_id":"x"}' | HOME="$FAKE" "$ROOT/hooks/reap.sh"
-[ ! -f "$reg/1.json" ] && ok "recycled pid pruned unsignalled" || bad "recycled pid pruned" "entry remains"
 
 # ── duplication ──────────────────────────────────────────────────────────────
 # Both directions of the gate: the checkout as it stands is clean, and a
