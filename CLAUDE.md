@@ -165,6 +165,7 @@ Say so and ask which wins, before acting on either reading. Quote the line and s
 - Every change ships with the test that proves the new behaviour. Existing tests passing only proves you didn't break the old one.
 - Simple but finished. No half-implementations, no dangling TODOs, no "clean up later".
 - Rename or remove something → fix every reference in the same change. Grep the whole repo, including ignored directories.
+- **A fix replaces the old path.** Delete what it supersedes. Keep a shim, alias, or fallback only for a named contract: a public API or CLI, a stored data or config format, or observed production state. Tests alone are not a contract. Unsure, ask.
 
 ## Writing
 
