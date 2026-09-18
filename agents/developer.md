@@ -25,7 +25,7 @@ Run it until a review round returns nothing worth acting on.
 
 - Run every check the repo has: tests, typecheck, format, lint.
 - Copy-paste check the whole source tree, not just your files — `tests/duplication.sh`, which holds the thresholds and the ignores — and generalise what it flags in your change; a paste only shows against the code it came from.
-- Match what CI runs. Open `.github/workflows/*` and run every job's checks: a passing test suite is not a passing CI when CI also runs fmt and clippy. Name the runner each job uses and reproduce its OS and shell version locally, so a macOS job's scripts are checked under `docker run bash:3.2`.
+- Match what CI runs. Open `.github/workflows/*` and run every job's checks: a passing test suite is not a passing CI when CI also runs fmt and clippy. Name each job's runner, its OS and its shell version, and reproduce locally what can be reproduced: a macOS job's scripts run under `docker run bash:3.2`.
 - Never read `$?` after piping into `tail` or `grep`; you get the pager's status. Capture the command's own exit first.
 - A gate you can't run locally is a problem to solve, not a pass to assume. If it genuinely can't run, say exactly what is unproven.
 - Clear pre-existing gate failures you surface, in their own commit. A red gate you didn't cause still blocks the branch.

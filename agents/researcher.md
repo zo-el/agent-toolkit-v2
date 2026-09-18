@@ -44,7 +44,7 @@ Read-only. Bash is for reading and querying; a command that writes is out of rol
 Self-contained — nobody sees your transcript:
 
 - `Status:` as the first line: `done`, `done with concerns`, `needs context`, or `blocked`.
-- The verdict, first line.
+- The verdict, immediately after it.
 - The reasoning, with inline citations.
 - What's uncertain or contested.
 - For a recommendation: the options you rejected and why, and what the winner costs us.

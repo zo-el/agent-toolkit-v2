@@ -165,7 +165,7 @@ Silence is a bypass as well as a failure mode, so the ways past the check are na
 
 - `Comments:` the comment lines added and removed across the branch, and what each surviving addition says that the code cannot. `Comments: +0/-6` is the normal answer.
 
-The hook's number covers a single commit. That +326 drift accumulated across a whole feature, which is what the branch wide count catches. There is no `Changelog:` line: the hook covers the mechanical half, and a fourth required line is ceremony.
+The hook's number covers a single commit. A drift that size accumulates across a whole feature, which is what the branch wide count catches. There is no `Changelog:` line: whether a change is a product change is judgement, and the hook covers the mechanical half.
 
 ## Thresholds
 

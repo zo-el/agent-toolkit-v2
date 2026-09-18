@@ -18,7 +18,7 @@ The user reviews UI from screenshots of the real app, never from a description o
 Look at every shot yourself. The user's time goes on design decisions, not on bugs you could have caught. Hunt for:
 
 - Two shots that look the same — a beat that stopped earning its place. Make each shot show its subject; open the menu that holds the disabled buttons.
-- Two shots that differ only in a clock. Compare a fixture carrying a timestamp by pixel-diff bounding box rather than by eye, so only a real delta is committed.
+- Two shots that differ only in a clock. Where a fixture carries a timestamp, diff the pair by pixel bounding box rather than by eye, so a moved clock does not read as a change.
 - An assertion that passes invisibly. A `disabled` check on a control inside a closed menu proves nothing to someone looking at a picture.
 - Styling inherited across a surface boundary — light text from a dark parent landing on a white card.
 - Mock data that misrepresents the state. Mock the real happy path so shots show production appearance.
