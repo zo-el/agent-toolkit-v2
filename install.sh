@@ -20,6 +20,11 @@ BACKUPS="$CLAUDE_DIR/backups"
 SKILLS_DST="$CLAUDE_DIR/skills"
 AGENTS_DST="$CLAUDE_DIR/agents"
 MANIFEST="$AGENTS_DST/.toolkit-agents"
+BRIDGE_SRC="$ROOT/tools/penpot-mcp"
+BRIDGE_DST="$CLAUDE_DIR/tools/penpot-mcp"
+# The Penpot bridge travels with the toolkit; what it fetches at its first run
+# does not, and outlives every version installed over it.
+BRIDGE_FILES=(package.json package-lock.json start-bridge.sh check-bridge.sh)
 SCRATCH="/tmp/claude-$(id -u)"
 
 # The report shape and the requirement text hooks/update.sh prints too. Sourced
@@ -461,6 +466,7 @@ check_root() {
   [ -n "$(find "$ROOT/skills" -name SKILL.md -print -quit 2>/dev/null)" ] \
     || finding required toolkit "skills/ holds no skill" "$ROOT/skills"
   compgen -G "$ROOT/agents/*.md" >/dev/null || finding required toolkit "agents/ holds no agent" "$ROOT/agents"
+  check_bridge
   check_gate
   if ! out="$(python_problems 2>&1)"; then
     finding required toolkit "the python checks did not run: $(printf '%s' "$out" | tail -1)" "$ROOT/install.sh"
@@ -469,6 +475,21 @@ check_root() {
     [ -n "$detail" ] && finding required toolkit "$reason: $entry" "$ROOT/$entry"$'\n'"$detail"
   done <<<"$out"
   [ ${#F_SEV[@]} -eq "$before" ]
+}
+
+# Every file install copies out is in the root, and each script starts, which is
+# the same evidence of a whole directory that skills/ and agents/ are.
+check_bridge() {
+  local entry reason
+  for entry in "${BRIDGE_FILES[@]}"; do
+    if [ ! -f "$BRIDGE_SRC/$entry" ]; then
+      finding required toolkit "tools/penpot-mcp/$entry is missing from the version directory" "$BRIDGE_SRC/$entry"
+      continue
+    fi
+    case "$entry" in *.sh) ;; *) continue ;; esac
+    reason="$(cannot_start "$BRIDGE_SRC/$entry")"
+    [ -z "$reason" ] || finding required toolkit "tools/penpot-mcp/$entry cannot start: $reason" "$BRIDGE_SRC/$entry"
+  done
 }
 
 # The approval gate, run before it goes live: the launcher must ask when the
@@ -805,10 +826,23 @@ apply_retro_marker() {
   act "retro marker ~/.claude/retro/since" write_atomic "$CLAUDE_DIR/retro/since" 644 < <(date -u +%Y-%m-%dT%H:%M:%SZ)
 }
 
+# Every file the version directory carries, and nothing else in that directory:
+# the dependencies and the build the bridge puts there at its first run are the
+# user's, and outlive every version installed over them.
+apply_bridge() {
+  local f mode
+  for f in "${BRIDGE_FILES[@]}"; do
+    if [ -x "$BRIDGE_SRC/$f" ]; then mode=755; else mode=644; fi
+    cmp -s "$BRIDGE_SRC/$f" "$BRIDGE_DST/$f" && [ "$(stat -c %a "$BRIDGE_DST/$f" 2>/dev/null)" = "$mode" ] && continue
+    act "bridge file ~/.claude/tools/penpot-mcp/$f" write_atomic "$BRIDGE_DST/$f" "$mode" <"$BRIDGE_SRC/$f"
+  done
+}
+
 # Settings name the launcher, so they wait on it.
 apply_local() {
   apply_link || return
   apply_launcher || return
+  apply_bridge
   apply_skills
   apply_agents
   apply_settings

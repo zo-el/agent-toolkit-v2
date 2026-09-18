@@ -42,7 +42,7 @@ Notifications are the `claude-notifications-go` plugin's own, and install holds 
 Optional, and separate from install: the `ui-developer` designs without it, from code and screenshots.
 
 - Node 22.
-- The bridge runs from its own directory, `~/.claude/tools/penpot-mcp`, started with `start-bridge.sh` there. `npx @penpot/mcp` does not work on a machine whose corepack looks for a `pnpm.cjs` that pnpm 12 no longer ships.
+- Install puts the bridge's four files in `~/.claude/tools/penpot-mcp` and does nothing else for it. The bridge runs from there, started with `start-bridge.sh`, and fetches its own dependencies at its first run. `npx @penpot/mcp` does not work on a machine whose corepack looks for a `pnpm.cjs` that pnpm 12 no longer ships.
 - It serves the MCP endpoint at `http://localhost:4401/mcp` and the plugin manifest at `http://localhost:4400/manifest.json`.
 - Connecting the plugin, and keeping it open, is per session. The `ui-developer` prints those steps when its Penpot tools stop answering, so they live there rather than here.
 

@@ -604,6 +604,50 @@ inst "$UNLINKED" "$H" --sync
 [ "$rc" = 0 ] && [ -z "$out" ] && ok "--sync from a directory the link does not point at prints nothing" || bad "--sync from an unlinked copy prints nothing" "exit $rc: $out"
 same "and changes nothing, the link included" "$before" "$(snapshot "$H")"
 
+# ── the bridge ───────────────────────────────────────────────────────────────
+# Four files travel with the toolkit. What the bridge fetches at its first run is
+# the machine's, and no install goes near it.
+H="$(home bridge)"
+mkdir -p "$H/.claude/tools/penpot-mcp/node_modules/@penpot"
+printf 'fetched\n' >"$H/.claude/tools/penpot-mcp/node_modules/@penpot/marker"
+printf 'a log of its own\n' >"$H/.claude/tools/penpot-mcp/.pnpm-install.log"
+untouched="$(snapshot "$H/.claude/tools/penpot-mcp/node_modules") $(cat "$H/.claude/tools/penpot-mcp/.pnpm-install.log")"
+inst "$ROOT" "$H"
+carried=""
+for f in package.json package-lock.json start-bridge.sh check-bridge.sh; do
+  cmp -s "$ROOT/tools/penpot-mcp/$f" "$H/.claude/tools/penpot-mcp/$f" || carried="$carried $f"
+done
+[ -z "$carried" ] && ok "a full install copies every file the bridge needs" || bad "the bridge's files are copied" "differing:$carried"
+{ [ -x "$H/.claude/tools/penpot-mcp/start-bridge.sh" ] && [ -x "$H/.claude/tools/penpot-mcp/check-bridge.sh" ]; } \
+  && ok "and leaves its scripts runnable" || bad "the bridge scripts are executable" "they are not"
+same "while its dependencies and its logs are left exactly as they were" "$untouched" \
+  "$(snapshot "$H/.claude/tools/penpot-mcp/node_modules") $(cat "$H/.claude/tools/penpot-mcp/.pnpm-install.log")"
+before="$(file_id "$H/.claude/tools/penpot-mcp/package.json")"
+inst "$ROOT" "$H"
+same "an install with the same files writes none of them again" "$before" "$(file_id "$H/.claude/tools/penpot-mcp/package.json")"
+printf 'edited\n' >"$H/.claude/tools/penpot-mcp/package.json"
+inst "$ROOT" "$H"
+cmp -s "$ROOT/tools/penpot-mcp/package.json" "$H/.claude/tools/penpot-mcp/package.json" \
+  && ok "and one that drifted is put back" || bad "a drifted bridge file is replaced" "it was left"
+chmod -x "$H/.claude/tools/penpot-mcp/start-bridge.sh"
+inst "$ROOT" "$H"
+[ -x "$H/.claude/tools/penpot-mcp/start-bridge.sh" ] && ok "so is one that lost the bit that lets it run" \
+  || bad "a bridge script that lost +x is replaced" "it is still not executable"
+
+BRIDGELESS="$TMP/bridgeless-root"
+copy_root "$BRIDGELESS"
+rm -f "$BRIDGELESS/tools/penpot-mcp/package-lock.json"
+before="$(snapshot "$H")"
+inst "$BRIDGELESS" "$H"
+exit_is "a version directory missing a bridge file exits 1" 1
+check "naming it under Toolkit" "✗ tools/penpot-mcp/package-lock.json is missing from the version directory" "$(block Toolkit)"
+same "and writes nothing" "$before" "$(snapshot "$H")"
+copy_root "$BRIDGELESS"
+printf 'no shebang here\n' >"$BRIDGELESS/tools/penpot-mcp/start-bridge.sh"
+inst "$BRIDGELESS" "$H"
+exit_is "nor does one whose bridge script cannot start" 1
+check "saying why" "✗ tools/penpot-mcp/start-bridge.sh cannot start: it has no #! line" "$(block Toolkit)"
+
 # ── version identity ─────────────────────────────────────────────────────────
 H="$(home version)"
 RELEASE="$TMP/release-v1.5.0"

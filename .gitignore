@@ -8,3 +8,8 @@ __pycache__/
 # Half of a version identity. The updater writes it into a release folder, and a
 # clone reads its own git history instead.
 REVISION
+
+# What the bridge fetches and logs at its first run is installed state, not the
+# toolkit, and belongs to the machine it ran on.
+tools/penpot-mcp/node_modules/
+tools/penpot-mcp/*.log
