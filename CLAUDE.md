@@ -170,6 +170,7 @@ Say so and ask which wins, before acting on either reading. Quote the line and s
 - Readable and maintainable first. Optimise where it pays, not where it costs clarity.
 - **Search before you write a helper.** Grep for what it would do, not what you would call it, and read the workspace's dependency manifests: a crate another member already declares costs one line to use. A utility is the most duplicated kind of code there is, and the search takes seconds against a function you maintain forever.
 - Use what Claude Code already provides before building our own. Something custom is there to override it deliberately, and says in the code why.
+- A plan naming a third-party tool prices it in the same message: what the free tier allows, and what the tier we would actually use costs. Nothing is installed or approved before that.
 - Every change ships with the test that proves the new behaviour. Existing tests passing only proves you didn't break the old one.
 - Simple but finished. No half-implementations, no dangling TODOs, no "clean up later".
 - Rename or remove something → fix every reference in the same change. Grep the whole repo, including ignored directories.
