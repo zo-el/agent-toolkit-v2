@@ -31,7 +31,7 @@ Each runs in its own context with a tool allowlist as its outer boundary and its
 | ----------------- | ------ | ------------------------------ |
 | `architect` | max | write application source |
 | `developer` | xhigh | push, or touch Linear |
-| `ui-developer` | xhigh | push, touch Linear, or edit back-end code |
+| `ui-developer` | xhigh | push, touch Linear, or edit back-end and native code |
 | `reviewer` | xhigh | write anything |
 | `project-manager` | high | write anything but Linear |
 | `researcher` | high | write anything |
@@ -39,7 +39,7 @@ Each runs in its own context with a tool allowlist as its outer boundary and its
 | `test-engineer` | xhigh | write production source |
 | `performance-engineer` | high | write source, beyond a benchmark harness |
 
-The last three are specialists: the session spawns them only when a lane needs one. Linear tools live only in `project-manager`. `developer` and `ui-developer` edit production source, the ui-developer only the front-end; `test-engineer` edits tests. Subagents nest one level deep, which is what lets the developer and reviewer run their review agents, and the researcher reach a repo through `Explore`. Every agent carries `SendMessage`, so it can reach the session mid-run when it is genuinely blocked instead of finishing a long task on a wrong assumption.
+`security-auditor`, `test-engineer` and `performance-engineer` are specialists: the session spawns them only when a lane needs one. Linear tools live only in `project-manager`. `developer` and `ui-developer` edit production source, the ui-developer only the front-end; `test-engineer` edits tests. Subagents nest one level deep, which is what lets the developer and reviewer run their review agents, and the researcher reach a repo through `Explore`. Every agent carries `SendMessage`, so it can reach the session mid-run when it is genuinely blocked instead of finishing a long task on a wrong assumption.
 
 ## Session isolation
 

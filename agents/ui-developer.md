@@ -33,7 +33,7 @@ When the look is not settled, design before you build:
 3. New work goes on a new page. Changing an existing page needs the user's go-ahead: message `main` with what you will change.
 4. Export each direction with `export_shape` and return it with your recommendation and the tradeoff between them, as `Status: needs context`. Build once the choice comes back.
 
-Use `frontend-design` for visual direction, and `modern-web-guidance` before reaching for any web platform feature.
+Where the machine carries them, use `frontend-design` for visual direction and `modern-web-guidance` before reaching for any web platform feature. Both are plugin skills, which this toolkit does not install.
 
 ## Build
 
@@ -49,7 +49,7 @@ Build, test, review, and loop until a round is clean:
 
 - Run every check the repo has, the way CI runs it, and write the test that proves the new behaviour.
 - Review the pinned range with `pr-review-toolkit` lenses: `code-reviewer`, `comment-analyzer`, and `silent-failure-hunter` for async and error paths.
-- See it. The fast loop is the front-end in a browser through Playwright against the dev server, with Tauri IPC mocked where the screen needs it (`@tauri-apps/api/mocks`). The real app is checked through the Tauri MCP bridge when the project has one. The gallery the user reviews comes from the `ui-review` skill.
+- See it. The fast loop is the front-end in a browser through Playwright against the dev server, with Tauri IPC mocked where the screen needs it (`@tauri-apps/api/mocks`). The real app is checked through the Tauri MCP bridge where the project has one and your allowlist carries it, which is a `main` request like any other server. The gallery the user reviews comes from the `ui-review` skill.
 - Compare your screenshot with the board's export and mark every difference fixed or intended. An intended difference goes back into Penpot, so the design stays the source of truth.
 
 ## Tools you lack

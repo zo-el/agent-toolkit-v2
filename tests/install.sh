@@ -234,7 +234,7 @@ esac
 # silence. Whole names, because BashOutput contains Bash, ListAgents contains
 # Agent, and neither searches. A duplicate key resolves to the last line.
 missing=""; unknown=""; blind=""; armed=""; loose=""; barred=0; shellless=""; claimed=0
-bare=""; undeclared=""; declaring=0; qualified=""; ragged=""
+bare=""; undeclared=""; declaring=0; ragged=""; unused=""
 for a in "$ROOT"/agents/*.md; do
   n="$(basename "$a")"
   # Frontmatter only. Claude Code reads the allowlist and the servers from
@@ -254,21 +254,40 @@ for a in "$ROOT"/agents/*.md; do
   # Both YAML spellings of a server block, since either is a real declaration.
   servers="$(printf '%s\n' "$front" | awk '/^mcpServers:$/ { inside = 1; next } inside && /^[^ ]/ { exit } inside')"
   [ -n "$servers" ] && declaring=$((declaring + 1))
+  named=" "
   for tool in $(printf '%s' "$names" | tr ',' ' '); do
     case "$tool" in
       mcp__*__?*)
         server="${tool#mcp__}"; server="${server%%__*}"
-        printf '%s\n' "$servers" | grep -qE "^ +(- )?$server:$" || undeclared="$undeclared $n:$server" ;;
+        case "$named" in *" $server "*) continue ;; esac
+        named="$named$server "
+        # Both spellings of an entry: a name with its config under it, and a
+        # bare name referring to a server the device config already holds.
+        printf '%s\n' "$servers" | grep -qE "^ +(- )?$server:?$" || undeclared="$undeclared $n:$server" ;;
       mcp__*)
         [ -n "$servers" ] && bare="$bare $n:$tool" ;;
     esac
+  done
+  # A server nobody names connects at spawn and contributes nothing.
+  for declared in $(printf '%s\n' "$servers" | sed -n 's/^ *- *\([a-z][a-z-]*\):\{0,1\}$/\1/p'); do
+    case "$named" in *" $declared "*) ;; *) unused="$unused $n:$declared" ;; esac
   done
   case "$names" in *,Write,* | *,Edit,* | *,NotebookEdit,*) edits=1 ;; *) edits=0 ;; esac
   case "$(grep -F "| \`${n%.md}\` |" "$ROOT/README.md")" in
     *"write anything"*)
       barred=$((barred + 1))
       [ "$edits" = 1 ] && armed="$armed $n" ;;
-    *write*) qualified="$qualified $n" ;;
+    # A cell naming what may not be written is role text for the barred
+    # direction, since one tool name covers every file either way, but the agent
+    # still writes something, so it still needs a tool that writes. The
+    # performance engineer is the one row where that does not hold: its cell
+    # allows a benchmark harness and its allowlist carries nothing to write one
+    # with, which is a question for its definition rather than one this decides.
+    *write*)
+      case "$n" in
+        performance-engineer.md) ;;
+        *) [ "$edits" = 0 ] && loose="$loose $n" ;;
+      esac ;;
     *)
       [ "$edits" = 0 ] && loose="$loose $n" ;;
   esac
@@ -294,19 +313,12 @@ else
 fi
 [ -z "$loose" ] && ok "and one it says nothing about carries the tools to write" \
   || bad "and one it says nothing about carries the tools to write" "no editing tool in:$loose"
-# A cell naming what may not be written, tests against production source, is
-# role text: one tool name covers every file either way. Pinned so that a new
-# agent cannot land in that gap without this line moving.
-[ "$(echo $qualified)" = "architect.md performance-engineer.md test-engineer.md" ] \
-  && ok "and only those three rows are left to role text" \
-  || bad "and only those three rows are left to role text" "left unanswered:$qualified"
-# A tools line takes tool names, and a server's name alone is not one: it is
-# dropped in silence, leaving the agent without the tools its role is built on.
-# Read from a definition that declares its own servers, which is where a full
-# name was measured to be required. A bare server name elsewhere is how the
-# project manager reaches the Linear servers the device config holds, and this
-# says nothing about those. A fully qualified name is answered for either way:
-# the server behind it has to be declared in the file that names it.
+# Where a definition declares its own servers, a bare server name on the tools
+# line was measured not to resolve: it is dropped in silence, leaving the agent
+# without the tools its role is built on. That measurement says nothing about a
+# server the device config holds, which is how the project manager reaches
+# Linear, so those are not read here. A fully qualified name is answered for
+# either way: the server behind it has to be declared in the file that names it.
 if [ "$declaring" -eq 0 ]; then
   skip "an MCP tool is named in full" "no definition declares a server of its own"
 elif [ -n "$bare" ]; then
@@ -316,6 +328,8 @@ else
 fi
 [ -z "$undeclared" ] && ok "and the server behind it is declared beside it" \
   || bad "and the server behind it is declared beside it" "no mcpServers entry for:$undeclared"
+[ -z "$unused" ] && ok "and every server declared has a tool that names it" \
+  || bad "and every server declared has a tool that names it" "nothing names:$unused"
 [ -z "$ragged" ] && ok "and no frontmatter key ends in whitespace" \
   || bad "and no frontmatter key ends in whitespace" "trailing whitespace in:$ragged"
 # Repo history is read with a shell, so a definition claiming it declares one.

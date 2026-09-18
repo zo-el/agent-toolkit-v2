@@ -55,7 +55,7 @@ Only `~/.claude`, and Claude Code's plugins, which it fetches:
 - the toolkit's values in `~/.claude/settings.json`, with everything else kept and a backup in `~/.claude/backups` before each write
 - `~/.claude/CLAUDE.md`, replaced after a backup by one that imports the repo's `CLAUDE.md`
 
-It never runs `sudo`, installs a system package, or sets your git identity. `./install.sh --dry-run` prints every change it would make and writes nothing.
+Spawning the `ui-developer` fetches `@playwright/mcp` into the npm cache, which install itself does not. It never runs `sudo`, installs a system package, or sets your git identity. `./install.sh --dry-run` prints every change it would make and writes nothing.
 
 ## Exit codes
 
