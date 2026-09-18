@@ -13,7 +13,7 @@ Install is the other half of this and is not restated here: `documentation/specs
 | wanted release | the release the track resolves to |
 | live version | the version directory the stable link points at, and the version it holds |
 | staged | a release unpacked at `~/.claude/agent-toolkit-releases/v<version>`, complete, with the `REVISION` install reads written beside the `VERSION` the archive already carries |
-| record | `~/.claude/agent-toolkit-staging.json`, everything the updater remembers: the wanted release and its commit, when the last check began and whether it succeeded, the last failure and its cause, the versions marked bad, the version last reported live, the directory that was live before the current one, and the releases it has already announced |
+| record | `~/.claude/agent-toolkit-staging.json`, everything the updater remembers: the wanted release and its commit, when the last check began and whether it succeeded, the last failure and its cause, the versions marked bad, the digest of each staged release, the version last reported live, the directory that was live before the current one, and the releases it has already announced |
 | notes source | the `## Changelog` section of the merged pull request that carried a commit, read in one place and defined below |
 | dev mode | the live version directory is a git work tree, so this machine's toolkit is a clone someone edits |
 
@@ -111,7 +111,7 @@ The machine verifies the commit for itself either way, so immutability is a seco
 | Invocation | Network | Writes | Output | Exit |
 | ----------------------- | ----------- | ------ | ------ | ---- |
 | `hooks/update.sh stage` | GitHub reads | release folders, the record | nothing | always `0` |
-| `hooks/update.sh apply` | none of its own | through install, when a staged release goes live | hook report | always `0` |
+| `hooks/update.sh apply` | none of its own | through install when a staged release goes live, and the folder it sets aside when one fails its seal | hook report | always `0` |
 | `hooks/update.sh now` | GitHub reads | as `stage`, then as `apply` | what it fetched, then install's terminal report | `0`, `1` |
 | `hooks/update.sh --help` | none | nothing | usage | `0` |
 | any other argument | none | nothing | usage on stderr | `2` |
@@ -131,8 +131,8 @@ The machine verifies the commit for itself either way, so immutability is a seco
 | judge | `stage`, `now` | stop when that release is live, already staged, or marked bad |
 | download | `stage`, `now` | fetch the source archive of that commit |
 | verify | `stage`, `now` | the archive is whole, and it is that commit, and that commit is on `main` |
-| unpack | `stage`, `now` | into a part-written folder, `REVISION` written beside the archive's `VERSION`, renamed to `~/.claude/agent-toolkit-releases/v<version>` |
-| activate | `apply`, `now` | run the staged folder's `install.sh` |
+| unpack | `stage`, `now` | into a part-written folder, `REVISION` written beside the archive's `VERSION`, sealed, renamed to `~/.claude/agent-toolkit-releases/v<version>` |
+| activate | `apply`, `now` | check the staged folder against its seal, then run its `install.sh` |
 
 The rename is what makes a release staged: a folder under a `v<version>` name is always complete, and a part-written one never has that name. The rename and the stable link's move are both atomic, so no reader ever sees half of either.
 
@@ -166,10 +166,22 @@ The third is the one that matters most: it is what makes *a person merged this* 
 
 Any failure stages nothing, records the reason, and is reported at the next `apply`.
 
+### Sealing
+
+Verifying asks whether the supplier gave what it said it would. Sealing asks a different question: whether the tree `apply` runs is the tree `stage` verified. Between the two the folder sits on disk for hours, and what `apply` does with it is run its `install.sh`.
+
+- **The seal is a digest over content, not over names.** Every regular file's path, whether it is executable, and a hash of its bytes; every symlink's path and its target; ordered by path, and encoded so that no path can be read as the start of another entry. A folder's name and the `VERSION` inside it are names, and Verifying already says what a name is worth.
+- **It is taken over the part-written folder, immediately before the rename** that makes the folder staged, so it describes exactly what became staged, and it is recorded against that release.
+- **The executable bit is the only mode bit in it.** It is the one the root checks and the launcher turn on. Ownership and timestamps change nothing about what running the tree does, and on a tree owned by the user install runs as, no other mode bit can.
+- **Directories appear only through the paths inside them.** An emptied `skills/` or `agents/` is something the root checks already refuse to install.
+- **It is one machine comparing two moments of its own.** It adds no second opinion on what GitHub served, and it is not meant to.
+
 ### Activating
 
 - Nothing staged for the wanted release, or a staged version equal to the live one, means no install runs. This is the ordinary case, and it costs no more than reading the track, the record and the live version. Whether anything prints is the report's own rule below.
-- Otherwise install runs from the staged folder and does everything install does. Its root checks come first, the stable link moves only when they pass, and its report names what applied.
+- Otherwise the folder is checked against its seal, and only a tree that matches is installed. Install then runs from the staged folder and does everything install does: its root checks come first, the stable link moves only when they pass, and its report names what applied.
+- **The seal is checked immediately before `install.sh` starts, and closes no gap smaller than that.** A tree altered between the check and the run is not caught by it. What makes that window narrow enough to accept is the other half of this: a release directory is approved for nobody, so no agent writes there without the user being asked.
+- **Checking costs what hashing the tree costs**, about a tenth of a second over a release of some sixty files and under a megabyte, against an activation that already runs a whole install with plugin fetches. It happens only where an activation is about to, so a session start with nothing to do still reads three files and stops.
 - **An activation is as slow as a full install, plugin fetches included**, and the session start or compaction that runs it waits. It happens once per release, and the alternative is a machine that never quite has the version it reports.
 - **Went live**, meaning the stable link resolves to the staged folder afterwards: the release is this machine's. The report carries install's own output.
 - **Going live always calls for a restart**, whatever install says. Install asks for one when it changed something Claude Code reads only at start, and a version swap changes none of those files while changing what one of them points at: `~/.claude/CLAUDE.md` imports the version directory's `CLAUDE.md` through the stable link, so the rules change and the file install writes does not.
@@ -177,6 +189,15 @@ Any failure stages nothing, records the reason, and is reported at the next `app
 - **One activation at a time.** `apply` takes the updater's activation lock without waiting more than a moment for it, and a session that cannot take it installs nothing. No session start ever waits out another session's install.
 - **The report comes off the record, not off this run.** `apply` reports whenever the live version differs from the version the record says was last reported, whether this run caused the change or another session did, and then records what it reported. Two sessions starting together are each told once, which is right: they are two sessions.
 - Install's own lock still stands behind all of this, so a `--sync` that takes it after an activation finds the stable link moved off its own root and stops, and an activation that takes it after a `--sync` applies over what that wrote.
+
+**A staged tree that fails its seal is a machine finding its own release altered**, which is not an ordinary download failure and does not read like one.
+
+- Nothing runs. The stable link does not move and the live version is untouched.
+- The folder is set aside under a name that is not a version, and kept. Deleting it would destroy the only evidence of what happened.
+- It is no longer staged, so the next check downloads that release again and seals it afresh. The machine is not stuck, and a second alteration leaves a second folder, so a repeat is visible on disk.
+- The finding is required and names the folder that was kept. There is no automatic fix, because what to do depends on what is in it.
+- **A folder the record holds no seal for is not applied either.** It is discarded and staged again, which is what a replaced record leaves behind. Nothing is known about that tree, and nothing being known is not permission to run it.
+- **A version marked bad is a different thing.** That is a release that installed and did not go live, and `now` retries it. An altered tree is never retried as it stands, because the tree is the thing in question.
 
 **What a new version reaches, and when.**
 
@@ -223,6 +244,7 @@ A machine in dev mode is told once that a release exists which it is not going t
 | the last check failed | advisory | user | that failure's own fix |
 | no check has succeeded in seven days | advisory | user | `~/.claude/agent-toolkit/hooks/update.sh now` |
 | the archive was not the commit the release names, declares another version, or the commit is not on `main` | required | user | nothing automatic: the release is wrong and the repository owner acts |
+| a staged release no longer matches the seal taken when it was staged | required | user | nothing automatic: read what was set aside, which the finding names. The release is staged again on its own |
 | the track holds something else | required | user | edit or remove `~/.claude/agent-toolkit-track` |
 | the track names a release nobody published | required | user | edit `~/.claude/agent-toolkit-track` to a release that exists, or to `latest` |
 | `gh` is missing, holds no token, or cannot see the repository | advisory | user | the same command install's requirement list names, which is where that text lives |
@@ -241,6 +263,7 @@ A machine in dev mode is told once that a release exists which it is not going t
 - **Only `stage` prunes**, never `apply`, so no session start waits on a removal.
 - It keeps the live version directory, the wanted release, and the one the record names as live before the current one. Install computes that directory and keeps no note of it, so the activation that moves off a directory is what records it. Everything else under `~/.claude/agent-toolkit-releases` goes, along with any part-written folder more than a day old.
 - The stable link is read again immediately before each removal, and the directory it points at is never removed.
+- **A folder set aside for failing its seal is never pruned.** It is evidence, and a machine is not the judge of when a person has finished with it.
 - Install never removes a version directory, and that boundary is unchanged. Release folders are the updater's to remove, and a clone is nobody's.
 
 ## Bootstrap
@@ -288,6 +311,8 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 | `stage` is killed partway | a part-written folder is left and pruned later. Nothing is staged, and the next `stage` starts again |
 | two stages overlap | the second takes no lock and exits |
 | `~/.claude/agent-toolkit-releases` cannot be created, written, or holds no room | nothing is staged, the reason is recorded, and the next `apply` reports it with its own fix |
+| the staged tree does not match its seal | nothing runs. The folder is set aside and kept, the release is staged again at the next check, and the finding is required |
+| the record holds no seal for a staged folder | it is not applied. The folder is discarded and staged again |
 | install from the staged folder does not go live | nothing on the machine changed. The version is marked bad and the report carries install's reason |
 | install goes live and a later write fails | install's own contract: the new version is live and the report names what did not apply |
 | an activation is killed partway | the stable link may already have moved, so the release is live and the rest of the install is not done. A `--sync` from the new root, in that session or the next, applies the remainder and stamps it. The report was lost with the process, so the next `apply` finds a live version the record never reported and says so then |
@@ -295,7 +320,7 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 | the track holds something the updater does not accept | the updater stops and reports. Nothing is checked, downloaded or applied |
 | the track names a release nobody published | nothing is staged. Required finding naming the track's line, rather than the silence a missing `latest` earns |
 | GitHub will not say whether the commit is on `main` | nothing is staged. An ordinary recorded failure, never the finding that the release is wrong |
-| the record will not parse | it is replaced and the run says so. A check and an activation both still happen: the record is what the updater remembers, not what it is allowed to do |
+| the record will not parse | it is replaced and the run says so. A check still happens, and a folder the replaced record holds no seal for is staged again rather than applied |
 | the stable link dangles | the updater is behind it and cannot run. The launcher reports it, and the bootstrap is the way back |
 | a staged folder is deleted by hand | it is staged again at the next check |
 | the suite fails in the workflow | no release. The run fails, and GitHub tells the author. Machines see nothing new, which is correct |
@@ -324,6 +349,7 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 - **Install owning the update state.** How a version arrives is outside install, and that boundary is what lets install treat a clone and a release identically.
 - **Verifying by recomputing the tree.** It restates the trust Verifying already rests on rather than adding to it, and it stops being true the day the repository gains an `export-ignore`.
 - **A release asset instead of the source archive.** The archive of a commit is already fixed content, and an asset adds an upload step and a second thing to verify.
+- **Sealing the live version directory too.** A staged tree has one moment before it runs and a live one has none: its hooks fire on every tool call, so by the time anything could check it, it has already run. A check at session start would vouch for nothing that happened in the session before it, and it would be computed by code inside the tree it was checking, which is not a control. What covers the live tree is that a release directory is approved for nobody.
 - **A status line segment for a pending update.** It shows something that stops being true at the next session start.
 - **Applying at the `fork` session source.** A compaction is the point at which a session's context is rebuilt; a fork inherits one that is already running.
 - **A copy of the updater outside every version directory.** It is a second thing to keep in step, and the launcher already names the fix when the stable link dangles.

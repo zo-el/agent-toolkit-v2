@@ -104,6 +104,24 @@ The stamp and the status line's freshness light read equality through this rule,
 - **A ledger that does not parse never holds an apply back.** It is moved aside to a backup name and the run carries on as though there were none: every toolkit-owned value is set, and nothing is retired. The run reports it.
 - Replacing a `settings.json` or a pointer that was a symlink writes the file in its place and says so.
 
+### Approved directories
+
+`permissions.additionalDirectories` names the paths a tool may reach without the user being asked. A path inside one is approved before any rule is consulted, which is what stops a background agent stalling on a prompt, and it approves writing as readily as reading.
+
+**The list is the agents' working state, and nothing else.** Install, the updater and every hook write as processes rather than through a tool, so nothing the toolkit owns has to be approved for the toolkit to work. What earns a place is only what an agent touches while working:
+
+| Path | Why |
+| ---- | --- |
+| the scratchpad | an agent's intermediate files, which belong nowhere else |
+| `~/.claude/worktrees` | an agent given an isolated copy of a repository works in one of these |
+| `~/.claude/tools` | the bridge directory, which the bridge fills at its first run |
+| the version directory, only when it is a git work tree | a clone is what somebody edits, and the `toolkit` skill edits it |
+
+- **`~/.claude` itself is not approved.** It holds the credentials file, the session transcripts, the plugin store, the agent copies and `settings.json`, and approving the parent approves a silent write to every one of them.
+- **A release directory is approved for nobody, live or staged.** A staged tree is one activation away from running and a live one is running already. That is also why the version directory earns its place only as a work tree: the entry that lets somebody edit a clone would, on a machine installed from a release, hand every agent the code that runs at the next session start.
+- **The deny rules stay.** A path left off the list is a question; a deny is never, and the credentials file and `settings.json` are worth never.
+- **What a path costs by being left off is a question, not a refusal.** An agent reading `settings.json` to work out what the doctor means, or reading a staged release, is asked first. For a background agent a question is a stall, so a path an agent touches routinely belongs on the list and one it touches once a year does not.
+
 ## Wiring
 
 - Every command the toolkit writes into settings, the status line included, runs the launcher with the entry point it stands for. Each one runs correctly when the home path contains a space.
