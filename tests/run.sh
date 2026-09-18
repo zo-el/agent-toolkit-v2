@@ -202,6 +202,12 @@ EN="$(printf '\xe2\x80\x93')"
 # The retro format as a file publishes it. Out here because the documentation
 # check at the end of the suite runs past the fixture guard below.
 template() { sed -n 's/.*`\(- YYYY-MM-DD[^`]*\)`.*/\1/p' "$1"; }
+# The format with its placeholders filled in, which is what an append looks
+# like: the fixture below commits one, and the log's pattern is held to it.
+render() {
+  template "$1" | sed -e 's/YYYY-MM-DD/2026-08-30/' -e 's/<agent>/developer/' \
+    -e 's/<project>/agent-toolkit/' -e 's/<what was inefficient.*>/a brief naming its sha costs a round/'
+}
 
 FX="$TMP/fixture"
 mkdir -p "$FX"
@@ -298,8 +304,7 @@ undo
 
 # A retro append is routine and correct, so it must never need the override.
 # Filled in from the format CLAUDE.md publishes, so it is that one under test.
-line="$(template "$ROOT/CLAUDE.md" | sed -e 's/YYYY-MM-DD/2026-08-30/' -e 's/<agent>/developer/' \
-  -e 's/<project>/agent-toolkit/' -e 's/<what was inefficient.*>/a brief naming its sha costs a round/')"
+line="$(render "$ROOT/CLAUDE.md")"
 case "$line" in
   ""|*"<"*) bad "the published format fills in" "CLAUDE.md yielded: ${line:-<nothing>}" ;;
   *)        ok  "the published format fills in" ;;
@@ -2323,30 +2328,34 @@ for a in "$ROOT"/agents/*.md; do
 done
 [ -z "$missing" ] && ok "every agent must answer Retro" || bad "every agent must answer Retro" "missing in:$missing"
 
-# The CTO routes on the report's first line, so the statuses an agent may write
-# and the ones CLAUDE.md routes on are one list, and the line leads the contract
-# it belongs to.
-unrouted="$(python3 - "$ROOT" <<'PY'
+# The statuses an agent may write and the ones CLAUDE.md routes on are one list,
+# and a status counts as routed only where an action follows it. The output goes
+# through a file because bash 3.2 ends a $( ) by scanning for the closing paren,
+# which the backticks in the heredoc below would carry to the end of the suite.
+python3 - "$ROOT" > "$TMP/statuses" <<'PY'
 import glob
 import re
 import sys
 
 home = sys.argv[1]
-routed = set(re.findall(r"`Status: ([a-z ]+)`", open(home + "/CLAUDE.md", encoding="utf-8").read()))
+routed = set(re.findall(r"^- `Status: ([^`]+)` →", open(home + "/CLAUDE.md", encoding="utf-8").read(), re.M))
 drift = [] if routed else ["CLAUDE.md routes on no status at all"]
 for definition in sorted(glob.glob(home + "/agents/*.md")):
     agent = definition.rsplit("/", 1)[-1]
     contract = open(definition, encoding="utf-8").read().split("## What you return")[-1]
     returned = [line for line in contract.splitlines() if line.startswith("- ")]
-    if not returned or not returned[0].startswith("- `Status:`"):
+    first = returned[0] if returned else ""
+    if not first.startswith("- `Status:`"):
         drift.append(agent + " does not open its report with a status")
-        continue
-    offered = set(re.findall(r"`([a-z ]+)`", returned[0].split("first line:")[-1]))
-    if offered != routed:
-        drift.append("%s offers %s" % (agent, ", ".join(sorted(offered)) or "nothing"))
+    elif "first line:" not in first:
+        drift.append(agent + " does not name its statuses after 'first line:'")
+    else:
+        offered = set(re.findall(r"`([^`]+)`", first.split("first line:")[-1]))
+        if offered != routed:
+            drift.append("%s offers %s" % (agent, ", ".join(sorted(offered)) or "nothing"))
 print("; ".join(drift))
 PY
-)"
+unrouted="$(cat "$TMP/statuses")"
 [ -z "$unrouted" ] && ok "every report opens with a status the CTO routes on" \
   || bad "every report opens with a status the CTO routes on" "$unrouted"
 
@@ -2381,34 +2390,73 @@ for want in "$BLOCKED_LINE" "${HINT%%. Tools*}"; do
     || bad "README publishes: $want" "README.md does not carry it"
 done
 
-# The skills row is the only index of what is here, so a skill missing from it
-# is a skill nobody reaches for. The row itself must exist, or every name would
-# match the same nothing.
+# Install links a skill whether or not the README names it, so the row is the
+# half that goes stale, in both directions. An absent row matches every name, so
+# it fails. find at any depth, because that is what install.sh links, and the
+# link carries the directory name while the Skill tool answers to the other one.
 row="$(grep -F '| `skills/` |' "$ROOT/README.md")"
-unlisted=""
-for s in "$ROOT"/skills/*/SKILL.md; do
+installed=" "; unlisted=""; misnamed=""; unbuilt=""
+while IFS= read -r s; do
   name="$(basename "$(dirname "$s")")"
+  installed="$installed$name "
   case "$row" in *"\`$name\`"*) ;; *) unlisted="$unlisted $name" ;; esac
+  [ "$(sed -n 's/^name: //p' "$s" | head -1)" = "$name" ] || misnamed="$misnamed $name"
+done <<EOF
+$(find "$ROOT/skills" -name SKILL.md | sort)
+EOF
+for want in $(printf '%s\n' "$row" | grep -o '`[a-z][a-z-]*`' | tr -d '`'); do
+  case "$installed" in *" $want "*) ;; *) unbuilt="$unbuilt $want" ;; esac
 done
-if [ -z "$row" ]; then
-  bad "the README names every skill" "README.md carries no skills row"
+if [ -z "$row" ] || [ "$installed" = " " ]; then
+  bad "the README names every skill" "no skills row, or no skill under skills/"
 elif [ -n "$unlisted" ]; then
   bad "the README names every skill" "not named:$unlisted"
 else
   ok "the README names every skill"
 fi
+[ -z "$unbuilt" ] && ok "and every name in the row is a skill" \
+  || bad "and every name in the row is a skill" "no skill behind:$unbuilt"
+[ -z "$misnamed" ] && ok "and a skill's frontmatter name is its directory" \
+  || bad "and a skill's frontmatter name is its directory" "disagreeing in:$misnamed"
 
-written="$(grep -c '^- [0-9]' "$ROOT/RETRO.md")"
-shaped="$(grep -cE '^- [0-9-]+ · [^ ·]+ · [^ ·]+: ' "$ROOT/RETRO.md")"
-# An emptied log is where a retro leaves it, so there is nothing to hold to the
-# format and nothing proved either way. The format itself is checked above,
-# against the template both homes publish.
-if [ "${written:-0}" -eq 0 ]; then
+# A definition naming a skill is a reference like any other, so retiring one
+# breaks something rather than leaving an instruction pointing at nothing.
+referenced="$(grep -ho '`[a-z][a-z-]*` skill' "$ROOT/CLAUDE.md" "$ROOT"/agents/*.md "$ROOT"/skills/*/SKILL.md \
+  | tr -d '`' | sed 's/ skill$//' | sort -u)"
+dangling=""
+for want in $referenced; do
+  case "$installed" in *" $want "*) ;; *) dangling="$dangling $want" ;; esac
+done
+if [ -z "$referenced" ]; then
+  bad "every skill a definition names exists" "no definition names one, so nothing was checked"
+elif [ -n "$dangling" ]; then
+  bad "every skill a definition names exists" "named but not installed:$dangling"
+else
+  ok "every skill a definition names exists"
+fi
+
+# The published template, filled in, against the pattern the log is held to. An
+# emptied log is where a retro leaves it, so without this nothing exercises the
+# pattern and the two drift apart in silence.
+SHAPE='^- [0-9-]+ · [^ ·]+ · [^ ·]+: '
+filled="$(render "$ROOT/CLAUDE.md")"
+printf '%s\n' "$filled" | grep -qE "$SHAPE" \
+  && ok "the published format satisfies the shape the log is held to" \
+  || bad "the published format satisfies the shape the log is held to" "${filled:-<nothing>}"
+printf '%s\n' "${filled%%·*}" | grep -qE "$SHAPE" \
+  && bad "and the shape turns down a line missing its fields" "${filled%%·*}" \
+  || ok "and the shape turns down a line missing its fields"
+
+# Every bullet, not every dated one: a line that lost its date is what this
+# catches, and counting only dated lines would read it as an empty log.
+bullets="$(grep -c '^- ' "$ROOT/RETRO.md")"
+shaped="$(grep -cE "$SHAPE" "$ROOT/RETRO.md")"
+if [ "${bullets:-0}" -eq 0 ]; then
   skip "every line in the log carries it" "the log holds no line, which is where a retro leaves it"
-elif [ "$written" = "$shaped" ]; then
+elif [ "$bullets" = "$shaped" ]; then
   ok "every line in the log carries it"
 else
-  bad "every line in the log carries it" "${shaped:-0} of ${written:-0} lines match"
+  bad "every line in the log carries it" "${shaped:-0} of ${bullets:-0} lines match"
 fi
 
 # Each threshold is a judgement the spec argues for, so the two must not drift.
