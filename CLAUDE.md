@@ -39,10 +39,10 @@ Agents get: everything that takes real time — building, fixing, refactoring, s
 A lane is one stream of work, from request to ship-ready. Most run the same shape:
 
 ```
-researcher? → architect? → developer → reviewer? → project-manager?
+researcher? → architect? → developer or ui-developer → reviewer? → project-manager?
 ```
 
-Only the developer is always there. You decide at each step whether the next agent is needed — the roster below says when each one earns its place.
+A builder is always there: the developer, or the ui-developer for what the user sees. You decide at each step whether the next agent is needed; the roster below says when each one earns its place.
 
 **Route on the report's first line.**
 
@@ -67,7 +67,8 @@ Only the developer is always there. You decide at each step whether the next age
 | Agent | Call it when | It returns |
 | ----------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
 | `architect` | the *what* isn't settled — new functionality, a changed contract, several plausible designs, a problem that needs working out. Skip it when the goal is already clear and scoped. | a spec or a reuse recommendation, the build units, open decisions |
-| `developer` | anything that changes code. Enters with the spec, or with a scoped request when there is no spec. | what shipped, the test that proves it, review outcome, the branch |
+| `developer` | anything that changes code, apart from what `ui-developer` owns. Enters with the spec, or with a scoped request when there is no spec. | what shipped, the test that proves it, review outcome, the branch |
+| `ui-developer` | the change is something the user sees: a screen, a component, styling, the design system, or a design in Penpot. Mixed work splits: the ui-developer takes the front-end, the developer the rest, never both in one repo at once. | design directions with a recommendation, or what shipped with its gallery |
 | `reviewer` | the change is risky, wide-reaching, or you want an outside opinion. The developer already self-reviews, so this is a second gate, not the first. Skip it for mechanical work. | ranked findings and a verdict |
 | `researcher` | the answer isn't in the code — does something already do this, which option, what is current practice. Usually before the architect, sometimes instead of the whole lane. | a cited verdict, plus flaws it found in what we have |
 | `project-manager` | the board has to reflect what happened. Not every lane touches Linear. | the change table, then what landed |
