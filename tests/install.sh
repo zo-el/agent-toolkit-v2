@@ -843,6 +843,7 @@ inst "$WT" "$H" --dry-run
 exit_is "and a dry run of one exits 1 as well" 1
 same "writing nothing either" "$before" "$(snapshot "$H")"
 SIBLING_HOME="$(home worktree-sibling)"
+mkdir -p "$SIBLING_HOME/.claude/worktrees"
 copy_root "$SIBLING_HOME/.claude/worktrees-old/wt"
 inst "$SIBLING_HOME/.claude/worktrees-old/wt" "$SIBLING_HOME"
 exit_is "while a directory beside it that only shares its name's start installs" 0
