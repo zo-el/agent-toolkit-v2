@@ -366,6 +366,9 @@ same "so a clone approves three paths, and keeps the user's own where it was" \
   "/my/own/dir /tmp/claude-$(id -u) $FAKE/.claude/worktrees $ROOT" "$approved"
 check "credentials denied through ~/" "Read(~/.claude/.credentials.json)" "$(settings '.permissions.deny | join(" ")')"
 check "review plugin enabled" "true" "$(settings '.enabledPlugins["pr-review-toolkit@claude-plugins-official"]')"
+# The ui-developer names both of these, so every machine's has to have them.
+check "and the two the ui-developer works from" "true true" \
+  "$(settings '[.enabledPlugins["frontend-design@claude-plugins-official"], .enabledPlugins["modern-web-guidance@claude-plugins-official"]] | join(" ")')"
 same "the stable link points at the version directory" "$ROOT" "$(readlink "$FAKE/.claude/agent-toolkit")"
 check "the pointer imports through ~/" "@~/.claude/agent-toolkit/CLAUDE.md" "$(cat "$FAKE/.claude/CLAUDE.md")"
 cmp -s "$ROOT/hooks/launcher.sh" "$FAKE/.claude/agent-toolkit-run" && [ -x "$FAKE/.claude/agent-toolkit-run" ] \
@@ -485,7 +488,7 @@ exit_is "a required finding at session start still exits 0" 0
 [ -z "$(grep -E '\|plugin (marketplace add|install) ' "$CLAUDE_CALLS")" ] && ok "and a session start with plugins missing fetches nothing" \
   || bad "a session start with plugins missing fetches nothing" "$(cat "$CLAUDE_CALLS")"
 json_is "and prints one SessionStart object with a message for the user" \
-  '.hookSpecificOutput.hookEventName == "SessionStart" and (.systemMessage | test("^agent-toolkit: 2 problems"))'
+  '.hookSpecificOutput.hookEventName == "SessionStart" and (.systemMessage | test("^agent-toolkit: 4 problems"))'
 json_is "and gives the model every finding with who acts and the fix" \
   '.hookSpecificOutput.additionalContext | startswith("agent-toolkit doctor:\n✗ plugin pr-review-toolkit@claude-plugins-official is not installed. Fix (install): ~/.claude/agent-toolkit/install.sh")'
 hook "$H" "$(command_for "$H" PostToolUse sync.sh)" \
@@ -1714,6 +1717,12 @@ inst "$ROOT" "$H"
 check "a full install registers each marketplace over HTTPS" "1|plugin marketplace add anthropics/claude-plugins-official" "$(cat "$CLAUDE_CALLS")"
 check "from the notifications plugin's current source" "1|plugin marketplace add 777genius/agent-notifications" "$(cat "$CLAUDE_CALLS")"
 check "and installs each plugin at user scope over HTTPS" "1|plugin install claude-notifications-go@claude-notifications-go --scope user --json" "$(cat "$CLAUDE_CALLS")"
+# Three of the four share a marketplace, so a run that registered it once for
+# each would have registered it three times.
+same "a marketplace three plugins share is registered once" "1" \
+  "$(grep -c 'plugin marketplace add anthropics/claude-plugins-official' "$CLAUDE_CALLS")"
+same "and each plugin is installed once" "4" \
+  "$(grep -c 'plugin install .* --scope user --json' "$CLAUDE_CALLS")"
 check "and asks for a restart" "plugins changed" "$out"
 : >"$CLAUDE_CALLS"
 inst "$ROOT" "$H" --sync
@@ -1736,8 +1745,14 @@ exit_is "a failing plugin install exits 1" 1
 check "with Claude Code's own message" "plugin pr-review-toolkit@claude-plugins-official was not installed: the stub fetch failed" "$(block 'Run install again')"
 check "and settings still applied" "agent-toolkit-run" "$(js "$H" '.statusLine.command')"
 H="$(home marketplace-fails)"
+: >"$CLAUDE_CALLS"
 out="$(HOME="$H" CLAUDE_STUB_FAIL=add "$ROOT/install.sh" 2>&1)"
 check "a failing marketplace fetch carries its message too" "was not registered: ✘ Failed to add marketplace: the stub refused" "$out"
+# Asked once, and every plugin behind it told, rather than asked once per plugin.
+same "a marketplace that would not register is asked for once" "1" \
+  "$(grep -c 'plugin marketplace add anthropics/claude-plugins-official' "$CLAUDE_CALLS")"
+same "and none of the plugins behind it is fetched" "" \
+  "$(grep 'plugin install .*claude-plugins-official' "$CLAUDE_CALLS")"
 
 # Which events notify is the plugin's setting and the user's decision, so the
 # doctor says the same thing either way. Both paths a check could plausibly

@@ -44,6 +44,8 @@ MIN_CLAUDE=2.1.268
 # id and the GitHub source its marketplace is registered from.
 PLUGINS=(
   "pr-review-toolkit@claude-plugins-official anthropics/claude-plugins-official"
+  "frontend-design@claude-plugins-official anthropics/claude-plugins-official"
+  "modern-web-guidance@claude-plugins-official anthropics/claude-plugins-official"
   "claude-notifications-go@claude-notifications-go 777genius/agent-notifications"
 )
 
@@ -925,13 +927,21 @@ listing() { # [marketplace] → the JSON array in LISTING, or a finding and stat
 }
 
 fetch_plugins() {
-  local marketplaces plugins spec id source market out rc
+  local marketplaces plugins spec id source market out rc asked=" " refused=" "
   listing marketplace || return
   marketplaces="$LISTING"
   for spec in "${PLUGINS[@]}"; do
     id="${spec%% *}" source="${spec#* }" market="${spec%% *}"
     market="${market#*@}"
     jq -e --arg m "$market" 'any(.[]; .name == $m)' <<<"$marketplaces" >/dev/null && continue
+    # The listing is taken once, so a marketplace several plugins share would be
+    # registered once for each of them without this. One that would not register
+    # fails every plugin behind it rather than being asked for again.
+    if [[ "$asked" == *" $market "* ]]; then
+      [[ "$refused" != *" $market "* ]] || FAILED_PLUGINS+="$id "
+      continue
+    fi
+    asked+="$market "
     if [ "$MODE" = dry ]; then
       CHANGES+=("register plugin marketplace $market from $source")
       continue
@@ -943,6 +953,7 @@ fetch_plugins() {
     else
       finding required install "plugin marketplace $market was not registered: $(fetch_failure "$rc" "$out")" "$(install_command)"
       FAILED_PLUGINS+="$id "
+      refused+="$market "
     fi
   done
   listing || return
