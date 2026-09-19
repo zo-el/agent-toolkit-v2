@@ -729,7 +729,8 @@ case " $(js "$H" '.permissions.additionalDirectories | join(" ")') " in
   *" $H/.claude "*) ok "a home that was installed with ~/.claude approved has it" ;;
   *) bad "a home that was installed with ~/.claude approved has it" "$(js "$H" '.permissions.additionalDirectories | join(" ")')" ;;
 esac
-# A write that leaves it approved took nothing away, whichever rule moved it.
+# The rule strips it and this version's desired list puts it back, so a write
+# that ends with it approved took nothing away.
 jq '.permissions.deny = []' "$H/.claude/settings.json" >"$TMP/settings" \
   && cp "$TMP/settings" "$H/.claude/settings.json"
 inst "$WHOLESALE" "$H"
@@ -785,7 +786,7 @@ case "$out" in
 esac
 
 # The session start is the run that takes it away on most machines, and it says
-# so there. One set again is one taken away again.
+# so there.
 H="$(home approved-revoked)"
 inst "$ROOT" "$H"
 sets_claude_dir() {
@@ -812,6 +813,19 @@ case "$out" in
   *) ok "a dry run takes nothing away, so says nothing was" ;;
 esac
 revoked "and setting it again is said again" 1
+
+# A home that ends in a slash, which a passwd entry can hand a shell, spells the
+# rule's own path with two of them. Neither spelling of ~/.claude may survive it.
+H="$(home approved-slashed)"
+inst "$ROOT" "$H/"
+jq --arg h "$H" '.permissions.additionalDirectories += ["~/.claude", $h + "/.claude"]' "$H/.claude/settings.json" >"$TMP/settings" \
+  && cp "$TMP/settings" "$H/.claude/settings.json"
+inst "$ROOT" "$H/"
+case " $(js "$H" '.permissions.additionalDirectories | join(" ")') " in
+  *" ~/.claude "* | *" $H/.claude "*) bad "a home written with a trailing slash still loses ~/.claude" "$(js "$H" '.permissions.additionalDirectories')" ;;
+  *) ok "a home written with a trailing slash still loses ~/.claude" ;;
+esac
+check "and says it took ~/.claude away" ".claude was approved for every agent without a question" "$out"
 
 # ── a version directory under ~/.claude/worktrees ────────────────────────────
 # Every agent may write there without being asked, so the one path by which an

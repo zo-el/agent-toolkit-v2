@@ -723,6 +723,44 @@ out="$(PATH="$USTUBS:$PATH" HOME="$UH" "$SEALLESS/hooks/update.sh" apply 2>&1)"
 rc=$?
 reports "and says why at the next session start" "! the last update check failed: v1.5.0 could not be sealed"
 
+# Only the rename has to succeed for the release's name to be free, and a folder
+# still under it is never staged again, so that is the step whose failure is said.
+if [ "$(id -u)" -ne 0 ]; then
+  UH="$(home update-undeletable)"
+  publish v1.5.0 "$SHA" v1.5.0
+  recheck
+  keep 'del(.seals)'
+  chmod a-w "$(staged v1.5.0)/hooks"
+  up apply
+  advises "an unsealed folder that will not delete whole is discarded all the same" \
+    "! v1.5.0 was unpacked here with nothing recorded to check it against, so it was discarded"
+  [ ! -d "$(staged v1.5.0)" ] && ok "freeing the release's name" || bad "the release's name is freed" "the folder is still there"
+  left="$(find "$UH/.claude/agent-toolkit-releases" -maxdepth 1 -name '.staging.v1.5.0.*' -type d)"
+  [ -n "$left" ] && ok "with what would not delete kept where pruning reaches it" \
+    || bad "the remains are under a part-written name" "$(ls -a "$UH/.claude/agent-toolkit-releases")"
+  find "$UH/.claude/agent-toolkit-releases" -maxdepth 2 -type d -exec chmod u+w {} + 2>/dev/null
+  touch -d '2 days ago' "$left"
+  recheck
+  [ ! -e "$left" ] && ok "which it does once it is a day old" || bad "pruning takes the remains" "they are still there"
+  [ -n "$(kept '.seals["v1.5.0"]')" ] && ok "and the release is staged and sealed afresh" \
+    || bad "the discarded release is staged again" "no seal was recorded"
+
+  keep 'del(.seals)'
+  chmod a-w "$UH/.claude/agent-toolkit-releases"
+  up apply
+  chmod u+w "$UH/.claude/agent-toolkit-releases"
+  reports "one that cannot even be moved is a required finding" \
+    "✗ v1.5.0 was unpacked here with nothing recorded to check it against, and could not be moved out of the way, so nothing was installed"
+  check "with the command that removes it" "rm -rf ~/.claude/agent-toolkit-releases/v1.5.0" "$out"
+  case "$out" in
+    *"so it was discarded"*) bad "and never says it was discarded" "$out" ;;
+    *) ok "and never says it was discarded" ;;
+  esac
+  [ -d "$(staged v1.5.0)" ] && ok "the folder being still there" || bad "the unmovable folder stays" "it is gone"
+else
+  skip "an unsealed folder that cannot be removed" "running as root, which removes anything"
+fi
+
 # ── now ──────────────────────────────────────────────────────────────────────
 UH="$(home update-now)"
 publish v1.4.0 "$OLD" v1.4.0
@@ -885,6 +923,7 @@ case "$said" in
   *altered*) bad "and rolling forward again never reads as tampering" "$said" ;;
   *) ok "and rolling forward again never reads as tampering" ;;
 esac
+advises "but as the discard it is" "! v1.5.0 was unpacked here with nothing recorded to check it against"
 [ -z "$(find "$UH/.claude/agent-toolkit-releases" -maxdepth 1 -name '.altered.*' -print -quit)" ] \
   && ok "so nothing is set aside on a healthy machine" || bad "nothing is set aside" "a folder was"
 # Unsealed rather than altered, which Activating answers by discarding it. The
@@ -913,8 +952,9 @@ same "and when latest goes back, so does the machine" "$(staged v1.4.0)" "$(read
 reports "saying which version it came down from" "v1.4.0 is live, from v1.5.0·${SHA:0:7}"
 same "and the stamp follows it down" "v1.4.0·${OLD:0:7}" "$(cat "$UH/.claude/agent-toolkit-version")"
 
-# The folder it came down from is the fallback, unsealed since it went live, and a
-# pin is a plain file write: taking it back is a discard the machine says.
+# The folder it came down from is the fallback, unsealed since it went live, and
+# pinning it reaches that folder with no check in between, so the discard has to
+# be said.
 [ -d "$(staged v1.5.0)" ] || bad "the release it came down from is still on disk" "it is not, so the case proves nothing"
 track v1.5.0
 up apply
@@ -931,6 +971,21 @@ esac
 [ -n "$(kept '.seals["v1.5.0"]')" ] && ok "and seals it" || bad "the release staged again is sealed" "no seal was recorded"
 up apply
 same "and the pin takes the machine to it" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+# now reaches the same folder, and stops there rather than installing it.
+[ -d "$(staged v1.4.0)" ] || bad "the release it came from is still on disk" "it is not, so the case proves nothing"
+track v1.4.0
+up now
+exit_is "now on a pinned unsealed fallback installs nothing" 1
+check "saying it discarded that folder" \
+  "! v1.4.0 was unpacked here with nothing recorded to check it against, so it was discarded rather than installed" "$out"
+case "$out" in
+  *altered* | *✗*) bad "and never as tampering or a required finding" "$out" ;;
+  *) ok "and never as tampering or a required finding" ;;
+esac
+[ ! -d "$(staged v1.4.0)" ] && ok "with the folder gone" || bad "now discards the unsealed fallback" "it is still there"
+up now
+exit_is "so the next now downloads it afresh and installs it" 0
+same "and the machine is on it" "$(staged v1.4.0)" "$(readlink "$UH/.claude/agent-toolkit")"
 track
 
 # ── nowhere to put it ────────────────────────────────────────────────────────

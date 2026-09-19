@@ -234,16 +234,16 @@ def refused(entry, rule, home):
     that any path resolver collapses. A symlink pointing into one is not caught,
     which would need the filesystem: an entry like that is one the user made and
     approved deliberately, and it is theirs."""
-    path = named(entry, home)
+    path = entry_path(entry, home)
     if path is None:
         return False
     if "is" in rule:
-        return path == rule["is"]
-    return path == rule["under"] or path.startswith(rule["under"] + "/")
+        return path == os.path.normpath(rule["is"])
+    under = os.path.normpath(rule["under"])
+    return path == under or path.startswith(under + "/")
 
 
-def named(entry, home):
-    """The directory an entry names, or None for an entry that is not a path."""
+def entry_path(entry, home):
     if not isinstance(entry, str):
         return None
     if entry.startswith("~/"):
@@ -252,9 +252,7 @@ def named(entry, home):
 
 
 def merge(current, request, on_disk):
-    """(merged, ledger, restart reasons, approvals taken away). on_disk is what
-    the ledger holds, or None when there is none and the file itself has to say
-    what an earlier install wrote."""
+    """(merged, ledger, restart reasons, approvals taken away)."""
     if not isinstance(current, dict):
         raise SettingsError("user", "the top level is not an object")
     desired = request["desired"]
@@ -311,17 +309,17 @@ def merge(current, request, on_disk):
 
 
 def taken_away(current, merged, request):
-    """The paths a kept-unset rule names that current approves and merged does
-    not. Read off the two files rather than the rule's own filter, because the
-    ledger retires the entry an earlier version wrote before that filter runs."""
+    """The paths a kept-unset rule names that the settings held before the merge
+    and do not after it. Read off both rather than the rule's own filter, because
+    the ledger retires the entry an earlier version wrote before that filter runs."""
     home = request["home"]
     gone = set()
     for rule in request.get("forbidden", []):
         before = get(current, tuple(rule["path"]))
         after = get(merged, tuple(rule["path"]))
         if isinstance(before, list):
-            left = {named(e, home) for e in after} if isinstance(after, list) else set()
-            gone |= {named(e, home) for e in before if refused(e, rule, home)} - left
+            left = {entry_path(e, home) for e in after} if isinstance(after, list) else set()
+            gone |= {entry_path(e, home) for e in before if refused(e, rule, home)} - left
     return sorted(gone)
 
 

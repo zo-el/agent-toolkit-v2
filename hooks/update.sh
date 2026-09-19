@@ -533,11 +533,11 @@ apply_wanted() {
   }
 }
 
-# Under a name no release has, so pruning never reaches it and nothing mistakes
-# it for a release.
-set_aside() { # the staged folder → where it was kept, or nothing
+# Under a name no release has, so nothing mistakes it for a release. Pruning
+# removes a .staging one after a day, and never an .altered one.
+set_aside() { # the staged folder, altered or staging → where it went, or nothing
   local base kept n=0
-  base="$RELEASES/.altered.$WANTED.$(now_seconds)"
+  base="$RELEASES/.$2.$WANTED.$(now_seconds)"
   kept="$base"
   # -L as well as -e, because a dangling symlink is a name that is taken and a
   # rename onto it fails, which would leave the evidence with nowhere to go.
@@ -555,8 +555,15 @@ seal_holds() { # the staged folder
   [ "$(real_path "$1")" != "$(live_root)" ] || return 0
   recorded="$(sealed "$WANTED")"
   if [ -z "$recorded" ]; then
-    # Nothing being known about a tree is not permission to run it.
-    rm -rf "$1"
+    # Nothing being known about a tree is not permission to run it. Renamed before
+    # it is removed, so a removal that stops partway still frees the release's
+    # name for the next stage, and pruning takes what it left.
+    if ! kept="$(set_aside "$1" staging)"; then
+      finding required user "$WANTED was unpacked here with nothing recorded to check it against, and could not be moved out of the way, so nothing was installed" \
+        "rm -rf ~/.claude/agent-toolkit-releases/$(shq "$WANTED")"
+      return 1
+    fi
+    rm -rf "$kept" 2>/dev/null
     finding advisory user "$WANTED was unpacked here with nothing recorded to check it against, so it was discarded rather than installed. It is staged again on its own"
     return 1
   fi
@@ -564,7 +571,7 @@ seal_holds() { # the staged folder
   # now, has been altered as surely as one whose bytes moved.
   taken="$(take_seal "$1")"
   [ -n "$taken" ] && [ "$taken" = "$recorded" ] && return 0
-  if ! kept="$(set_aside "$1")"; then
+  if ! kept="$(set_aside "$1" altered)"; then
     finding required user "$WANTED was altered after this machine unpacked it, and could not be moved out of the way, so nothing was installed" \
       "rm -rf ~/.claude/agent-toolkit-releases/$(shq "$WANTED")"
     return 1
