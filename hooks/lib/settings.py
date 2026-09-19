@@ -7,9 +7,9 @@ the Settings contract in documentation/specs/install.md.
 
 The request carries: settings, ledger and backups paths; desired, a fragment
 shaped like settings.json; absent, key paths the toolkit keeps unset; forbidden,
-array members it keeps unset, matched by what they are; home,
-root and prev_root, for recognising what an earlier install wrote. The result
-is one JSON object on stdout.
+array members it keeps unset, matched by what they are; home, root and
+prev_root, for recognising what an earlier install wrote. The result is one JSON
+object on stdout.
 """
 
 import copy
@@ -227,12 +227,19 @@ def predating(request, current, values, members):
 def refused(entry, rule, home):
     """A member the toolkit keeps unset, matched by what it is rather than by a
     ledger that vouches for who wrote it: one path exactly, or anything at or
-    below one. A path above either is the user's own and is left alone."""
+    below one. A path above either is the user's own and is left alone.
+
+    Normalised first, because the rule names a directory and there are a dozen
+    spellings of one: a trailing slash, a doubled separator, a "." or a ".."
+    that any path resolver collapses. A symlink pointing into one is not caught,
+    which would need the filesystem: an entry like that is one the user made and
+    approved deliberately, and it is theirs."""
     if not isinstance(entry, str):
         return False
-    path = entry.rstrip("/")
+    path = entry
     if path.startswith("~/"):
         path = home + path[1:]
+    path = os.path.normpath(path)
     if "is" in rule:
         return path == rule["is"]
     return path == rule["under"] or path.startswith(rule["under"] + "/")

@@ -21,6 +21,7 @@ SKILLS_DST="$CLAUDE_DIR/skills"
 AGENTS_DST="$CLAUDE_DIR/agents"
 MANIFEST="$AGENTS_DST/.toolkit-agents"
 RELEASES="$CLAUDE_DIR/agent-toolkit-releases"
+WORKTREES="$CLAUDE_DIR/worktrees"
 BRIDGE_SRC="$ROOT/tools/penpot-mcp"
 BRIDGE_DST="$CLAUDE_DIR/tools/penpot-mcp"
 # Install copies every file it finds, so a fifth travels on its own. These four
@@ -154,9 +155,8 @@ JQ
 ABSENT='[["env","CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"]]'
 
 # Approvals kept unset in the same way, because retiring one needs a ledger to
-# vouch that the toolkit wrote it, and a machine that lost its ledger would keep
-# for good the one approval the rule exists to remove. A path above either, such
-# as the user's home directory, is theirs and is left alone.
+# vouch that the toolkit wrote it and a machine that lost its ledger would keep
+# the approval for good.
 forbidden_approvals() {
   jq -n --arg claude_dir "$CLAUDE_DIR" --arg releases "$RELEASES" \
     '[{path: ["permissions", "additionalDirectories"], is: $claude_dir},
@@ -578,24 +578,54 @@ for module in sorted(wanted - {"lib"}):
 PY
 }
 
-# A worktree is approved for every agent, so it never becomes the live toolkit:
-# the one path by which an agent-writable directory would end up running on every
-# tool call. --sync needs no rule, because a worktree never gets to be the live
-# root for one to run from.
-check_location() {
-  local common checkout
-  [ "$MODE" != sync ] || return 0
-  case "$ROOT/" in "$CLAUDE_DIR/worktrees/"*) ;; *) return 0 ;; esac
-  common="$( (cd "$ROOT" && cd "$(git rev-parse --git-common-dir 2>/dev/null)" && pwd -P) 2>/dev/null)"
-  checkout="${common%/.git}"
-  if [ -n "$checkout" ] && [ "$checkout" != "$common" ] && [ "$checkout" != "$ROOT" ]; then
-    finding required user "the version directory is under ~/.claude/worktrees, which every agent may write, so nothing was changed. It belongs to the checkout at $(home_path "$checkout"), which is what installs" \
-      "cd $(home_path "$checkout") && ./install.sh"
-  else
-    finding required user "the version directory is under ~/.claude/worktrees, which every agent may write, so nothing was changed" \
-      "install from a version directory outside ~/.claude/worktrees"
-  fi
+# Every path a tool reaches without the user being asked, which is every path an
+# agent writes unprompted. Resolved, because a path is compared against $ROOT.
+approved_directory() { # a path → 0 when it is one of them, or inside one
+  local approved
+  for approved in "$(resolve "$CLAUDE_DIR")" "$(resolve "$SCRATCH")"; do
+    [ -n "$approved" ] || continue
+    case "$1/" in "$approved/"*) return 0 ;; esac
+  done
   return 1
+}
+
+# A worktree is approved for every agent, so it never becomes the live toolkit.
+# A machine already live from one is exempt at --sync: a doctor that refused
+# would leave it with no doctor at all until somebody ran a full install.
+check_location() {
+  local worktrees common checkout tail fix
+  [ "$MODE" != sync ] || return 0
+  # $ROOT resolves every component of its path and $CLAUDE_DIR is written as
+  # $HOME names it, so a home reached through a symlink would make this miss.
+  worktrees="$(resolve "$WORKTREES")"
+  [ -n "$worktrees" ] || return 0
+  case "$ROOT/" in "$worktrees/"*) ;; *) return 0 ;; esac
+  checkout="$(names_a_checkout)"
+  if [ -n "$checkout" ]; then
+    tail=". The worktree names the checkout at $(home_path "$checkout"), which is what installs"
+    fix="cd $(home_path "$checkout") && ./install.sh"
+  else
+    tail=""
+    fix="mv -T $(home_path "$ROOT") <a directory outside ~/.claude> && <that directory>/install.sh"
+  fi
+  finding required user "the version directory is under ~/.claude/worktrees, which every agent may write, so nothing was changed$tail" "$fix"
+  return 1
+}
+
+# The checkout a worktree belongs to, or nothing. The answer comes out of
+# $ROOT/.git, inside the directory every agent may write, so it is asked only of
+# a real work tree, with the variables that would answer for another repository
+# out of the way, and given back only when it points where no agent writes
+# unasked: a rewritten gitdir line would otherwise have the finding hand the user
+# a command that installs whatever an agent put there.
+names_a_checkout() {
+  local common checkout
+  python3 "$ROOT/hooks/lib/version.py" worktree "$ROOT" >/dev/null 2>&1 || return 0
+  common="$( (cd "$ROOT" && cd "$(env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
+    timeout 5 git rev-parse --git-common-dir 2>/dev/null)" && pwd -P) 2>/dev/null)"
+  checkout="${common%/.git}"
+  [ -n "$checkout" ] && [ "$checkout" != "$common" ] && [ "$checkout" != "$ROOT" ] || return 0
+  approved_directory "$checkout" || printf '%s' "$checkout"
 }
 
 # ~/.claude/agent-toolkit must stay a link, free to point at any version
@@ -759,20 +789,22 @@ apply_agents() {
 }
 
 settings_request() {
-  local desired work_tree=false
+  local desired releases work_tree=false
   # A release directory is approved for nobody, and git init inside one is a
   # local command nothing gates, so where the root sits answers before what it
-  # holds does. Otherwise it is the question dev mode asks, and git failing to
-  # answer it keeps the approval rather than quietly revoking one.
+  # holds does. Resolved on both sides, because $ROOT is and $HOME need not be.
+  # Otherwise it is the question dev mode asks, and git failing to answer it
+  # keeps the approval rather than quietly revoking one.
+  releases="$(resolve "$RELEASES")"
   case "$ROOT/" in
-    "$CLAUDE_DIR/agent-toolkit-releases/"*) ;;
+    "${releases:-$RELEASES}/"*) ;;
     *)
       python3 "$ROOT/hooks/lib/version.py" worktree "$ROOT" >/dev/null 2>&1
       case $? in 0 | 3 | 4) work_tree=true ;; esac
       ;;
   esac
   desired="$(jq -n --arg scratch "$SCRATCH" --arg root "$ROOT" \
-    --arg worktrees "$CLAUDE_DIR/worktrees" \
+    --arg worktrees "$WORKTREES" \
     --argjson work_tree "$work_tree" \
     --arg statusline "$STATUSLINE_ENTRY" --argjson wiring "$WIRING" \
     --argjson plugins "$(printf '%s\n' "${PLUGINS[@]}" | jq -R 'split(" ")[0]' | jq -s .)" \

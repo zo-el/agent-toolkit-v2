@@ -30,7 +30,8 @@ case "$*" in
     jq -Rn --arg dir "$state/cache" \
       '[inputs | split(" ") | {id: .[0], enabled: (.[1] == "on"), scope: "user", installPath: ($dir + "/" + .[0])}]' <"$state/plugins" ;;
   "plugin marketplace add "*)
-    [ "${CLAUDE_STUB_FAIL:-}" = add ] && { echo "✘ Failed to add marketplace: the stub refused" >&2; exit 1; }
+    { [ "${CLAUDE_STUB_FAIL:-}" = add ] || [ "${CLAUDE_STUB_FAIL_MARKET:-}" = "$4" ]; } \
+      && { echo "✘ Failed to add marketplace: the stub refused" >&2; exit 1; }
     case "$4" in 777genius/*) name=claude-notifications-go ;; *) name="${4#*/}" ;; esac
     echo "$name $4" >>"$state/markets" ;;
   "plugin install "*" --scope user --json")
@@ -365,6 +366,18 @@ esac
 same "so a clone approves three paths, and keeps the user's own where it was" \
   "/my/own/dir /tmp/claude-$(id -u) $FAKE/.claude/worktrees $ROOT" "$approved"
 check "credentials denied through ~/" "Read(~/.claude/.credentials.json)" "$(settings '.permissions.deny | join(" ")')"
+# The rule names a directory, and there are a dozen spellings of one. Every form
+# here resolves to the same path, and a path resolver reads them all as it.
+# The last one is the user's own, below ~/.claude but not it: the rule names one
+# path exactly, so a path under it is theirs and stays.
+for spelling in "$FAKE/.claude/" "~/.claude" "~/.claude/." "$FAKE//.claude" "$FAKE/.claude/skills/.." "$FAKE/.claude/agent-toolkit-releases/v1.2.3" "$FAKE/.claude/worktrees/../agent-toolkit-releases/v9" "$FAKE/.claude/projects"; do
+  jq --arg s "$spelling" '.permissions.additionalDirectories += [$s]' "$FAKE/.claude/settings.json" >"$TMP/spelled" \
+    && cp "$TMP/spelled" "$FAKE/.claude/settings.json"
+done
+inst "$ROOT" "$FAKE"
+same "an approval kept unset goes in every spelling of the directory it names" \
+  "/my/own/dir /tmp/claude-$(id -u) $FAKE/.claude/worktrees $ROOT $FAKE/.claude/projects" \
+  "$(settings '.permissions.additionalDirectories | join(" ")')"
 check "review plugin enabled" "true" "$(settings '.enabledPlugins["pr-review-toolkit@claude-plugins-official"]')"
 # The ui-developer names both of these, so every machine's has to have them.
 check "and the two the ui-developer works from" "true true" \
@@ -763,6 +776,23 @@ check "saying why, under Needs you" "✗ the version directory is under ~/.claud
 same "and writes nothing at all" "$before" "$(snapshot "$H")"
 inst "$WT" "$H" --dry-run
 exit_is "and a dry run of one exits 1 as well" 1
+same "writing nothing either" "$before" "$(snapshot "$H")"
+
+# The answer comes from inside the refused tree, so it is asked only of a real
+# work tree and only with the variables that would answer for another repository
+# out of the way.
+git -C "$H" init -q && git -C "$H" add -A >/dev/null 2>&1 && git -C "$H" commit -q -m dotfiles
+inst "$WT" "$H"
+case "$(block 'Needs you')" in
+  *"names the checkout"*) bad "a repository above the worktree is never read as its checkout" "it named one" ;;
+  *) ok "a repository above the worktree is never read as its checkout" ;;
+esac
+rm -rf "$H/.git"
+out="$(HOME="$H" GIT_DIR="$TMP/elsewhere/.git" "$WT/install.sh" 2>&1)"
+case "$out" in
+  *"names the checkout"*) bad "and a git variable never answers for another repository" "it named one" ;;
+  *) ok "and a git variable never answers for another repository" ;;
+esac
 
 # A linked worktree knows the checkout it belongs to, so the finding names it and
 # the fix is the command that installs from there.
@@ -774,12 +804,29 @@ git -C "$CHECKOUT" worktree add -q --detach "$LINKED" HEAD
 cp "$ROOT/install.sh" "$LINKED/install.sh"
 inst "$LINKED" "$H"
 exit_is "a linked worktree is refused too" 1
-check "naming the checkout it belongs to" "It belongs to the checkout at $CHECKOUT" "$(block 'Needs you')"
-worktree_fix="$(block 'Needs you' | sed -n 3p | sed 's/^ *//')"
+check "naming the checkout it belongs to" "The worktree names the checkout at $CHECKOUT" "$(block 'Needs you')"
+worktree_fix="$(block 'Needs you' | grep -F "cd $CHECKOUT" | sed 's/^ *//')"
 check "with the command that installs from there" "cd $CHECKOUT && ./install.sh" "$worktree_fix"
 HOME="$H" bash -c "$worktree_fix" >/dev/null 2>&1
 same "and the fix, run as printed, is what goes live" "$CHECKOUT" "$(readlink "$H/.claude/agent-toolkit")"
 git -C "$CHECKOUT" worktree remove --force "$LINKED" 2>/dev/null
+
+# The checkout comes out of the worktree's own .git, inside the directory the
+# refusal exists because every agent may write it. A rewritten one that names a
+# tree an agent could have built is not a checkout to hand the user.
+PLANTED_CHECKOUT="$H/.claude/planted-checkout"
+copy_root "$PLANTED_CHECKOUT"
+git -C "$PLANTED_CHECKOUT" init -q && git -C "$PLANTED_CHECKOUT" add -A >/dev/null 2>&1 \
+  && git -C "$PLANTED_CHECKOUT" commit -q -m planted
+printf 'gitdir: %s/.git\n' "$PLANTED_CHECKOUT" >"$WT/.git"
+inst "$WT" "$H"
+exit_is "a worktree naming a checkout of its own is refused all the same" 1
+case "$(block 'Needs you')" in
+  *"$PLANTED_CHECKOUT"*) bad "and the fix never sends the user into a directory an agent may write" "it named $PLANTED_CHECKOUT" ;;
+  *) ok "and the fix never sends the user into a directory an agent may write" ;;
+esac
+check "saying only what it can stand behind" "mv -T ~/.claude/worktrees/wt <a directory outside ~/.claude>" "$(block 'Needs you')"
+rm -f "$WT/.git"
 
 # --sync needs no rule: a worktree never becomes the live root, so a --sync from
 # one finds the link pointing elsewhere and stops before anything else.
@@ -798,6 +845,32 @@ inst "$WT" "$H" --sync
 case "$out" in
   *"every agent may write"*) bad "which never refuses at a session start" "it refused: $out" ;;
   *) ok "which never refuses at a session start" ;;
+esac
+
+# A version directory resolves every component of its own path and $HOME need
+# not, so a home reached through a symlink is where a rule written against $HOME
+# stops matching. A dotfile manager or a /home on another mount is enough.
+LINKED_REAL="$(home linked-real)"
+LINKED="$TMP/linked-home"
+rm -f "$LINKED"
+ln -s "$LINKED_REAL" "$LINKED"
+mkdir -p "$LINKED_REAL/.claude/worktrees"
+copy_root "$LINKED_REAL/.claude/worktrees/wt"
+out="$(HOME="$LINKED" "$LINKED/.claude/worktrees/wt/install.sh" 2>&1)"
+rc=$?
+exit_is "a worktree root is refused through a symlinked home too" 1
+check "saying the same thing" "under ~/.claude/worktrees, which every agent may write" "$out"
+
+PLANTED="$LINKED_REAL/.claude/agent-toolkit-releases/v1.5.0"
+mkdir -p "$(dirname "$PLANTED")"
+copy_root "$PLANTED"
+printf '1.5.0\n' >"$PLANTED/VERSION"
+printf 'abc1234\n' >"$PLANTED/REVISION"
+git -C "$PLANTED" init -q && git -C "$PLANTED" add -A >/dev/null 2>&1 && git -C "$PLANTED" commit -q -m planted
+out="$(HOME="$LINKED" "$LINKED/.claude/agent-toolkit-releases/v1.5.0/install.sh" 2>&1)"
+case " $(js "$LINKED_REAL" '.permissions.additionalDirectories | join(" ")') " in
+  *" $PLANTED "*) bad "and a release made to look like a clone is approved for nobody through one" "it is approved" ;;
+  *) ok "and a release made to look like a clone is approved for nobody through one" ;;
 esac
 
 # ── version identity ─────────────────────────────────────────────────────────
@@ -1725,7 +1798,7 @@ check "and installs each plugin at user scope over HTTPS" "1|plugin install clau
 # each would have registered it three times.
 same "a marketplace three plugins share is registered once" "1" \
   "$(grep -c 'plugin marketplace add anthropics/claude-plugins-official' "$CLAUDE_CALLS")"
-same "and each plugin is installed once" "4" \
+same "and every plugin in the list is fetched" "4" \
   "$(grep -c 'plugin install .* --scope user --json' "$CLAUDE_CALLS")"
 check "and asks for a restart" "plugins changed" "$out"
 : >"$CLAUDE_CALLS"
@@ -1757,6 +1830,14 @@ same "a marketplace that would not register is asked for once" "1" \
   "$(grep -c 'plugin marketplace add anthropics/claude-plugins-official' "$CLAUDE_CALLS")"
 same "and none of the plugins behind it is fetched" "" \
   "$(grep 'plugin install .*claude-plugins-official' "$CLAUDE_CALLS")"
+# One refusing while the other registers is what separates "its three went with
+# it" from "nothing registered at all".
+H="$(home one-market-refused)"
+: >"$CLAUDE_CALLS"
+out="$(HOME="$H" CLAUDE_STUB_FAIL_MARKET=anthropics/claude-plugins-official "$ROOT/install.sh" 2>&1)"
+same "a marketplace that refuses takes every plugin behind it" "" \
+  "$(grep 'plugin install .*claude-plugins-official' "$CLAUDE_CALLS")"
+check "and leaves the one behind another alone" "plugin install claude-notifications-go@claude-notifications-go" "$(cat "$CLAUDE_CALLS")"
 
 # Which events notify is the plugin's setting and the user's decision, so the
 # doctor says the same thing either way. Both paths a check could plausibly

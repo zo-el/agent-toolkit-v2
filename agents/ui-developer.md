@@ -33,7 +33,7 @@ When the look is not settled, design before you build:
 3. New work goes on a new page. Changing an existing page needs the user's go-ahead: message `main` with what you will change.
 4. Export each direction with `export_shape` and return it with your recommendation and the tradeoff between them, as `Status: needs context`. Build once the choice comes back.
 
-Where the machine carries them, use `frontend-design` for visual direction and `modern-web-guidance` before reaching for any web platform feature. Both are plugin skills, which this toolkit does not install.
+Use `frontend-design` for visual direction and `modern-web-guidance` before reaching for any web platform feature. Both are plugin skills the toolkit installs.
 
 ## Build
 

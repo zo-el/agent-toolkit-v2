@@ -857,6 +857,10 @@ recheck
 [ -n "$(kept '.seals["v1.5.0"]')" ] && ok "a staged release carries a seal" || bad "a staged release is sealed" "it is not"
 up apply
 same "and the activation that ran it drops that seal" "" "$(kept '.seals["v1.5.0"]')"
+# What a live tree does to itself: the launcher sets no PYTHONDONTWRITEBYTECODE,
+# so the first hook it runs writes a cache inside the folder it ran from.
+mkdir -p "$(staged v1.5.0)/hooks/lib/__pycache__"
+: >"$(staged v1.5.0)/hooks/lib/__pycache__/version.cpython-314.pyc"
 
 # The case this exists for: a rollback, then the same release again. Without the
 # drop, the folder would still be there, still staged, and its seal would no
