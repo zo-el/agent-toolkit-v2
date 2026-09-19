@@ -1245,7 +1245,7 @@ cat >"$H/.claude/settings.json" <<JSON
   "isolatePeerMachines": true,
   "permissions": {
     "defaultMode": "auto",
-    "additionalDirectories": ["/tmp/claude-$(id -u)", "$H/.claude/worktrees", "$H/.claude/tools", "$ROOT"],
+    "additionalDirectories": ["/tmp/claude-$(id -u)", "$H/.claude", "$ROOT"],
     "deny": ["Read(/$H/.claude/.credentials.json)", "Read(/$H/.claude/settings*.json)",
              "Read(/$H/.claude/backups/settings.json.*)", "Read(/$H/.claude/backups/.claude.json.backup.*)"]
   },
@@ -1270,6 +1270,10 @@ check "with no command left that bypasses the launcher" "[]" \
 check "and the reaper a previous version wired is unwired, not carried forward" "[]" \
   "$(js "$H" '[.hooks[][].hooks[].command | select(test("reap"))] | tostring')"
 check "and the user's own env kept" "1" "$(js "$H" '.env.MINE')"
+# The real upgrade path for an approval kept unset: no ledger to vouch for it,
+# so retirement alone would leave the wholesale entry there for good.
+same "with the approval a previous generation wrote gone, ledger or none" \
+  "/tmp/claude-$(id -u) $ROOT $H/.claude/worktrees" "$(js "$H" '.permissions.additionalDirectories | join(" ")')"
 LEAN="$TMP/root-without-todo-tools"
 copy_root "$LEAN"
 patch_desired "$LEAN" 'del(.desired.env.CLAUDE_CODE_ENABLE_TODO_TOOLS)'
