@@ -5,11 +5,18 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+case "$ROOT/" in
+  "/tmp/claude-$(id -u)/"*)
+    printf 'the suite cannot run from %s: install.sh refuses a version directory inside /tmp/claude-%s. Run it from a clone outside it.\n' "$ROOT" "$(id -u)" >&2
+    exit 1
+    ;;
+esac
 # An explicit template rather than $TMPDIR: install refuses a version directory
-# inside the scratchpad, /tmp/claude-<uid>, and a harness that pointed TMPDIR
-# there would have every install case in the suite refuse itself.
+# inside the scratchpad, and a harness that pointed TMPDIR there would have
+# every install case in the suite refuse itself.
 TMP="$(mktemp -d /tmp/agent-toolkit-suite.XXXXXX)"
-trap 'rm -rf "$TMP"' EXIT
+CLEANUP=("$TMP")
+trap 'rm -rf "${CLEANUP[@]}"' EXIT
 pass=0; fail=0; skipped=0
 
 ok()   { pass=$((pass + 1)); printf '  ✓ %s\n' "$1"; }

@@ -828,6 +828,14 @@ same "and writes nothing at all" "$before" "$(snapshot "$H")"
 inst "$WT" "$H" --dry-run
 exit_is "and a dry run of one exits 1 as well" 1
 same "writing nothing either" "$before" "$(snapshot "$H")"
+SIBLING_HOME="$(home worktree-sibling)"
+copy_root "$SIBLING_HOME/.claude/worktrees-old/wt"
+inst "$SIBLING_HOME/.claude/worktrees-old/wt" "$SIBLING_HOME"
+exit_is "while a directory beside it that only shares its name's start installs" 0
+case "$out" in
+  *"every agent may write"*) bad "and is never called one an agent may write" "$out" ;;
+  *) ok "and is never called one an agent may write" ;;
+esac
 
 # The answer comes from inside the refused tree, so it is asked only of a real
 # work tree and only with the variables that would answer for another repository
@@ -907,11 +915,11 @@ esac
 # ── a version directory inside the scratchpad ────────────────────────────────
 # The scratchpad is approved for every agent as well, and it is /tmp/claude-<uid>
 # whatever $HOME says, so no fake home keeps these cases away from the real one.
-# The directory made here is the suite's own, and goes with the suite.
+# The mktemp directory is the suite's own, and goes with the suite.
 SCRATCH_DIR="/tmp/claude-$(id -u)"
 mkdir -p "$SCRATCH_DIR"
 SCRATCH_ROOTS="$(mktemp -d "$SCRATCH_DIR/agent-toolkit-suite.XXXXXX")"
-trap 'rm -rf "$TMP" "$SCRATCH_ROOTS"' EXIT
+CLEANUP+=("$SCRATCH_ROOTS")
 H="$(home scratch-root)"
 IN_SCRATCH="$SCRATCH_ROOTS/toolkit"
 copy_root "$IN_SCRATCH"
@@ -920,6 +928,7 @@ inst "$IN_SCRATCH" "$H"
 exit_is "a version directory inside the scratchpad exits 1" 1
 check "exactly as one under the worktrees does" "✗ the version directory is under $SCRATCH_DIR, which every agent may write" \
   "$(block 'Needs you')"
+check "with the fix that moves it out" "mv -T $IN_SCRATCH <a directory of your own>" "$(block 'Needs you')"
 same "writing nothing" "$before" "$(snapshot "$H")"
 inst "$IN_SCRATCH" "$H" --dry-run
 exit_is "and a dry run of one exits 1 too" 1
@@ -932,17 +941,16 @@ rm -f "$H/.claude/skills/toolkit"
 inst "$IN_SCRATCH" "$H" --sync
 [ -L "$H/.claude/skills/toolkit" ] && ok "and a machine already live from one still gets its doctor" \
   || bad "a live scratchpad root still syncs" "exit $rc: $out"
-# The scratchpad is not under $HOME, so a home reached through a symlink changes
-# nothing about it: the refusal holds either way.
 SCRATCH_LINKED="$TMP/scratch-linked-home"
 rm -f "$SCRATCH_LINKED"
 ln -s "$(home scratch-linked)" "$SCRATCH_LINKED"
+before="$(snapshot "$TMP/scratch-linked")"
 out="$(HOME="$SCRATCH_LINKED" "$IN_SCRATCH/install.sh" 2>&1)"
 rc=$?
 exit_is "and through a symlinked home it is refused all the same" 1
+check "saying the same thing" "under $SCRATCH_DIR, which every agent may write" "$out"
+same "and writing nothing there either" "$before" "$(snapshot "$TMP/scratch-linked")"
 
-# The version directory's own approval is not in the list it is checked against:
-# a clone is approved because it is a work tree, and every root is inside itself.
 H="$(home clone-accepts-itself)"
 CLONE_SELF="$TMP/clone-self"
 copy_root "$CLONE_SELF"
@@ -960,10 +968,12 @@ rm -f "$LINKED"
 ln -s "$LINKED_REAL" "$LINKED"
 mkdir -p "$LINKED_REAL/.claude/worktrees"
 copy_root "$LINKED_REAL/.claude/worktrees/wt"
+before="$(snapshot "$LINKED_REAL")"
 out="$(HOME="$LINKED" "$LINKED/.claude/worktrees/wt/install.sh" 2>&1)"
 rc=$?
 exit_is "a worktree root is refused through a symlinked home too" 1
 check "saying the same thing" "under ~/.claude/worktrees, which every agent may write" "$out"
+same "and writing nothing" "$before" "$(snapshot "$LINKED_REAL")"
 
 PLANTED="$LINKED_REAL/.claude/agent-toolkit-releases/v1.5.0"
 mkdir -p "$(dirname "$PLANTED")"

@@ -58,7 +58,7 @@ Two hooks gate a session. Both fire regardless of permission mode, inside subage
 - **denies** AI attribution in a commit or a pull request, alongside the `attribution` settings `install.sh` holds off.
 - **asks** before anything leaves the machine (push, PR, release, package publish), before Linear writes, before touching the device outside the workspace, and before the few git commands the reflog cannot undo.
 
-Everything else is silent. `permissions.defaultMode` is `auto` and `~/.claude`, the scratchpad, and this checkout are approved working directories, so an agent runs unattended instead of stalling on a prompt nobody is watching. `Read` is denied on the credentials and settings files, which carry API tokens.
+Everything else is silent. `permissions.defaultMode` is `auto` and the scratchpad, `~/.claude/worktrees` and this checkout are approved working directories, so an agent runs unattended instead of stalling on a prompt nobody is watching. `Read` is denied on the credentials and settings files, which carry API tokens.
 
 [`hooks/style.py`](hooks/style.py) is the writing gate, described in [`documentation/specs/style-checks.md`](documentation/specs/style-checks.md). It reads a `git commit` before it runs and denies it over the message and the diff it is about to make, naming every finding at once with its path, its line and the offending text. A finding that is wrong or deliberately accepted is cleared by a `Style-ack:` trailer on the message, which lands in git history where it stays auditable.
 

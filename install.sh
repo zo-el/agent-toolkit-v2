@@ -29,11 +29,10 @@ BRIDGE_DST="$CLAUDE_DIR/tools/penpot-mcp"
 BRIDGE_FILES=(package.json package-lock.json start-bridge.sh check-bridge.sh)
 SCRATCH="/tmp/claude-$(id -u)"
 
-# The agents' own working state, which is what gets approved, and nothing else:
-# ~/.claude holds the credentials file, the transcripts, the plugin store and
-# settings.json, so approving the parent approves a silent write to each. One
-# list, so the directories approved and the directories a version directory may
-# not sit in cannot drift apart.
+# The agents' own working state. Never ~/.claude as a whole: it holds the
+# credentials file, the transcripts, the plugin store and settings.json, so
+# approving it approves a silent write to each. One list feeds the approvals and
+# the directories a version directory may not sit in, so the two cannot drift.
 working_directories() { printf '%s\n' "$SCRATCH" "$WORKTREES"; }
 
 # The report shape and the requirement text hooks/update.sh prints too. Sourced
@@ -124,11 +123,11 @@ def run($caller; $entry): "\"$HOME/.claude/agent-toolkit-run\" \($caller) \($ent
   permissions: {
     # Safe because the guard hook fires in every permission mode.
     defaultMode: "auto",
-    # A path inside one is approved before any rule is consulted, which is what
-    # stops a background agent stalling on a prompt, and it approves writing as
-    # readily as reading. The version directory only where somebody edits it: on
-    # a machine installed from a release the same entry would hand every agent
-    # the code that runs at the next session start.
+    # A path inside an approved directory is approved before any rule is
+    # consulted, which is what stops a background agent stalling on a prompt,
+    # and it approves writing as readily as reading. The version directory only
+    # where somebody edits it: on a machine installed from a release the same
+    # entry would hand every agent the code that runs at the next session start.
     additionalDirectories: ($working + (if $work_tree then [$root] else [] end)),
     # A deny governs the Read tool only, so jq and python still reach settings.
     deny: [
@@ -581,9 +580,9 @@ for module in sorted(wanted - {"lib"}):
 PY
 }
 
-# The directory in the list that holds a path, or nothing. Resolved on both
-# sides, because $ROOT resolves every component of its path and these are
-# written as $HOME names them, so a home reached through a symlink would miss.
+# The directory in the list that holds a path, or nothing. The path comes in
+# resolved. The directories are resolved here, because they are written
+# unresolved and a home or /tmp reached through a symlink would miss.
 inside() { # a path, then the directories
   local path="$1" dir real
   shift
@@ -631,7 +630,8 @@ names_a_checkout() {
   checkout="${common%/.git}"
   [ -n "$checkout" ] && [ "$checkout" != "$common" ] && [ "$checkout" != "$ROOT" ] || return 0
   # ~/.claude as a whole as well as the working directories: a machine taking
-  # this version still approves it wholesale until the apply this one runs.
+  # this version still approves it wholesale until a settings apply from this
+  # version removes it.
   mapfile -t reach < <(working_directories)
   inside "$checkout" "$CLAUDE_DIR" "${reach[@]}" >/dev/null || printf '%s' "$checkout"
 }
