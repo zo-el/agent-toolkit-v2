@@ -85,8 +85,13 @@ hit '\bgh[[:space:]]+(pr|issue)[[:space:]]+comment\b' \
   && verdict deny "Never comment as the user. Draft the text and let them post it."
 hit '\bgh[[:space:]]+pr[[:space:]]+review\b' \
   && verdict deny "Never submit a PR review as the user. Answer feedback with code."
-hit '\bgh[[:space:]]+api\b' && hit '(comments|reviews|discussions)' \
-  && hit '(--method[= ]+(POST|PUT|PATCH|DELETE)|[[:space:]]-(f|F)[[:space:]]|--(field|raw-field|input)\b)' \
+# gh api sends POST the moment a field is given, so a field is as mutating as
+# the method it implies. Both flags take their value glued on as well as after a
+# space, and the glued spelling is the ordinary one rather than an evasion, so a
+# pattern that needed the space let -XDELETE through a deny.
+mutating='(--method[= ]+|[[:space:]]-X[[:space:]]*)(POST|PUT|PATCH|DELETE)|[[:space:]]-(f|F)[[:alnum:]_]*[[:space:]=]|--(field|raw-field|input)\b'
+hit_any_case() { printf '%s' "$cmd" | grep -qiE "$1"; }
+hit '\bgh[[:space:]]+api\b' && hit '(comments|reviews|discussions)' && hit_any_case "$mutating" \
   && verdict deny "Mutating a comment or review endpoint posts as the user. Never allowed."
 
 # ── never: AI attribution in a commit or a pull request ──────────────────────
@@ -118,6 +123,12 @@ hit '\bgh[[:space:]]+(issue|release|gist)[[:space:]]+(create|edit|delete|close|r
   && verdict ask "Publish gate: outward-facing GitHub action. Needs approval for this action."
 hit '\bgh[[:space:]]+repo[[:space:]]+(create|delete|edit|rename|archive|fork)\b' \
   && verdict ask "Publish gate: repository-level action. Needs approval for this action."
+# Reading a run, a workflow or a release stays free: the updater reads at every
+# session start, and a gate that asked for those would update no machine at all.
+hit '\bgh[[:space:]]+(workflow[[:space:]]+(run|enable|disable)|run[[:space:]]+(rerun|cancel|delete))\b' \
+  && verdict ask "Publish gate: this drives GitHub Actions, which is what publishes a release. Needs approval for this action."
+hit '\bgh[[:space:]]+api\b' && hit '(releases|git/refs|git/tags)' && hit_any_case "$mutating" \
+  && verdict ask "Publish gate: this writes a release, a tag or a ref through the API. Needs approval for this action."
 hit '\b(npm|yarn|pnpm|cargo)[[:space:]]+publish\b|\btwine[[:space:]]+upload\b' \
   && verdict ask "Publish gate: package publishing. Needs approval for this action."
 

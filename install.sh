@@ -20,7 +20,29 @@ BACKUPS="$CLAUDE_DIR/backups"
 SKILLS_DST="$CLAUDE_DIR/skills"
 AGENTS_DST="$CLAUDE_DIR/agents"
 MANIFEST="$AGENTS_DST/.toolkit-agents"
+RELEASES="$CLAUDE_DIR/agent-toolkit-releases"
+WORKTREES="$CLAUDE_DIR/worktrees"
+BRIDGE_SRC="$ROOT/tools/penpot-mcp"
+BRIDGE_DST="$CLAUDE_DIR/tools/penpot-mcp"
+# Install copies every file it finds, so a fifth travels on its own. These four
+# are the evidence the directory arrived whole.
+BRIDGE_FILES=(package.json package-lock.json start-bridge.sh check-bridge.sh)
 SCRATCH="/tmp/claude-$(id -u)"
+
+# The agents' own working state. Never ~/.claude as a whole: it holds the
+# credentials file, the transcripts, the plugin store and settings.json, so
+# approving it approves a silent write to each. One list feeds the approvals and
+# the directories a version directory may not sit in, so the two cannot drift.
+working_directories() { printf '%s\n' "$SCRATCH" "$WORKTREES"; }
+
+# The report shape and the requirement text hooks/update.sh prints too. Sourced
+# before anything else needs them, so a root missing one says so in a line
+# rather than in a bash error partway through a report.
+for shared in hooks/lib/report.sh hooks/lib/requirements.sh; do
+  # shellcheck source=/dev/null
+  . "$ROOT/$shared" 2>/dev/null \
+    || { printf 'agent-toolkit: %s is missing from %s. Fix: reinstall the toolkit\n' "$shared" "$ROOT" >&2; exit 1; }
+done
 
 # The lowest release with every CLI and hook surface used here: plugin install
 # --json arrived in 2.1.268, after everything else.
@@ -29,6 +51,8 @@ MIN_CLAUDE=2.1.268
 # id and the GitHub source its marketplace is registered from.
 PLUGINS=(
   "pr-review-toolkit@claude-plugins-official anthropics/claude-plugins-official"
+  "frontend-design@claude-plugins-official anthropics/claude-plugins-official"
+  "modern-web-guidance@claude-plugins-official anthropics/claude-plugins-official"
   "claude-notifications-go@claude-notifications-go 777genius/agent-notifications"
 )
 
@@ -47,12 +71,18 @@ PLUGINS=(
 # permission rule syntax, and Bash(git commit *) misses git -C <repo> commit.
 #
 # The retro recorder is the mirror image: async on every event, so it can neither
-# block a turn nor inject its stdout.
+# block a turn nor inject its stdout. The updater's stage half is the same shape,
+# because it is where the network lives; its apply half waits, because taking a
+# release is the one session start that has work to do, and it skips fork, which
+# inherits a context that is already running.
 WIRING='[
   {"event":"SessionStart","matcher":"startup|resume|clear|compact|fork",
    "hooks":[{"entry":"install.sh --sync"}]},
+  {"event":"SessionStart","matcher":"startup|resume|clear|compact",
+   "hooks":[{"entry":"hooks/update.sh apply"}]},
   {"event":"SessionStart","matcher":"",
-   "hooks":[{"entry":"hooks/retro.py record","async":true}]},
+   "hooks":[{"entry":"hooks/retro.py record","async":true},
+            {"entry":"hooks/update.sh stage","async":true}]},
   {"event":"PreCompact","matcher":"",
    "hooks":[{"entry":"hooks/retro.py record","async":true}]},
   {"event":"UserPromptSubmit","matcher":"",
@@ -93,11 +123,13 @@ def run($caller; $entry): "\"$HOME/.claude/agent-toolkit-run\" \($caller) \($ent
   permissions: {
     # Safe because the guard hook fires in every permission mode.
     defaultMode: "auto",
-    # A path inside one is approved before any rule is consulted, which is what
-    # stops a background agent stalling on a prompt.
-    additionalDirectories: [$claude_dir, $scratch, $root],
-    # ~/.claude is approved wholesale above, and these files carry tokens. A
-    # deny governs the Read tool only, so jq and python still reach settings.
+    # A path inside an approved directory is approved before any rule is
+    # consulted, which is what stops a background agent stalling on a prompt,
+    # and it approves writing as readily as reading. The version directory only
+    # where somebody edits it: on a machine installed from a release the same
+    # entry would hand every agent the code that runs at the next session start.
+    additionalDirectories: ($working + (if $work_tree then [$root] else [] end)),
+    # A deny governs the Read tool only, so jq and python still reach settings.
     deny: [
       "Read(~/.claude/.credentials.json)",
       "Read(~/.claude/settings*.json)",
@@ -124,6 +156,15 @@ JQ
 # delegating to subagents. Kept unset rather than merely not written.
 ABSENT='[["env","CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"]]'
 
+# Approvals kept unset in the same way, because retiring one needs a ledger to
+# vouch that the toolkit wrote it and a machine that lost its ledger would keep
+# the approval for good.
+forbidden_approvals() {
+  jq -n --arg claude_dir "$CLAUDE_DIR" --arg releases "$RELEASES" \
+    '[{path: ["permissions", "additionalDirectories"], is: $claude_dir},
+      {path: ["permissions", "additionalDirectories"], under: $releases}]'
+}
+
 pointer_content() {
   cat <<'EOF'
 # Global instructions
@@ -149,51 +190,18 @@ EOF
 }
 
 # ── findings and changes ─────────────────────────────────────────────────────
-F_SEV=() F_WHO=() F_TEXT=() F_FIX=()
 CHANGES=()   # what changed, or in a dry run what would
 WROTE=()     # settings and pointer writes, which a hook report names
 REMOVED=()   # deletions, which a hook report names as well
 RESTART=()   # what changed that Claude Code reads only at start
 SKILLS_CHANGED=0
 
-finding() { # severity (required|advisory), who (user|install|toolkit), text, fix lines
-  F_SEV+=("$1") F_WHO+=("$2") F_TEXT+=("$3") F_FIX+=("${4:-}")
-}
-
-count() { # severity
-  local n=0 s
-  for s in "${F_SEV[@]}"; do [ "$s" = "$1" ] && n=$((n + 1)); done
-  echo "$n"
-}
-
 have() { command -v "$1" >/dev/null 2>&1; }
-
-one_line() { tr '\n\t' '  ' | sed 's/  */ /g; s/^ //; s/ $//' | cut -c1-400; }
-
-join() { # separator, items
-  local sep="$1" out="" item
-  shift
-  for item in "$@"; do out+="${out:+$sep}$item"; done
-  printf '%s' "$out"
-}
 
 restart_reasons() {
   local reasons
   mapfile -t reasons < <(printf '%s\n' "${RESTART[@]}" | LC_ALL=C sort -u)
   join ", " "${reasons[@]}"
-}
-
-shq() {
-  case "$1" in
-    "" | *[!A-Za-z0-9_./+:@%=-]*) printf "'%s'" "${1//\'/\'\\\'\'}" ;;
-    *) printf '%s' "$1" ;;
-  esac
-}
-home_path() {
-  case "$1" in
-    "$HOME"/*) printf '~/%s' "$(shq "${1#"$HOME"/}")" ;;
-    *) shq "$1" ;;
-  esac
 }
 
 install_command() {
@@ -281,8 +289,6 @@ package_line() { # requirements
     *) echo "install these packages with your package manager: ${names[*]}" ;;
   esac
 }
-
-GH_LOGIN="gh auth login --hostname github.com --git-protocol ssh --web"
 
 # Returns 1 when jq or python3 is missing. gh is checked with the token it
 # carries, which a session start skips: the same three lines every session
@@ -468,6 +474,7 @@ check_root() {
   [ -n "$(find "$ROOT/skills" -name SKILL.md -print -quit 2>/dev/null)" ] \
     || finding required toolkit "skills/ holds no skill" "$ROOT/skills"
   compgen -G "$ROOT/agents/*.md" >/dev/null || finding required toolkit "agents/ holds no agent" "$ROOT/agents"
+  check_bridge
   check_gate
   if ! out="$(python_problems 2>&1)"; then
     finding required toolkit "the python checks did not run: $(printf '%s' "$out" | tail -1)" "$ROOT/install.sh"
@@ -476,6 +483,21 @@ check_root() {
     [ -n "$detail" ] && finding required toolkit "$reason: $entry" "$ROOT/$entry"$'\n'"$detail"
   done <<<"$out"
   [ ${#F_SEV[@]} -eq "$before" ]
+}
+
+# Every file install copies out is in the root, and each script starts, which is
+# the same evidence of a whole directory that skills/ and agents/ are.
+check_bridge() {
+  local entry reason
+  for entry in "${BRIDGE_FILES[@]}"; do
+    if [ ! -f "$BRIDGE_SRC/$entry" ]; then
+      finding required toolkit "tools/penpot-mcp/$entry is missing from the version directory" "$BRIDGE_SRC/$entry"
+      continue
+    fi
+    case "$entry" in *.sh) ;; *) continue ;; esac
+    reason="$(cannot_start "$BRIDGE_SRC/$entry")"
+    [ -z "$reason" ] || finding required toolkit "tools/penpot-mcp/$entry cannot start: $reason" "$BRIDGE_SRC/$entry"
+  done
 }
 
 # The approval gate, run before it goes live: the launcher must ask when the
@@ -556,6 +578,62 @@ for module in sorted(wanted - {"lib"}):
     except Exception as error:
         report(os.path.join(hooks, *module.split(".")) + ".py", "hooks/lib does not import", error)
 PY
+}
+
+# The directory in the list that holds a path, or nothing. The path comes in
+# resolved. The directories are resolved here, because they are written
+# unresolved and a home or /tmp reached through a symlink would miss.
+inside() { # a path, then the directories
+  local path="$1" dir real
+  shift
+  for dir in "$@"; do
+    real="$(resolve "$dir")"
+    [ -n "$real" ] || continue
+    case "$path/" in "$real/"*) printf '%s' "$dir" && return 0 ;; esac
+  done
+  return 1
+}
+
+# A directory every agent writes in never becomes the live toolkit. The version
+# directory's own approval is not in the list it is checked against, and has to
+# stay out: a clone is approved because it is a work tree, and every root is
+# inside itself. A machine already live from one is exempt at --sync, because a
+# doctor that refused would leave it with no doctor until a full install.
+check_location() {
+  local within checkout tail fix working
+  [ "$MODE" != sync ] || return 0
+  mapfile -t working < <(working_directories)
+  within="$(inside "$ROOT" "${working[@]}")" || return 0
+  checkout="$(names_a_checkout)"
+  if [ -n "$checkout" ]; then
+    tail=". The worktree names the checkout at $(home_path "$checkout"), which is what installs"
+    fix="cd $(home_path "$checkout") && ./install.sh"
+  else
+    tail=""
+    fix="mv -T $(home_path "$ROOT") <a directory of your own> && <that directory>/install.sh"
+  fi
+  finding required user "the version directory is under $(home_path "$within"), which every agent may write, so nothing was changed$tail" "$fix"
+  return 1
+}
+
+# The checkout a worktree belongs to, or nothing. The answer comes out of
+# $ROOT/.git, inside the directory every agent may write, so it is asked only of
+# a real work tree, with the variables that would answer for another repository
+# out of the way, and given back only when it points where no agent writes
+# unasked: a rewritten gitdir line would otherwise have the finding hand the user
+# a command that installs whatever an agent put there.
+names_a_checkout() {
+  local common checkout reach
+  python3 "$ROOT/hooks/lib/version.py" worktree "$ROOT" >/dev/null 2>&1 || return 0
+  common="$( (cd "$ROOT" && cd "$(env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
+    timeout 5 git rev-parse --git-common-dir 2>/dev/null)" && pwd -P) 2>/dev/null)"
+  checkout="${common%/.git}"
+  [ -n "$checkout" ] && [ "$checkout" != "$common" ] && [ "$checkout" != "$ROOT" ] || return 0
+  # ~/.claude as a whole as well as the working directories: a machine taking
+  # this version still approves it wholesale until a settings apply from this
+  # version removes it.
+  mapfile -t reach < <(working_directories)
+  inside "$checkout" "$CLAUDE_DIR" "${reach[@]}" >/dev/null || printf '%s' "$checkout"
 }
 
 # ~/.claude/agent-toolkit must stay a link, free to point at any version
@@ -719,20 +797,36 @@ apply_agents() {
 }
 
 settings_request() {
-  local desired
-  desired="$(jq -n --arg claude_dir "$CLAUDE_DIR" --arg scratch "$SCRATCH" --arg root "$ROOT" \
+  local desired releases work_tree=false
+  # A release directory is approved for nobody, and git init inside one is a
+  # local command nothing gates, so where the root sits answers before what it
+  # holds does. Resolved on both sides, because $ROOT is and $HOME need not be.
+  # Otherwise it is the question dev mode asks, and git failing to answer it
+  # keeps the approval rather than quietly revoking one.
+  releases="$(resolve "$RELEASES")"
+  case "$ROOT/" in
+    "${releases:-$RELEASES}/"*) ;;
+    *)
+      python3 "$ROOT/hooks/lib/version.py" worktree "$ROOT" >/dev/null 2>&1
+      case $? in 0 | 3 | 4) work_tree=true ;; esac
+      ;;
+  esac
+  desired="$(jq -n --arg root "$ROOT" \
+    --argjson working "$(working_directories | jq -R . | jq -s .)" \
+    --argjson work_tree "$work_tree" \
     --arg statusline "$STATUSLINE_ENTRY" --argjson wiring "$WIRING" \
     --argjson plugins "$(printf '%s\n' "${PLUGINS[@]}" | jq -R 'split(" ")[0]' | jq -s .)" \
     "$DESIRED")" || return 1
   jq -n --arg settings "$SETTINGS" --arg ledger "$LEDGER" --arg backups "$BACKUPS" \
     --arg home "$HOME" --arg root "$ROOT" --arg prev_root "$PREV_ROOT" \
     --argjson desired "$desired" --argjson absent "$ABSENT" \
+    --argjson forbidden "$(forbidden_approvals)" \
     '{settings: $settings, ledger: $ledger, backups: $backups, home: $home, root: $root,
-      prev_root: $prev_root, desired: $desired, absent: $absent}'
+      prev_root: $prev_root, desired: $desired, absent: $absent, forbidden: $forbidden}'
 }
 
 apply_settings() {
-  local request result state reason fix newest aside saved shown lines
+  local request result state reason fix newest aside saved shown lines taken
   if ! request="$(settings_request)"; then
     finding required toolkit "install.sh does not build its own settings" "$ROOT/install.sh"
     return
@@ -773,6 +867,10 @@ apply_settings() {
     aside="$(jq -r '.ledger_aside // ""' <<<"$result")"
     finding advisory user "the ledger ~/.claude/agent-toolkit-applied.json does not read ($reason), so what the toolkit owns was read back from settings.json for this run, which can only vouch for what the file still holds${aside:+. The old ledger is kept at $(home_path "$aside")}"
   fi
+  while IFS= read -r taken; do
+    [ -n "$taken" ] || continue
+    finding advisory user "$(home_path "$taken") was approved for every agent without a question, which this toolkit keeps unset, so it was removed from settings.json"
+  done < <(jq -r '.taken_away[]? // empty' <<<"$result")
   if [ "$(jq -r '.replaced_link // ""' <<<"$result")" != "" ]; then
     finding advisory user "settings.json was a link to $(jq -r '.replaced_link' <<<"$result") and is now a file, so the link's target no longer receives changes"
   fi
@@ -812,10 +910,25 @@ apply_retro_marker() {
   act "retro marker ~/.claude/retro/since" write_atomic "$CLAUDE_DIR/retro/since" 644 < <(date -u +%Y-%m-%dT%H:%M:%SZ)
 }
 
+# Every file the version directory carries, and nothing else in that directory:
+# the dependencies and the build the bridge puts there at its first run are the
+# user's, and outlive every version installed over them.
+apply_bridge() {
+  local path f mode
+  for path in "$BRIDGE_SRC"/*; do
+    [ -f "$path" ] || continue
+    f="$(basename "$path")"
+    if [ -x "$path" ]; then mode=755; else mode=644; fi
+    cmp -s "$path" "$BRIDGE_DST/$f" && [ "$(stat -c %a "$BRIDGE_DST/$f" 2>/dev/null)" = "$mode" ] && continue
+    act "bridge file ~/.claude/tools/penpot-mcp/$f" write_atomic "$BRIDGE_DST/$f" "$mode" <"$path"
+  done
+}
+
 # Settings name the launcher, so they wait on it.
 apply_local() {
   apply_link || return
   apply_launcher || return
+  apply_bridge
   apply_skills
   apply_agents
   apply_settings
@@ -858,13 +971,21 @@ listing() { # [marketplace] → the JSON array in LISTING, or a finding and stat
 }
 
 fetch_plugins() {
-  local marketplaces plugins spec id source market out rc
+  local marketplaces plugins spec id source market out rc asked=" " refused=" "
   listing marketplace || return
   marketplaces="$LISTING"
   for spec in "${PLUGINS[@]}"; do
     id="${spec%% *}" source="${spec#* }" market="${spec%% *}"
     market="${market#*@}"
     jq -e --arg m "$market" 'any(.[]; .name == $m)' <<<"$marketplaces" >/dev/null && continue
+    # The listing is taken once, so a marketplace several plugins share would be
+    # registered once for each of them without this. One that would not register
+    # fails every plugin behind it rather than being asked for again.
+    if [[ "$asked" == *" $market "* ]]; then
+      [[ "$refused" != *" $market "* ]] || FAILED_PLUGINS+="$id "
+      continue
+    fi
+    asked+="$market "
     if [ "$MODE" = dry ]; then
       CHANGES+=("register plugin marketplace $market from $source")
       continue
@@ -876,6 +997,7 @@ fetch_plugins() {
     else
       finding required install "plugin marketplace $market was not registered: $(fetch_failure "$rc" "$out")" "$(install_command)"
       FAILED_PLUGINS+="$id "
+      refused+="$market "
     fi
   done
   listing || return
@@ -923,15 +1045,15 @@ check_plugins() {
 apply_stamp() {
   local out rc
   [ "$MODE" = dry ] || [ "$(resolve "$STABLE")" = "$ROOT" ] || return 0
-  out="$(python3 "$ROOT/hooks/lib/version.py" "$ROOT" 2>&1)"
+  out="$(python3 "$ROOT/hooks/lib/version.py" root "$ROOT" 2>&1)"
   rc=$?
   case "$rc" in
     0) ;;
     3) finding advisory install "git did not report the version in time, so the version stamp was left as it was" "$(install_command)" && return ;;
     4) finding advisory user "git cannot read the version directory's history, so the version stamp was left as it was: $(printf '%s' "$out" | one_line)" \
       "git -C $(home_path "$ROOT") status" && return ;;
-    5) finding advisory user "the version directory's VERSION file cannot be read, so the version stamp was left as it was: $(printf '%s' "$out" | one_line)" \
-      "ls -l $(home_path "$ROOT")/VERSION" && return ;;
+    5) finding advisory user "the version stamp was left as it was: $(printf '%s' "$out" | one_line)" \
+      "ls -l $(home_path "$ROOT")" && return ;;
     *) finding advisory toolkit "hooks/lib/version.py failed, so the version stamp was left as it was" "$ROOT/hooks/lib/version.py"$'\n'"$(printf '%s' "$out" | tail -1)" && return ;;
   esac
   if [ -z "$out" ]; then
@@ -942,10 +1064,6 @@ apply_stamp() {
 }
 
 # ── reports ──────────────────────────────────────────────────────────────────
-mark() { [ "$1" = required ] && printf '✗' || printf '!'; }
-
-plural() { [ "$1" -eq 1 ] && echo "$1 $2" || echo "$1 ${2}s"; }
-
 # A fix shared by consecutive findings, or a fix line already printed under the
 # heading, is printed once.
 report_group() { # who, heading
@@ -989,50 +1107,24 @@ report_terminal() {
   printf '\n%s %s, %s\n' "$([ "$required" -eq 0 ] && echo ✓ || echo ✗)" "$(plural "$required" "required finding")" "$advisory advisory"
 }
 
-json_str() {
-  local s="$1"
-  s="${s//\\/\\\\}" s="${s//\"/\\\"}" s="${s//$'\n'/\\n}" s="${s//$'\t'/\\t}" s="${s//$'\r'/}"
-  s="${s//[[:cntrl:]]/}"
-  printf '"%s"' "$s"
-}
-
-# Exactly one JSON object, or nothing when there is nothing to say. A skill link
-# applied cleanly is not reported, but at session start still asks for a rescan.
+# A skill link applied cleanly is not reported, but at session start still asks
+# for a rescan.
 report_hook() {
-  local i required context="" message=() fixes names=() reload=0
+  local i required names=() reload=0
   required="$(count required)"
   [ "$EVENT" = SessionStart ] && [ "$SKILLS_CHANGED" -eq 1 ] && reload=1
-  if [ ${#F_SEV[@]} -eq 0 ] && [ ${#WROTE[@]} -eq 0 ] && [ ${#REMOVED[@]} -eq 0 ] && [ ${#RESTART[@]} -eq 0 ]; then
-    [ "$reload" -eq 1 ] && printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","reloadSkills":true}}\n'
-    return 0
-  fi
-  context="agent-toolkit doctor:"
-  for i in "${!F_SEV[@]}"; do
-    mapfile -t fixes <<<"${F_FIX[i]}"
-    if [ -n "${F_FIX[i]}" ]; then
-      context+=$'\n'"$(mark "${F_SEV[i]}") ${F_TEXT[i]}. Fix (${F_WHO[i]}): $(join "; then " "${fixes[@]}")"
-    else
-      context+=$'\n'"$(mark "${F_SEV[i]}") ${F_TEXT[i]}. Who acts: ${F_WHO[i]}"
-    fi
-  done
   for i in "${WROTE[@]}"; do
-    context+=$'\n'"wrote $i"
+    CONTEXT+=("wrote $i")
     names+=("${i%% *}")
   done
-  for i in "${REMOVED[@]}"; do context+=$'\n'"$i"; done
-  [ "$required" -eq 0 ] || message+=("$(plural "$required" problem). Ask Claude to fix it, or run ~/.claude/agent-toolkit/install.sh")
-  [ ${#WROTE[@]} -eq 0 ] || message+=("Updated $(join ", " "${names[@]}")")
+  for i in "${REMOVED[@]}"; do CONTEXT+=("$i"); done
+  [ "$required" -eq 0 ] || MESSAGE+=("$(plural "$required" problem). Ask Claude to fix it, or run ~/.claude/agent-toolkit/install.sh")
+  [ ${#WROTE[@]} -eq 0 ] || MESSAGE+=("Updated $(join ", " "${names[@]}")")
   if [ ${#RESTART[@]} -gt 0 ]; then
-    message+=("Restart Claude Code to load it")
-    context+=$'\n'"Restart Claude Code: $(restart_reasons)."
+    MESSAGE+=("Restart Claude Code to load it")
+    CONTEXT+=("Restart Claude Code: $(restart_reasons).")
   fi
-  printf '{'
-  if [ ${#message[@]} -gt 0 ]; then
-    printf '"systemMessage":%s,' "$(json_str "agent-toolkit: $(join ". " "${message[@]}")")"
-  fi
-  printf '"hookSpecificOutput":{"hookEventName":%s,"additionalContext":%s' "$(json_str "$EVENT")" "$(json_str "$context")"
-  [ "$reload" -eq 1 ] && printf ',"reloadSkills":true'
-  printf '}}\n'
+  hook_report "$EVENT" "agent-toolkit doctor:" "$reload"
 }
 
 # Claude Code drops the plain stdout of a hook that exits non-zero, so --sync
@@ -1090,7 +1182,7 @@ main() {
   check_tools || finish
   PREV_ROOT="$(resolve "$STABLE")"
   local ready=0 err
-  check_layout && check_root && ready=1
+  check_location && check_layout && check_root && ready=1
 
   if [ "$ready" -eq 1 ] && [ "$MODE" = dry ]; then
     apply_local

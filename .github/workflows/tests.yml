@@ -1,0 +1,29 @@
+name: Tests
+
+# The release workflow is the gate, and this is the same gate one step earlier:
+# nothing here can block a merge, since rulesets are not available on this plan,
+# but an author sees a failing suite before the merge rather than after it,
+# against a budget of 2,000 runner minutes a month.
+on:
+  pull_request:
+    branches: [main]
+
+# The suite reads the tree and nothing else, and a pull request branch's own code
+# is what runs here, so this job is given no more than reading it.
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          # The suite needs no credentials, and a branch's own test code is what
+          # runs next: leaving a token in .git/config would hand it that token.
+          persist-credentials: false
+
+      - name: The suite
+        run: .github/suite-gate.sh
+

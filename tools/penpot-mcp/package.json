@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@penpot/mcp": "^2.15.4",
+    "pnpm": "^12.4.2"
+  }
+}

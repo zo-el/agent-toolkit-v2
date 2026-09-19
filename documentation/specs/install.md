@@ -6,7 +6,7 @@
 
 | Term | Meaning |
 | ------------------- | ------- |
-| version directory | the directory holding one version of the toolkit: a git checkout, or a release unpacked into a folder such as `~/.claude/agent-toolkit-releases/v<N>`. Install behaves the same for either |
+| version directory | the directory holding one version of the toolkit: a git checkout, or a release unpacked into a folder such as `~/.claude/agent-toolkit-releases/v<version>`. Install behaves the same for either |
 | stable link | `~/.claude/agent-toolkit`, a symlink to the installed version directory. Nothing else on the device names the version directory |
 | root checks | the checks that judge a version directory on its own, listed under Root checks |
 | launcher | `~/.claude/agent-toolkit-run`, a plain file outside every version directory. Every command the toolkit writes into settings runs through it |
@@ -48,10 +48,11 @@
 | pointer | `~/.claude/CLAUDE.md` | imports `@~/.claude/agent-toolkit/CLAUDE.md` |
 | retro marker | `~/.claude/retro/since` | stamped at the first install, never rewritten |
 | plugins | Claude Code's plugin store | the required marketplaces registered, the required plugins installed at user scope |
+| bridge | `~/.claude/tools/penpot-mcp/` | a copy of each file in the version directory's `tools/penpot-mcp/`, replaced whenever the two differ. Nothing else in that directory is read, written or removed, so the dependencies and build the bridge puts there at its first run outlive every version |
 | version stamp | `~/.claude/agent-toolkit-version` | the installed root's version, see Version identity. Written when no required finding stands. Removed when the installed root has no version |
 | backups | `~/.claude/backups/` | a copy taken before every write to settings, the pointer, or a replaced agent file. A backup never overwrites another. Never pruned |
 
-Install replaces every file it writes (launcher, settings, pointer, agents, ledger, stamp) by a rename, never by rewriting it in place.
+Install replaces every file it writes (launcher, bridge, settings, pointer, agents, ledger, stamp) by a rename, never by rewriting it in place.
 
 ## Going live
 
@@ -69,17 +70,20 @@ The same rule holds when the directory is already live, as with a checkout updat
 - the launcher exists in the root, and its own first line runs;
 - the launcher run against a missing entry point asks, and the guard's first line runs;
 - `skills/` and `agents/` hold something, so a partly unpacked directory never installs as an empty toolkit;
+- every file install copies out of `tools/penpot-mcp/` is in the root, and each of its scripts starts, which is the same evidence of a whole directory that `skills/` and `agents/` are;
 - every python hook compiles and `hooks/lib` imports, checked without writing into the root.
 
 ## Version identity
 
-A root's version is `v<count>·<sha>`: the commit count of its HEAD and its abbreviated commit id. Releases are named `v<count>`, so a checkout and a release compare directly.
+A root's version is `v<version>·<revision>`: the semantic version it declares, and the abbreviated commit id of the tree it holds. Releases are named for the semantic version alone, so a checkout and a release compare directly.
 
-1. When the root is the top level of its own git work tree, the version comes from that history. A repository in a parent directory never counts.
-2. Otherwise it comes from a `VERSION` file at the root holding that one line. A release's `VERSION` is written into its folder when the release arrives.
-3. Otherwise the root has no version. It installs normally, and the stamp is removed.
+1. The semantic version is the one line of `VERSION` at the root, three dot separated numbers. The file is tracked, so a checkout and a release cut from the same commit declare the same thing.
+2. The revision comes from the root's own git history when the root is the top level of its own work tree, and otherwise from `REVISION`, written beside `VERSION` when a release is unpacked. A repository in a parent directory never counts.
+3. A root missing either half, or holding either in any other form, has no version. It installs normally, and the stamp is removed.
 
-A `VERSION` line in any other form counts as no version. Two versions are equal when their counts match and one sha is a prefix of the other. The stamp and the status line's freshness light both read a root's version through this rule, implemented once.
+Two versions are **equal** when their semantic versions match and one revision is a prefix of the other, so a release abbreviated to one length still compares with a checkout abbreviated to another. One is **newer** than another when its semantic version is, by the ordering semantic versioning defines; the revision takes no part in that.
+
+The stamp and the status line's freshness light read equality through this rule, implemented once. A commit that bumps nothing still moves the revision, so the light still catches a checkout whose changes are not applied.
 
 ## Settings
 
@@ -89,8 +93,8 @@ A `VERSION` line in any other form counts as no version. Two versions are equal 
 - **A value the toolkit stops setting is removed** at the next apply: a top-level key, an `env` or `enabledPlugins` or `attribution` entry, `permissions.defaultMode`, a `permissions.deny` rule, an `additionalDirectories` entry. It stays when the ledger does not hold it with its current value, which covers two cases:
   - the user changed it after the toolkit wrote it;
   - it already held that value before the toolkit first wrote it.
-- On a machine whose install predates the ledger, every toolkit-owned value present at the first apply that writes a ledger counts as toolkit-written. So does a value an earlier version wrote in a form it no longer uses, such as an absolute-path permission rule now written with `~/`.
-- **A value the toolkit keeps unset is removed at every apply**, whoever set it. `env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` is the one, since agent teams spawn parallel sessions rather than subagents. It is not owned, so it is never recorded, and setting it again means changing the toolkit.
+- On a machine whose install predates the ledger, every value the toolkit still sets that is present at the first apply that writes a ledger counts as toolkit-written. So does a value an earlier version wrote in a form it no longer uses, such as an absolute-path permission rule now written with `~/`. **A value the toolkit has stopped setting is not recognised there**, because nothing in the desired state is left to match it against, so retirement alone never reaches a machine that lost its ledger. Anything that must not be set is kept unset rather than merely retired.
+- **A value the toolkit keeps unset is removed at every apply**, whoever set it. It is not owned, so it is never recorded, and setting it again means changing the toolkit. It comes in two shapes. A key path, removed whole: `env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, since agent teams spawn parallel sessions rather than subagents. And a member of `permissions.additionalDirectories`, removed when what it names matches: `~/.claude` itself, and anything under the releases directory. The second shape exists because retiring a value needs a ledger to vouch that the toolkit wrote it, and a machine that lost its ledger would otherwise keep an approval this toolkit has decided is unsafe, for good.
 - A hook entry and the status line are the toolkit's when their command runs the launcher or a path under the stable link, including entries written by the toolkit's previous generation. They need no ledger.
 - Removing a plugin's `enabledPlugins` entry does not uninstall the plugin.
 - A settings file that does not parse, or that the merge cannot apply to, is never written. The finding carries the command that opens it, since no command can know the right value.
@@ -99,6 +103,31 @@ A `VERSION` line in any other form counts as no version. Two versions are equal 
 - Applies are serialised across the machine. A `--sync` that cannot take the lock within 5 seconds applies nothing and still reports, and a full install waits up to 60 seconds for it.
 - **A ledger that does not parse never holds an apply back.** It is moved aside to a backup name and the run carries on as though there were none: every toolkit-owned value is set, and nothing is retired. The run reports it.
 - Replacing a `settings.json` or a pointer that was a symlink writes the file in its place and says so.
+
+### Approved directories
+
+`permissions.additionalDirectories` names the paths a tool may reach without the user being asked. A path inside one is approved before any rule is consulted, which is what stops a background agent stalling on a prompt, and it approves writing as readily as reading.
+
+**The list is the agents' working state, and nothing else.** Install, the updater and every hook write as processes rather than through a tool, so nothing the toolkit owns has to be approved for the toolkit to work. What earns a place is only what an agent touches while working:
+
+| Path | Why |
+| ---- | --- |
+| the scratchpad | an agent's intermediate files, which belong nowhere else |
+| `~/.claude/worktrees` | an agent given an isolated copy of a repository works in one of these |
+| the version directory, only when it is a git work tree | a clone is what somebody edits, and the `toolkit` skill edits it |
+
+- **`~/.claude/tools` is not on the list, and adding it back would be the mistake this rule exists to stop.** The bridge fills that directory as a process a person starts, and a process needs no approval. All the entry would buy is an unprompted write to the `node_modules` that `start-bridge.sh` executes and that install never reads, replaces or checks: an approval whose whole effect is to make executable code silently writable.
+- **`~/.claude/worktrees` approves the toolkit's own source, and that is accepted deliberately.** A worktree of this repository holds `install.sh`, `hooks/guard.sh` and the suite that gates a release, and an agent working there can write every one of them. It is still right, because a worktree sits before the gates rather than after them: what an agent writes there reaches a machine only through a merge a person approved and a release the workflow published, while a staged tree has passed every gate already and is one session start from running. An agent that cannot write in its own worktree cannot work.
+- **Install refuses a version directory inside any directory approved as agents' working state**: every entry on this list except the version directory's own, computed from the list the settings request builds so the rule survives the list changing. A worktree, or a checkout unpacked into the scratchpad, never becomes the live toolkit by accident. The finding names the checkout a worktree belongs to, which git can answer from the worktree itself. `--sync` is exempt: a machine already live from such a directory would otherwise have no doctor until somebody ran a full install.
+- **`~/.claude` itself is not approved.** It holds the credentials file, the session transcripts, the plugin store, the agent copies and `settings.json`, and approving the parent approves a silent write to every one of them.
+- **In dev mode the live toolkit is agent-writable, and that is the price of dev mode.** A clone is approved because somebody edits it, and its hooks are the live ones, so the refusal above excludes the version directory's own entry on purpose. A machine that wants the gates between an agent and its live hooks installs from a release.
+- **A release directory is approved for nobody, live or staged.** A staged tree is one activation away from running and a live one is running already. That is also why the version directory earns its place only as a work tree: the entry that lets somebody edit a clone would, on a machine installed from a release, hand every agent the code that runs at the next session start.
+- **Where a version directory sits answers before what it holds does.** `git init` inside a release folder is a local command nothing gates, so a folder under the releases directory buys no approval by coming to look like a clone. Outside it, a root git will not answer for is approved, because git failing to answer is not the answer no.
+- **`~/.claude` itself and any release directory are kept unset**, the Settings rule above, so a machine that lost its ledger loses them all the same.
+- **An approval removed that way is said once, in the run that removed it**, as an advisory naming the path and that the toolkit keeps it unset. Silence is for a run that changed nothing; a permission taken away is a change the user can read, and one they set again is removed and said again, because each removal is one.
+- **A path the user approved above `~/.claude`, such as their home directory, is theirs.** It covers everything the rule above is about, and the toolkit did not write it, so the toolkit does not remove it.
+- **The deny rules stay.** A path left off the list is a question; a deny is never, and the credentials file and `settings.json` are worth never.
+- **What a path costs by being left off is a question, not a refusal.** An agent reading `settings.json` to work out what the doctor means, or reading a staged release, is asked first. For a background agent a question is a stall, so a path an agent touches routinely belongs on the list and one it touches once a year does not.
 
 ## Wiring
 
@@ -187,9 +216,13 @@ The list lives once, in `install.sh`. The doctor checks it, both reports render 
 | Plugin | Marketplace | Source |
 | ------------------------------------------------ | ------------------------- | ------------------------------------ |
 | `pr-review-toolkit@claude-plugins-official` | `claude-plugins-official` | `anthropics/claude-plugins-official` |
+| `frontend-design@claude-plugins-official` | `claude-plugins-official` | `anthropics/claude-plugins-official` |
+| `modern-web-guidance@claude-plugins-official` | `claude-plugins-official` | `anthropics/claude-plugins-official` |
 | `claude-notifications-go@claude-notifications-go` | `claude-notifications-go` | `777genius/agent-notifications` |
 
 - A full install registers each marketplace not already registered under its name, whatever source an existing registration used, then installs each plugin `claude plugin list --json` does not show, at user scope.
+- **A marketplace is asked for once, however many plugins name it.** One that will not register fails every plugin behind it, reported as the marketplace's one finding rather than once per plugin.
+- `frontend-design` and `modern-web-guidance` are there because the `ui-developer` works from both, and an agent definition that names a skill the machine lacks is a definition that quietly does less.
 - Fetches run with `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`. Both sources are public, so HTTPS needs no credentials, while Claude Code's default SSH clone needs a key loaded in an ssh-agent the calling shell may not have. The user's own git remotes are untouched.
 - `--dry-run` and `--sync` never fetch.
 - A failed fetch or install is a required finding carrying Claude Code's own message. Everything local still applies.
@@ -198,11 +231,7 @@ The list lives once, in `install.sh`. The doctor checks it, both reports render 
 
 `INSTALL.md` sits at the repo root and is the first thing a person or an agent reads. README's Install section links to it. It carries only what `install.sh` cannot check, and the loop around it:
 
-1. **Get the repo.** A person, in their own terminal. The repo is private, so GitHub access comes first:
-   - `gh auth login --hostname github.com --git-protocol ssh --web`, which can generate an SSH key and upload it.
-   - `git clone git@github.com:zo-el/agent-toolkit-v2.git ~/Documents/git-repo/agent-toolkit-v2`
-
-   One sentence says these need git and gh. No other line of the guide names a package. Any location works except `~/.claude/agent-toolkit`. An agent already holding the repo starts at step 2.
+1. **Get the toolkit.** A person, in their own terminal. The two ways in are `documentation/specs/release.md`'s, and either leaves a version directory to run install from. Both need `gh`, so `gh auth login --hostname github.com --git-protocol ssh --web` comes first, and the clone needs `git` as well. One sentence says so, and no other line of the guide names a package. A clone can live anywhere except `~/.claude/agent-toolkit`. An agent already holding the repo starts at step 2.
 2. **Run `./install.sh`** from the repo.
 3. **Do what it lists under Needs you.** A person runs those commands. An agent hands them to the user exactly as printed and runs none of them.
 4. **Run `./install.sh` again** until it ends with no required finding.
@@ -211,8 +240,9 @@ The list lives once, in `install.sh`. The doctor checks it, both reports render 
 It also states, once each:
 
 - what install touches;
+- the bridge: install puts its files at `~/.claude/tools/penpot-mcp/` and does nothing else for it. The Penpot account, Node, the dependencies it fetches at its first run, and connecting the plugin in a browser are the user's, and no install check looks at any of them;
 - the exit codes;
-- updating: once a new version is in the version directory, the next session start on the machine applies it and says when to restart, and `./install.sh` applies it immediately;
+- updating: a session start applies whatever the version directory now holds, and `./install.sh` applies it immediately. How a new version reaches that directory is the release flow's, and `documentation/specs/release.md` names what the guide says about it;
 - moving the checkout: run `install.sh` from the new location.
 
 ## Failure
@@ -222,6 +252,7 @@ It also states, once each:
 | `jq` or `python3` missing | nothing written. Required finding with the package line |
 | the root being installed fails a root check | nothing written, the stable link stays where it was. `toolkit` findings, exit `1`. The failing root stays on disk |
 | `~/.claude/agent-toolkit` is a real directory | nothing written, exit `1`. The finding gives the command that moves it to `~/Documents/git-repo/agent-toolkit-v2` and runs install from there |
+| the root being installed lies inside a directory approved as agents' working state, `~/.claude/worktrees` or the scratchpad | nothing written, exit `1`. That directory is approved for every agent, so it never becomes the live toolkit. The finding names the checkout a worktree belongs to and the command to install from there |
 | the stable link dangles | a `PreToolUse` call is asked, session start reports it to the user and the model, the status line says so. A full install from the new location re-points the link, drops the old location from the approved directories, and unlinks the old location's skills |
 | a skill name is held by something that is not the toolkit's | required finding naming the path. The path is left untouched |
 | `settings.json` does not parse, or the merge fails | the file is left untouched. Required finding with the reason and the newest backup |
@@ -233,7 +264,7 @@ It also states, once each:
 | a backup does not parse | it is never offered as the file to restore. The newest backup that does parse is |
 | a write inside `~/.claude` fails | earlier steps stay applied. The report names what did not apply. No version stamp |
 | a plugin fetch fails, or `claude` is missing or too old | required finding. Everything local still applies |
-| the version directory has no git history and no valid `VERSION` | installs. The stamp is removed |
+| the version directory declares no valid `VERSION`, or has neither git history nor a valid `REVISION` | installs. The stamp is removed |
 | an unknown argument | usage on stderr, exit `2`, nothing written |
 
 ## Rejected
@@ -241,6 +272,7 @@ It also states, once each:
 - **Distributing the toolkit as a plugin.** A plugin cannot ship CLAUDE.md, env, permissions or the status line, and its agents are namespaced (`plugin:developer`), which breaks every bare-name reference.
 - **The guide as the requirement list.** A second copy of what the script checks, held in step only by a test. The report already renders the list for this machine, with each fix.
 - **An inline fallback for the guard in `settings.json`.** It protects the guard alone, and session start still could not say the toolkit is gone.
+- **One file holding the whole version.** The semantic half is tracked and the revision half cannot be, since a release folder's tracked files have to stay identical to the commit they came from. Two files keep each half with whoever writes it: the pull request writes `VERSION`, and the updater writes `REVISION` into the folder it is still unpacking. Renaming the tracked file instead would move the better known name onto the half a person never edits.
 - **A hand-kept list of retired values.** It works only when whoever retires a value remembers to add it.
 - **Moving the stable link first and checking after.** A broken version would be live with nothing to roll back to.
 - **Warning at session start instead of applying.** A stale file keeps running dead hook paths until someone acts, and a hook that cannot start does not block the tool it guards.

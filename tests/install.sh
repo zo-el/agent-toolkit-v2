@@ -30,7 +30,8 @@ case "$*" in
     jq -Rn --arg dir "$state/cache" \
       '[inputs | split(" ") | {id: .[0], enabled: (.[1] == "on"), scope: "user", installPath: ($dir + "/" + .[0])}]' <"$state/plugins" ;;
   "plugin marketplace add "*)
-    [ "${CLAUDE_STUB_FAIL:-}" = add ] && { echo "✘ Failed to add marketplace: the stub refused" >&2; exit 1; }
+    { [ "${CLAUDE_STUB_FAIL:-}" = add ] || [ "${CLAUDE_STUB_FAIL_MARKET:-}" = "$4" ]; } \
+      && { echo "✘ Failed to add marketplace: the stub refused" >&2; exit 1; }
     case "$4" in 777genius/*) name=claude-notifications-go ;; *) name="${4#*/}" ;; esac
     echo "$name $4" >>"$state/markets" ;;
   "plugin install "*" --scope user --json")
@@ -98,12 +99,12 @@ hook() { # home, command, payload → out, rc, run as Claude Code runs a hook
   out="$(HOME="$1" sh -c "$2" <"$TMP/hook.payload" 2>/dev/null)"
   rc=$?
 }
-lock_holder() { # home → holds the apply lock until killed; pid in $holder
+lock_holder() { # path → holds a flock on it until killed; pid in $holder
   python3 -c 'import fcntl, os, sys, time
 fd = os.open(sys.argv[1], os.O_RDONLY)
 fcntl.flock(fd, fcntl.LOCK_EX)
 open(sys.argv[2], "w").close()
-time.sleep(60)' "$1/.claude" "$TMP/locked" &
+time.sleep(60)' "$1" "$TMP/locked" &
   holder=$!
   for _ in $(seq 50); do [ -e "$TMP/locked" ] && break; sleep 0.1; done
   rm -f "$TMP/locked"
@@ -197,7 +198,9 @@ check "a first install asks for a restart for the pointer, both directories, env
 settings() { js "$FAKE" "$1"; }
 same "the whole wiring, event, matcher and caller included" "$(LC_ALL=C sort <<'WIRED'
 SessionStart[startup|resume|clear|compact|fork] SessionStart install.sh --sync
+SessionStart[startup|resume|clear|compact] SessionStart hooks/update.sh apply
 SessionStart[] async hooks/retro.py record (async)
+SessionStart[] async hooks/update.sh stage (async)
 PreCompact[] async hooks/retro.py record (async)
 UserPromptSubmit[] UserPromptSubmit hooks/taskline.py
 UserPromptSubmit[] async hooks/retro.py record --interval 900 (async)
@@ -337,9 +340,48 @@ check "foreign env kept"      "keep"          "$(settings '.env.MY_VAR')"
 check "foreign key kept"      "dark"          "$(settings '.theme')"
 check "foreign hook kept"     "/usr/bin/true" "$(settings '[.hooks.PreToolUse[].hooks[].command] | join(" ")')"
 check "foreign dir kept"      "/my/own/dir"   "$(settings '.permissions.additionalDirectories | join(" ")')"
-check "the version directory is approved" "$ROOT" "$(settings '.permissions.additionalDirectories | join(" ")')"
+# The list is the agents' own working state. Approving ~/.claude would approve a
+# silent write to the credentials file, the transcripts, the plugin store and
+# settings.json itself, which is an agent rewriting its own permissions.
+approved="$(settings '.permissions.additionalDirectories | join(" ")')"
+check "the scratchpad is approved" "/tmp/claude-$(id -u)" "$approved"
+check "and the worktrees an agent is given" "$FAKE/.claude/worktrees" "$approved"
+case " $approved " in
+  *" $FAKE/.claude/tools "*) bad "the bridge's directory is not approved either" "it is: $approved" ;;
+  *) ok "the bridge's directory is not approved either" ;;
+esac
+# A work tree, which the suite runs from: a checkout, a worktree, or the runner's
+# own shallow clone. An unpacked source archive is not, and this case says so.
+check "a clone is approved, because the toolkit skill edits one" "$ROOT" "$approved"
+GITLESS="$TMP/gitless-root"
+copy_root "$GITLESS"
+mkdir -p "$GITLESS/.git"
+inst "$GITLESS" "$H"
+check "and so is one git would not answer for, because that is not the answer no" "$GITLESS" \
+  "$(js "$H" '.permissions.additionalDirectories | join(" ")')"
+case " $approved " in
+  *" $FAKE/.claude "*) bad "~/.claude itself is not approved" "it is: $approved" ;;
+  *) ok "~/.claude itself is not approved" ;;
+esac
+same "so a clone approves three paths, and keeps the user's own where it was" \
+  "/my/own/dir /tmp/claude-$(id -u) $FAKE/.claude/worktrees $ROOT" "$approved"
 check "credentials denied through ~/" "Read(~/.claude/.credentials.json)" "$(settings '.permissions.deny | join(" ")')"
+# The rule names a directory, and there are a dozen spellings of one. Every form
+# here resolves to the same path, and a path resolver reads them all as it.
+# The last one is the user's own, below ~/.claude but not it: the rule names one
+# path exactly, so a path under it is theirs and stays.
+for spelling in "$FAKE/.claude/" "~/.claude" "~/.claude/." "$FAKE//.claude" "$FAKE/.claude/skills/.." "$FAKE/.claude/agent-toolkit-releases/v1.2.3" "$FAKE/.claude/worktrees/../agent-toolkit-releases/v9" "$FAKE/.claude/projects"; do
+  jq --arg s "$spelling" '.permissions.additionalDirectories += [$s]' "$FAKE/.claude/settings.json" >"$TMP/spelled" \
+    && cp "$TMP/spelled" "$FAKE/.claude/settings.json"
+done
+inst "$ROOT" "$FAKE"
+same "an approval kept unset goes in every spelling of the directory it names" \
+  "/my/own/dir /tmp/claude-$(id -u) $FAKE/.claude/worktrees $ROOT $FAKE/.claude/projects" \
+  "$(settings '.permissions.additionalDirectories | join(" ")')"
 check "review plugin enabled" "true" "$(settings '.enabledPlugins["pr-review-toolkit@claude-plugins-official"]')"
+# The ui-developer names both of these, so every machine's has to have them.
+check "and the two the ui-developer works from" "true true" \
+  "$(settings '[.enabledPlugins["frontend-design@claude-plugins-official"], .enabledPlugins["modern-web-guidance@claude-plugins-official"]] | join(" ")')"
 same "the stable link points at the version directory" "$ROOT" "$(readlink "$FAKE/.claude/agent-toolkit")"
 check "the pointer imports through ~/" "@~/.claude/agent-toolkit/CLAUDE.md" "$(cat "$FAKE/.claude/CLAUDE.md")"
 cmp -s "$ROOT/hooks/launcher.sh" "$FAKE/.claude/agent-toolkit-run" && [ -x "$FAKE/.claude/agent-toolkit-run" ] \
@@ -459,7 +501,7 @@ exit_is "a required finding at session start still exits 0" 0
 [ -z "$(grep -E '\|plugin (marketplace add|install) ' "$CLAUDE_CALLS")" ] && ok "and a session start with plugins missing fetches nothing" \
   || bad "a session start with plugins missing fetches nothing" "$(cat "$CLAUDE_CALLS")"
 json_is "and prints one SessionStart object with a message for the user" \
-  '.hookSpecificOutput.hookEventName == "SessionStart" and (.systemMessage | test("^agent-toolkit: 2 problems"))'
+  '.hookSpecificOutput.hookEventName == "SessionStart" and (.systemMessage | test("^agent-toolkit: 4 problems"))'
 json_is "and gives the model every finding with who acts and the fix" \
   '.hookSpecificOutput.additionalContext | startswith("agent-toolkit doctor:\n✗ plugin pr-review-toolkit@claude-plugins-official is not installed. Fix (install): ~/.claude/agent-toolkit/install.sh")'
 hook "$H" "$(command_for "$H" PostToolUse sync.sh)" \
@@ -602,55 +644,440 @@ inst "$UNLINKED" "$H" --sync
 [ "$rc" = 0 ] && [ -z "$out" ] && ok "--sync from a directory the link does not point at prints nothing" || bad "--sync from an unlinked copy prints nothing" "exit $rc: $out"
 same "and changes nothing, the link included" "$before" "$(snapshot "$H")"
 
+# ── the bridge ───────────────────────────────────────────────────────────────
+# What the bridge fetches at its first run is the machine's, and no install goes
+# near it.
+H="$(home bridge)"
+mkdir -p "$H/.claude/tools/penpot-mcp/node_modules/@penpot"
+printf 'fetched\n' >"$H/.claude/tools/penpot-mcp/node_modules/@penpot/marker"
+printf 'a log of its own\n' >"$H/.claude/tools/penpot-mcp/.pnpm-install.log"
+untouched="$(snapshot "$H/.claude/tools/penpot-mcp/node_modules") $(cat "$H/.claude/tools/penpot-mcp/.pnpm-install.log")"
+inst "$ROOT" "$H"
+carried=""
+for f in package.json package-lock.json start-bridge.sh check-bridge.sh; do
+  cmp -s "$ROOT/tools/penpot-mcp/$f" "$H/.claude/tools/penpot-mcp/$f" || carried="$carried $f"
+done
+[ -z "$carried" ] && ok "a full install copies every file the bridge needs" || bad "the bridge's files are copied" "differing:$carried"
+{ [ -x "$H/.claude/tools/penpot-mcp/start-bridge.sh" ] && [ -x "$H/.claude/tools/penpot-mcp/check-bridge.sh" ]; } \
+  && ok "and leaves its scripts runnable" || bad "the bridge scripts are executable" "they are not"
+same "while its dependencies and its logs are left exactly as they were" "$untouched" \
+  "$(snapshot "$H/.claude/tools/penpot-mcp/node_modules") $(cat "$H/.claude/tools/penpot-mcp/.pnpm-install.log")"
+bridge_ids() { local f; for f in "$H"/.claude/tools/penpot-mcp/*; do printf '%s ' "$(file_id "$f")"; done; }
+before="$(bridge_ids)"
+inst "$ROOT" "$H"
+same "an install with the same files writes none of them again" "$before" "$(bridge_ids)"
+printf 'edited\n' >"$H/.claude/tools/penpot-mcp/package.json"
+inst "$ROOT" "$H"
+cmp -s "$ROOT/tools/penpot-mcp/package.json" "$H/.claude/tools/penpot-mcp/package.json" \
+  && ok "and one that drifted is put back" || bad "a drifted bridge file is replaced" "it was left"
+chmod -x "$H/.claude/tools/penpot-mcp/start-bridge.sh"
+inst "$ROOT" "$H"
+[ -x "$H/.claude/tools/penpot-mcp/start-bridge.sh" ] && ok "so is one that lost the bit that lets it run" \
+  || bad "a bridge script that lost +x is replaced" "it is still not executable"
+
+BRIDGELESS="$TMP/bridgeless-root"
+copy_root "$BRIDGELESS"
+rm -f "$BRIDGELESS/tools/penpot-mcp/package-lock.json"
+before="$(snapshot "$H")"
+inst "$BRIDGELESS" "$H"
+exit_is "a version directory missing a bridge file exits 1" 1
+check "naming it under Toolkit" "✗ tools/penpot-mcp/package-lock.json is missing from the version directory" "$(block Toolkit)"
+same "and writes nothing" "$before" "$(snapshot "$H")"
+copy_root "$BRIDGELESS"
+printf 'no shebang here\n' >"$BRIDGELESS/tools/penpot-mcp/start-bridge.sh"
+inst "$BRIDGELESS" "$H"
+exit_is "nor does one whose bridge script cannot start" 1
+check "saying why" "✗ tools/penpot-mcp/start-bridge.sh cannot start: it has no #! line" "$(block Toolkit)"
+
+# A release directory is approved for nobody: a staged tree is one activation
+# away from running, and a live one is running already.
+H="$(home approved-release)"
+RELEASE_ROOT="$TMP/approved-release-root"
+copy_root "$RELEASE_ROOT"
+printf '1.5.0\n' >"$RELEASE_ROOT/VERSION"
+printf 'abc1234\n' >"$RELEASE_ROOT/REVISION"
+inst "$RELEASE_ROOT" "$H"
+approved="$(js "$H" '.permissions.additionalDirectories | join(" ")')"
+case " $approved " in
+  *" $RELEASE_ROOT "*) bad "a version directory that is not a work tree is approved for nobody" "it is: $approved" ;;
+  *) ok "a version directory that is not a work tree is approved for nobody" ;;
+esac
+check "while the agents' own directories still are" "$H/.claude/worktrees" "$approved"
+same "and a release root approves those two and nothing else" \
+  "/tmp/claude-$(id -u) $H/.claude/worktrees" "$approved"
+
+# git init inside a release directory is a local command nothing gates, so where
+# a version directory sits has to answer before what it holds does.
+UNPACKED="$H/.claude/agent-toolkit-releases/v1.5.0"
+mkdir -p "$(dirname "$UNPACKED")"
+cp -r "$RELEASE_ROOT" "$UNPACKED"
+git -C "$UNPACKED" init -q && git -C "$UNPACKED" add -A >/dev/null 2>&1 && git -C "$UNPACKED" commit -q -m planted
+inst "$UNPACKED" "$H"
+case " $(js "$H" '.permissions.additionalDirectories | join(" ")') " in
+  *" $UNPACKED "*) bad "a release directory made to look like a clone is approved for nobody either" "it is approved" ;;
+  *) ok "a release directory made to look like a clone is approved for nobody either" ;;
+esac
+
+# The wholesale entry the previous generation wrote is retired at the next apply,
+# which is what every toolkit-owned value it stops setting gets.
+H="$(home approved-retire)"
+WHOLESALE="$TMP/wholesale-root"
+copy_root "$WHOLESALE"
+patch_desired "$WHOLESALE" '.desired.permissions.additionalDirectories += [$ENV.HOME + "/.claude"]'
+inst "$WHOLESALE" "$H"
+case " $(js "$H" '.permissions.additionalDirectories | join(" ")') " in
+  *" $H/.claude "*) ok "a home that was installed with ~/.claude approved has it" ;;
+  *) bad "a home that was installed with ~/.claude approved has it" "$(js "$H" '.permissions.additionalDirectories | join(" ")')" ;;
+esac
+# The rule strips it and this version's desired list puts it back, so a write
+# that ends with it approved took nothing away.
+jq '.permissions.deny = []' "$H/.claude/settings.json" >"$TMP/settings" \
+  && cp "$TMP/settings" "$H/.claude/settings.json"
+inst "$WHOLESALE" "$H"
+case "$out" in
+  *"settings.json updated"*) ;;
+  *) bad "the version that approves it writes settings.json again" "it wrote nothing, so the case proves nothing: $out" ;;
+esac
+case "$out" in
+  *"was approved for every agent"*) bad "and a run that leaves it approved never says it was taken away" "$out" ;;
+  *) ok "and a run that leaves it approved never says it was taken away" ;;
+esac
+inst "$ROOT" "$H"
+case " $(js "$H" '.permissions.additionalDirectories | join(" ")') " in
+  *" $H/.claude "*) bad "and the next install takes it away" "it is still approved" ;;
+  *) ok "and the next install takes it away" ;;
+esac
+check "saying so, though the ledger took it before the rule did" \
+  "! ~/.claude was approved for every agent without a question, which this toolkit keeps unset, so it was removed from settings.json" "$out"
+
+# The ledger is what says the toolkit wrote a value, and a machine that lost one
+# is exactly the machine this approval must still be taken from.
+H="$(home approved-ledgerless)"
+inst "$WHOLESALE" "$H"
+jq --arg h "$H" '.permissions.additionalDirectories += [$h, "/my/own/dir", "~/.claude", $h + "/.claude/agent-toolkit-releases/v1.5.0"]' \
+  "$H/.claude/settings.json" >"$TMP/settings" && cp "$TMP/settings" "$H/.claude/settings.json"
+rm -f "$H/.claude/agent-toolkit-applied.json"
+inst "$ROOT" "$H"
+approved="$(js "$H" '.permissions.additionalDirectories | join(" ")')"
+case " $approved " in
+  *" $H/.claude "*) bad "~/.claude goes even with no ledger to vouch for it" "it stayed: $approved" ;;
+  *) ok "~/.claude goes even with no ledger to vouch for it" ;;
+esac
+case " $approved " in
+  *" ~/.claude "*) bad "and so does the same path written the way a user writes it" "it stayed: $approved" ;;
+  *) ok "and so does the same path written the way a user writes it" ;;
+esac
+case " $approved " in
+  *" $H/.claude/agent-toolkit-releases/v1.5.0 "*) bad "and so does a release directory somebody approved" "it stayed: $approved" ;;
+  *) ok "and so does a release directory somebody approved" ;;
+esac
+check "while the user's own entry stays" "/my/own/dir" "$approved"
+case " $approved " in
+  *" $H "*) ok "and so does their home, which the toolkit never wrote" ;;
+  *) bad "the user's home stays" "it went: $approved" ;;
+esac
+same "two spellings of ~/.claude are one approval taken away, said once" 1 \
+  "$(grep -c '! ~/.claude was approved for every agent without a question' <<<"$out")"
+check "and the release directory is said on its own" \
+  "! ~/.claude/agent-toolkit-releases/v1.5.0 was approved for every agent without a question, which this toolkit keeps unset" "$out"
+case "$out" in
+  *"! /my/own/dir was approved"* | *"! ~ was approved"*) bad "and nothing the user keeps is said" "$out" ;;
+  *) ok "and nothing the user keeps is said" ;;
+esac
+
+# The session start is the run that takes it away on most machines, and it says
+# so there.
+H="$(home approved-revoked)"
+inst "$ROOT" "$H"
+sets_claude_dir() {
+  jq '.permissions.additionalDirectories += ["~/.claude"]' "$H/.claude/settings.json" >"$TMP/settings" \
+    && cp "$TMP/settings" "$H/.claude/settings.json"
+}
+revoked() { # name, how often the session start says it
+  hook "$H" "$(command_for "$H" SessionStart install.sh)" '{"hook_event_name":"SessionStart"}'
+  same "$1" "$2" "$(jq -r '.hookSpecificOutput.additionalContext // ""' <<<"$out" 2>/dev/null \
+    | grep -c '! ~/.claude was approved for every agent without a question, which this toolkit keeps unset, so it was removed from settings.json')" \
+    "said $(grep -c 'was approved for every agent' <<<"$out") times: ${out:-<empty>}"
+}
+sets_claude_dir
+revoked "a session start that takes ~/.claude away says so once" 1
+case " $(js "$H" '.permissions.additionalDirectories | join(" ")') " in
+  *" ~/.claude "*) bad "having taken it" "it is still approved" ;;
+  *) ok "having taken it" ;;
+esac
+revoked "and the next one says nothing of it" 0
+sets_claude_dir
+inst "$ROOT" "$H" --dry-run
+case "$out" in
+  *"was approved for every agent"*) bad "a dry run takes nothing away, so says nothing was" "$out" ;;
+  *) ok "a dry run takes nothing away, so says nothing was" ;;
+esac
+revoked "and setting it again is said again" 1
+
+# A home that ends in a slash, which a passwd entry can hand a shell, spells the
+# rule's own path with two of them. Neither spelling of ~/.claude may survive it.
+H="$(home approved-slashed)"
+inst "$ROOT" "$H/"
+jq --arg h "$H" '.permissions.additionalDirectories += ["~/.claude", $h + "/.claude"]' "$H/.claude/settings.json" >"$TMP/settings" \
+  && cp "$TMP/settings" "$H/.claude/settings.json"
+inst "$ROOT" "$H/"
+case " $(js "$H" '.permissions.additionalDirectories | join(" ")') " in
+  *" ~/.claude "* | *" $H/.claude "*) bad "a home written with a trailing slash still loses ~/.claude" "$(js "$H" '.permissions.additionalDirectories')" ;;
+  *) ok "a home written with a trailing slash still loses ~/.claude" ;;
+esac
+check "and says it took ~/.claude away" ".claude was approved for every agent without a question" "$out"
+
+# ── a version directory under ~/.claude/worktrees ────────────────────────────
+# Every agent may write there without being asked, so the one path by which an
+# agent-writable directory becomes the code that runs on every tool call is shut.
+H="$(home worktree-root)"
+WT="$H/.claude/worktrees/wt"
+mkdir -p "$(dirname "$WT")"
+copy_root "$WT"
+before="$(snapshot "$H")"
+inst "$WT" "$H"
+exit_is "a version directory under ~/.claude/worktrees exits 1" 1
+check "saying why, under Needs you" "✗ the version directory is under ~/.claude/worktrees, which every agent may write" "$(block 'Needs you')"
+same "and writes nothing at all" "$before" "$(snapshot "$H")"
+inst "$WT" "$H" --dry-run
+exit_is "and a dry run of one exits 1 as well" 1
+same "writing nothing either" "$before" "$(snapshot "$H")"
+SIBLING_HOME="$(home worktree-sibling)"
+mkdir -p "$SIBLING_HOME/.claude/worktrees"
+copy_root "$SIBLING_HOME/.claude/worktrees-old/wt"
+inst "$SIBLING_HOME/.claude/worktrees-old/wt" "$SIBLING_HOME"
+exit_is "while a directory beside it that only shares its name's start installs" 0
+case "$out" in
+  *"every agent may write"*) bad "and is never called one an agent may write" "$out" ;;
+  *) ok "and is never called one an agent may write" ;;
+esac
+
+# The answer comes from inside the refused tree, so it is asked only of a real
+# work tree and only with the variables that would answer for another repository
+# out of the way.
+git -C "$H" init -q && git -C "$H" add -A >/dev/null 2>&1 && git -C "$H" commit -q -m dotfiles
+inst "$WT" "$H"
+case "$(block 'Needs you')" in
+  *"names the checkout"*) bad "a repository above the worktree is never read as its checkout" "it named one" ;;
+  *) ok "a repository above the worktree is never read as its checkout" ;;
+esac
+rm -rf "$H/.git"
+
+# A linked worktree knows the checkout it belongs to, so the finding names it and
+# the fix is the command that installs from there.
+CHECKOUT="$TMP/worktree-checkout"
+copy_root "$CHECKOUT"
+git -C "$CHECKOUT" init -q && git -C "$CHECKOUT" add -A >/dev/null 2>&1 && git -C "$CHECKOUT" commit -q -m checkout
+LINKED="$H/.claude/worktrees/linked"
+git -C "$CHECKOUT" worktree add -q --detach "$LINKED" HEAD
+cp "$ROOT/install.sh" "$LINKED/install.sh"
+inst "$LINKED" "$H"
+exit_is "a linked worktree is refused too" 1
+check "naming the checkout it belongs to" "The worktree names the checkout at $CHECKOUT" "$(block 'Needs you')"
+worktree_fix="$(block 'Needs you' | grep -F "cd $CHECKOUT" | sed 's/^ *//')"
+# A variable naming another repository would answer for that one instead, which
+# is a checkout this worktree does not belong to.
+OTHER="$TMP/other-checkout"
+copy_root "$OTHER"
+git -C "$OTHER" init -q && git -C "$OTHER" add -A >/dev/null 2>&1 && git -C "$OTHER" commit -q -m other
+out="$(HOME="$H" GIT_DIR="$OTHER/.git" GIT_COMMON_DIR="$OTHER/.git" "$LINKED/install.sh" 2>&1)"
+case "$out" in
+  *"$OTHER"*) bad "and a git variable never answers for another repository" "it named $OTHER" ;;
+  *) ok "and a git variable never answers for another repository" ;;
+esac
+check "naming the one the worktree belongs to instead" "names the checkout at $CHECKOUT" "$out"
+check "with the command that installs from there" "cd $CHECKOUT && ./install.sh" "$worktree_fix"
+HOME="$H" bash -c "$worktree_fix" >/dev/null 2>&1
+same "and the fix, run as printed, is what goes live" "$CHECKOUT" "$(readlink "$H/.claude/agent-toolkit")"
+git -C "$CHECKOUT" worktree remove --force "$LINKED" 2>/dev/null
+
+# The checkout comes out of the worktree's own .git, inside the directory the
+# refusal exists because every agent may write it. A rewritten one that names a
+# tree an agent could have built is not a checkout to hand the user.
+PLANTED_CHECKOUT="$H/.claude/planted-checkout"
+copy_root "$PLANTED_CHECKOUT"
+git -C "$PLANTED_CHECKOUT" init -q && git -C "$PLANTED_CHECKOUT" add -A >/dev/null 2>&1 \
+  && git -C "$PLANTED_CHECKOUT" commit -q -m planted
+printf 'gitdir: %s/.git\n' "$PLANTED_CHECKOUT" >"$WT/.git"
+inst "$WT" "$H"
+exit_is "a worktree naming a checkout of its own is refused all the same" 1
+case "$(block 'Needs you')" in
+  *"$PLANTED_CHECKOUT"*) bad "and the fix never sends the user into a directory an agent may write" "it named $PLANTED_CHECKOUT" ;;
+  *) ok "and the fix never sends the user into a directory an agent may write" ;;
+esac
+check "saying only what it can stand behind" "mv -T ~/.claude/worktrees/wt <a directory of your own>" "$(block 'Needs you')"
+rm -f "$WT/.git"
+
+# --sync needs no rule: a worktree never becomes the live root, so a --sync from
+# one finds the link pointing elsewhere and stops before anything else.
+inst "$WT" "$H" --sync
+[ "$rc" = 0 ] && [ -z "$out" ] && ok "and --sync from one says nothing and changes nothing" \
+  || bad "--sync from a worktree says nothing" "exit $rc: $out"
+
+# A machine installed from a worktree before this rule existed keeps working: the
+# doctor is not what tells it, because a doctor that refused would leave it with
+# no doctor at all until somebody ran a full install.
+ln -sfn "$WT" "$H/.claude/agent-toolkit"
+rm -f "$H/.claude/skills/toolkit"
+inst "$WT" "$H" --sync
+[ -L "$H/.claude/skills/toolkit" ] && ok "and a machine already live from one still gets its doctor" \
+  || bad "a live worktree root still syncs" "exit $rc: $out"
+case "$out" in
+  *"every agent may write"*) bad "which never refuses at a session start" "it refused: $out" ;;
+  *) ok "which never refuses at a session start" ;;
+esac
+
+# ── a version directory inside the scratchpad ────────────────────────────────
+# The scratchpad is approved for every agent as well, and it is /tmp/claude-<uid>
+# whatever $HOME says, so no fake home keeps these cases away from the real one.
+# The mktemp directory is the suite's own, and goes with the suite.
+SCRATCH_DIR="/tmp/claude-$(id -u)"
+mkdir -p "$SCRATCH_DIR"
+SCRATCH_ROOTS="$(mktemp -d "$SCRATCH_DIR/agent-toolkit-suite.XXXXXX")"
+CLEANUP+=("$SCRATCH_ROOTS")
+H="$(home scratch-root)"
+IN_SCRATCH="$SCRATCH_ROOTS/toolkit"
+copy_root "$IN_SCRATCH"
+before="$(snapshot "$H")"
+inst "$IN_SCRATCH" "$H"
+exit_is "a version directory inside the scratchpad exits 1" 1
+check "exactly as one under the worktrees does" "✗ the version directory is under $SCRATCH_DIR, which every agent may write" \
+  "$(block 'Needs you')"
+check "with the fix that moves it out" "mv -T $IN_SCRATCH <a directory of your own>" "$(block 'Needs you')"
+same "writing nothing" "$before" "$(snapshot "$H")"
+inst "$IN_SCRATCH" "$H" --dry-run
+exit_is "and a dry run of one exits 1 too" 1
+same "writing nothing either" "$before" "$(snapshot "$H")"
+inst "$IN_SCRATCH" "$H" --sync
+[ "$rc" = 0 ] && [ -z "$out" ] && ok "while --sync from one says nothing, since it is not the live root" \
+  || bad "--sync from a scratchpad root says nothing" "exit $rc: $out"
+ln -sfn "$IN_SCRATCH" "$H/.claude/agent-toolkit"
+rm -f "$H/.claude/skills/toolkit"
+inst "$IN_SCRATCH" "$H" --sync
+[ -L "$H/.claude/skills/toolkit" ] && ok "and a machine already live from one still gets its doctor" \
+  || bad "a live scratchpad root still syncs" "exit $rc: $out"
+SCRATCH_LINKED="$TMP/scratch-linked-home"
+rm -f "$SCRATCH_LINKED"
+ln -s "$(home scratch-linked)" "$SCRATCH_LINKED"
+before="$(snapshot "$TMP/scratch-linked")"
+out="$(HOME="$SCRATCH_LINKED" "$IN_SCRATCH/install.sh" 2>&1)"
+rc=$?
+exit_is "and through a symlinked home it is refused all the same" 1
+check "saying the same thing" "under $SCRATCH_DIR, which every agent may write" "$out"
+same "and writing nothing there either" "$before" "$(snapshot "$TMP/scratch-linked")"
+
+H="$(home clone-accepts-itself)"
+CLONE_SELF="$TMP/clone-self"
+copy_root "$CLONE_SELF"
+git -C "$CLONE_SELF" init -q && git -C "$CLONE_SELF" add -A >/dev/null 2>&1 && git -C "$CLONE_SELF" commit -q -m self
+inst "$CLONE_SELF" "$H"
+exit_is "a clone, which is approved, is never refused for sitting inside its own approval" 0
+check "and is approved" "$CLONE_SELF" "$(js "$H" '.permissions.additionalDirectories | join(" ")')"
+
+# A version directory resolves every component of its own path and $HOME need
+# not, so a home reached through a symlink is where a rule written against $HOME
+# stops matching. A dotfile manager or a /home on another mount is enough.
+LINKED_REAL="$(home linked-real)"
+LINKED="$TMP/linked-home"
+rm -f "$LINKED"
+ln -s "$LINKED_REAL" "$LINKED"
+mkdir -p "$LINKED_REAL/.claude/worktrees"
+copy_root "$LINKED_REAL/.claude/worktrees/wt"
+before="$(snapshot "$LINKED_REAL")"
+out="$(HOME="$LINKED" "$LINKED/.claude/worktrees/wt/install.sh" 2>&1)"
+rc=$?
+exit_is "a worktree root is refused through a symlinked home too" 1
+check "saying the same thing" "under ~/.claude/worktrees, which every agent may write" "$out"
+same "and writing nothing" "$before" "$(snapshot "$LINKED_REAL")"
+
+PLANTED="$LINKED_REAL/.claude/agent-toolkit-releases/v1.5.0"
+mkdir -p "$(dirname "$PLANTED")"
+copy_root "$PLANTED"
+printf '1.5.0\n' >"$PLANTED/VERSION"
+printf 'abc1234\n' >"$PLANTED/REVISION"
+git -C "$PLANTED" init -q && git -C "$PLANTED" add -A >/dev/null 2>&1 && git -C "$PLANTED" commit -q -m planted
+out="$(HOME="$LINKED" "$LINKED/.claude/agent-toolkit-releases/v1.5.0/install.sh" 2>&1)"
+case " $(js "$LINKED_REAL" '.permissions.additionalDirectories | join(" ")') " in
+  *" $PLANTED "*) bad "and a release made to look like a clone is approved for nobody through one" "it is approved" ;;
+  *) ok "and a release made to look like a clone is approved for nobody through one" ;;
+esac
+
 # ── version identity ─────────────────────────────────────────────────────────
 H="$(home version)"
-RELEASE="$TMP/release-v7"
+RELEASE="$TMP/release-v1.5.0"
 copy_root "$RELEASE"
-printf 'v7·abc1234\n' >"$RELEASE/VERSION"
+printf '1.5.0\n' >"$RELEASE/VERSION"
+printf 'abc1234\n' >"$RELEASE/REVISION"
 inst "$RELEASE" "$H"
-same "a release's VERSION is stamped" "v7·abc1234" "$(cat "$H/.claude/agent-toolkit-version" 2>/dev/null)"
+same "a release's two halves are stamped as one version" "v1.5.0·abc1234" "$(cat "$H/.claude/agent-toolkit-version" 2>/dev/null)"
 printf '{"cwd":"/"}' >"$TMP/sl.payload"
 out="$(HOME="$H" python3 "$ROOT/hooks/statusline.py" <"$TMP/sl.payload" 2>&1)"
 case "$out" in
-  *"$(printf '\033[2m⬡ v7·abc1234\033[0m')") ok "the status line shows a matching release root with no ⚠ or ?" ;;
+  *"$(printf '\033[2m⬡ v1.5.0·abc1234\033[0m')") ok "the status line shows a matching release root with no ⚠ or ?" ;;
   *) bad "the status line shows a matching release root with no ⚠ or ?" "$(printf '%s' "$out" | cat -v)" ;;
 esac
-printf 'v8·abc1234\n' >"$RELEASE/VERSION"
+printf '1.6.0\n' >"$RELEASE/VERSION"
 check "and ⚠ once the version directory moves past the stamp" "⚠" "$(HOME="$H" python3 "$ROOT/hooks/statusline.py" <"$TMP/sl.payload" 2>&1)"
-printf '7-abc1234\n' >"$RELEASE/VERSION"
+# A commit that bumps nothing still moves the revision, which is what catches a
+# checkout whose edits are not applied.
+printf '1.5.0\n' >"$RELEASE/VERSION"
+printf 'abd1234\n' >"$RELEASE/REVISION"
+check "and on a moved revision under the same version" "⚠" "$(HOME="$H" python3 "$ROOT/hooks/statusline.py" <"$TMP/sl.payload" 2>&1)"
+printf '1.5\n' >"$RELEASE/VERSION"
+printf 'abc1234\n' >"$RELEASE/REVISION"
 inst "$RELEASE" "$H"
 [ ! -e "$H/.claude/agent-toolkit-version" ] && ok "a malformed VERSION removes the stamp" || bad "a malformed VERSION removes the stamp" "$(cat "$H/.claude/agent-toolkit-version")"
 exit_is "and still installs" 0
+printf '1.5.0\n' >"$RELEASE/VERSION"
+rm -f "$RELEASE/REVISION"
+inst "$RELEASE" "$H"
+[ ! -e "$H/.claude/agent-toolkit-version" ] && ok "and so does a VERSION with no revision beside it" || bad "a half version removes the stamp" "$(cat "$H/.claude/agent-toolkit-version")"
 
 PARENT="$TMP/parent-repo"
 rm -rf "$PARENT"
 mkdir -p "$PARENT"
 git -C "$PARENT" init -q && git -C "$PARENT" commit -q --allow-empty -m parent
 copy_root "$PARENT/toolkit"
-printf 'v1·abc1234\n' >"$H/.claude/agent-toolkit-version"
+printf 'v1.0.0·abc1234\n' >"$H/.claude/agent-toolkit-version"
 inst "$PARENT/toolkit" "$H"
 [ ! -e "$H/.claude/agent-toolkit-version" ] && ok "a copy inside a parent repository never takes the parent's version" \
   || bad "a copy inside a parent repository never takes the parent's version" "stamped $(cat "$H/.claude/agent-toolkit-version")"
 
 if [ -e "$ROOT/.git" ]; then
-  same "a checkout is stamped from its own history" \
-    "v$(git -C "$ROOT" rev-list --count HEAD)·$(git -C "$ROOT" rev-parse --short HEAD)" "$(cat "$FAKE/.claude/agent-toolkit-version")"
+  same "a checkout is stamped from its declared version and its own history" \
+    "v$(cat "$ROOT/VERSION")·$(git -C "$ROOT" rev-parse --short HEAD)" "$(cat "$FAKE/.claude/agent-toolkit-version")"
 else
-  skip "a checkout is stamped from its own history" "the suite is not running from a git checkout"
+  skip "a checkout is stamped from its declared version and its own history" "the suite is not running from a git checkout"
 fi
+
+# REVISION answers for a release, and a work tree answers for itself, so one
+# left lying in a clone is never what the clone is stamped with.
+CLONE="$TMP/clone-with-revision"
+copy_root "$CLONE"
+git -C "$CLONE" init -q && git -C "$CLONE" add -A >/dev/null 2>&1 && git -C "$CLONE" commit -q -m clone
+printf 'deadbee\n' >"$CLONE/REVISION"
+inst "$CLONE" "$H"
+same "a work tree ignores a REVISION left in it" \
+  "v$(cat "$CLONE/VERSION")·$(git -C "$CLONE" rev-parse --short HEAD)" "$(cat "$H/.claude/agent-toolkit-version" 2>/dev/null)"
 
 cat >"$TMP/version.py" <<'PY'
 import sys
 
 sys.path.insert(0, sys.argv[1])
-from lib.version import parse, same
+from lib.version import newer, parse, same, semantic
 
 print(" ".join(str(x) for x in [
-    same("v7·abc1234", "v7·abc1234ff00"), same("v7·abc1234", "v8·abc1234"),
-    same("v7·abc1234", "v7·abd1234"), parse("v7·abc1234\nv8·abc1234"), parse(" v7·abc1234"),
+    same("v1.5.0·abc1234", "v1.5.0·abc1234ff00"), same("v1.5.0·abc1234", "v1.6.0·abc1234"),
+    same("v1.5.0·abc1234", "v1.5.0·abd1234"),
+    newer("v1.6.0·abc1234", "v1.5.0·fff0000"), newer("v1.5.0·abc1234", "v1.5.0·abd1234"),
+    newer("v1.5.0·fff0000", "v1.5.0·abc1234"),
+    newer("v1.10.0", "v1.9.0"), newer("v1.5.0", "v1.5.0·abc1234"),
+    semantic("v1.5.0") == semantic("v1.5.0·abc1234"), semantic("1.5.0"),
+    parse("v1.5.0·abc1234\nv1.6.0·abc1234"), parse(" v1.5.0·abc1234"), parse("v1.5·abc1234"),
 ]))
 PY
-check "versions compare by count and sha prefix, and a label is exactly one line" "True False False None None" \
+check "equal by version and sha prefix, newer by version alone, and a label is exactly one line" \
+  "True False False True False False True False True None None None None" \
   "$(python3 "$TMP/version.py" "$ROOT/hooks")"
 
 # ── sync applies ─────────────────────────────────────────────────────────────
@@ -702,7 +1129,7 @@ jq -e '.hooks.PreToolUse | length == 2' "$H/.claude/settings.json" >/dev/null 2>
 
 jq 'del(.hooks.PreToolUse)' "$H/.claude/settings.json" >"$TMP/s" && cp "$TMP/s" "$H/.claude/settings.json"
 id_before="$(file_id "$H/.claude/settings.json")"
-lock_holder "$H"
+lock_holder "$H/.claude"
 HOME="$H" sh -c "$SYNC" <"$TMP/hook.payload" >"$TMP/waiting.out" 2>&1 &
 waiting=$!
 sleep 1
@@ -714,13 +1141,13 @@ check "and applies once it is released" "hooks/guard.sh" "$(js "$H" '[.hooks.Pre
 [[ "$(cat "$TMP/waiting.out")" != *"held the lock"* ]] && ok "without reporting the wait" || bad "without reporting the wait" "$(cat "$TMP/waiting.out")"
 jq 'del(.hooks.PreToolUse)' "$H/.claude/settings.json" >"$TMP/s" && cp "$TMP/s" "$H/.claude/settings.json"
 id_before="$(file_id "$H/.claude/settings.json")"
-lock_holder "$H"
+lock_holder "$H/.claude"
 hook "$H" "$SYNC" '{"hook_event_name":"SessionStart"}'
 kill "$holder" 2>/dev/null
 wait "$holder" 2>/dev/null
 same "a session start that cannot take the lock writes nothing" "$id_before" "$(file_id "$H/.claude/settings.json")"
 json_is "and still reports" '.hookSpecificOutput.additionalContext | test("held the lock for 5 seconds, so this session start applied nothing")'
-lock_holder "$H"
+lock_holder "$H/.claude"
 hook "$H" "$(command_for "$H" PostToolUse sync.sh)" \
   "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$ROOT/skills/toolkit/SKILL.md\"}}"
 kill "$holder" 2>/dev/null
@@ -864,8 +1291,22 @@ check "and the next install from one without them removes all five" "[false,fals
 check "and asks for a restart for the plugin entry" "plugins changed" "$out"
 grep -q '|plugin uninstall' "$CLAUDE_CALLS" 2>/dev/null && bad "retiring a plugin entry uninstalls nothing" "$(cat "$CLAUDE_CALLS")" \
   || ok "retiring a plugin entry uninstalls nothing"
-check "including the replaced version directory from the approved directories" "null" \
-  "$(jq --arg x "$EXTRA" '.permissions.additionalDirectories | index($x)' "$H/.claude/settings.json")"
+# A clone is approved while it is the one installed, and dropped when another
+# takes over. Both roots are work trees, because a release is approved for nobody.
+H="$(home moved-clone)"
+for clone in "$TMP/clone-one" "$TMP/clone-two"; do
+  copy_root "$clone"
+  git -C "$clone" init -q && git -C "$clone" add -A >/dev/null 2>&1 && git -C "$clone" commit -q -m clone
+done
+inst "$TMP/clone-one" "$H"
+check "the clone installed from is approved" "$TMP/clone-one" "$(js "$H" '.permissions.additionalDirectories | join(" ")')"
+inst "$TMP/clone-two" "$H"
+approved="$(js "$H" '.permissions.additionalDirectories | join(" ")')"
+check "and installing from another approves that one" "$TMP/clone-two" "$approved"
+case " $approved " in
+  *" $TMP/clone-one "*) bad "while the one it replaced is dropped" "it is still approved" ;;
+  *) ok "while the one it replaced is dropped" ;;
+esac
 
 # Deleting the ledger recovers; corrupting it has to recover the same way, or
 # the ledger this run writes holds only what this run changed and nothing the
@@ -1006,7 +1447,7 @@ cat >"$H/.claude/settings.json" <<JSON
   "isolatePeerMachines": true,
   "permissions": {
     "defaultMode": "auto",
-    "additionalDirectories": ["$H/.claude", "/tmp/claude-$(id -u)", "$ROOT"],
+    "additionalDirectories": ["/tmp/claude-$(id -u)", "$H/.claude", "$ROOT"],
     "deny": ["Read(/$H/.claude/.credentials.json)", "Read(/$H/.claude/settings*.json)",
              "Read(/$H/.claude/backups/settings.json.*)", "Read(/$H/.claude/backups/.claude.json.backup.*)"]
   },
@@ -1031,6 +1472,12 @@ check "with no command left that bypasses the launcher" "[]" \
 check "and the reaper a previous version wired is unwired, not carried forward" "[]" \
   "$(js "$H" '[.hooks[][].hooks[].command | select(test("reap"))] | tostring')"
 check "and the user's own env kept" "1" "$(js "$H" '.env.MINE')"
+# The real upgrade path for an approval kept unset: no ledger to vouch for it,
+# so retirement alone would leave the wholesale entry there for good.
+same "with the approval a previous generation wrote gone, ledger or none" \
+  "/tmp/claude-$(id -u) $ROOT $H/.claude/worktrees" "$(js "$H" '.permissions.additionalDirectories | join(" ")')"
+check "and the upgrade says it took that approval away" \
+  "! ~/.claude was approved for every agent without a question, which this toolkit keeps unset, so it was removed from settings.json" "$out"
 LEAN="$TMP/root-without-todo-tools"
 copy_root "$LEAN"
 patch_desired "$LEAN" 'del(.desired.env.CLAUDE_CODE_ENABLE_TODO_TOOLS)'
@@ -1159,9 +1606,31 @@ while IFS=$'\037' read -r event matcher command; do
       hook "$SPACE" "$command" "{\"hook_event_name\":\"$event\"}"
       [ -e "$SPACE/.claude/retro/last-sweep" ] && ok "$name reaches the recorder" || bad "$name reaches the recorder" "no sweep: exit $rc"
       ;;
+    hooks/update.sh)
+      if [ "$args" = stage ]; then
+        rm -f "$SPACE/.claude/agent-toolkit-staging.json"
+        hook "$SPACE" "$command" '{"hook_event_name":"SessionStart","source":"startup"}'
+        [ -e "$SPACE/.claude/agent-toolkit-staging.json" ] && ok "$name reaches the updater, which records the check it began" \
+          || bad "$name reaches the updater" "nothing was recorded: exit $rc"
+      else
+        printf 'neither latest nor a release\n' >"$SPACE/.claude/agent-toolkit-track"
+        hook "$SPACE" "$command" '{"hook_event_name":"SessionStart","source":"startup"}'
+        rm -f "$SPACE/.claude/agent-toolkit-track"
+        check "$name reaches the updater, which refuses a track it cannot read" "agent-toolkit-track holds" "$out"
+      fi
+      ;;
     *) bad "every wired command is checked here" "no check for: $name" ;;
   esac
 done < <(wired "$SPACE" | grep -F 'agent-toolkit-run')
+
+same "stage runs at every session start, whatever brought it about" "" \
+  "$(wired "$SPACE" | awk -F'\037' '$3 ~ /update.sh stage/ { print $2 }')"
+same "and apply at the starts that rebuild a context, fork apart" "startup|resume|clear|compact" \
+  "$(wired "$SPACE" | awk -F'\037' '$3 ~ /update.sh apply/ { print $2 }')"
+same "nothing waits on stage" "true" \
+  "$(jq -r 'first(.hooks.SessionStart[].hooks[] | select(.command | test("update.sh stage")) | .async)' "$SPACE/.claude/settings.json")"
+same "and apply is waited for" "null" \
+  "$(jq -r 'first(.hooks.SessionStart[].hooks[] | select(.command | test("update.sh apply")) | .async)' "$SPACE/.claude/settings.json")"
 
 # "Runnable as printed" is only really tested by a path with a space in it: the
 # quoter returns one already inside quotes, where a ~ substituted in afterwards
@@ -1180,7 +1649,11 @@ H="$(home dangling)"
 MOVABLE="$TMP/movable-root"
 rm -rf "$TMP/moved-root"
 copy_root "$MOVABLE"
+# A work tree, because that is the version directory an approved directory names,
+# and dropping the old location is what this case is about.
+git -C "$MOVABLE" init -q && git -C "$MOVABLE" add -A >/dev/null 2>&1 && git -C "$MOVABLE" commit -q -m movable
 inst "$MOVABLE" "$H"
+check "the checkout installed from is approved" "$MOVABLE" "$(js "$H" '.permissions.additionalDirectories | join(" ")')"
 mv "$MOVABLE" "$TMP/moved-root"
 hook "$H" "$(command_for "$H" PreToolUse guard.sh)" "$(bash_payload 'ls')"
 check "with the link dangling, a PreToolUse call is asked" "ask" "$(decision "$out")"
@@ -1229,7 +1702,7 @@ fi
 # Root writes into a read-only directory regardless, so this is skipped there.
 VERSIONED="$TMP/versioned-root"
 copy_root "$VERSIONED"
-printf 'v1·abc1234\n' >"$VERSIONED/VERSION"
+printf 'abc1234\n' >"$VERSIONED/REVISION"
 if [ "$(id -u)" -ne 0 ]; then
   H="$(home write-fails)"
   inst "$VERSIONED" "$H"
@@ -1249,7 +1722,7 @@ fi
 H="$(home stamp-with-finding)"
 UNVERSIONED="$TMP/unversioned-root"
 copy_root "$UNVERSIONED"
-printf 'v3·abc1234\n' >"$H/.claude/agent-toolkit-version"
+printf 'v0.9.0·abc1234\n' >"$H/.claude/agent-toolkit-version"
 out="$(HOME="$H" CLAUDE_STUB_VERSION=2.1.1 "$UNVERSIONED/install.sh" 2>&1)"
 [ ! -e "$H/.claude/agent-toolkit-version" ] && ok "a root with no version removes the stamp even while a required finding stands" \
   || bad "a root with no version removes the stamp even while a required finding stands" "$(cat "$H/.claude/agent-toolkit-version")"
@@ -1452,6 +1925,12 @@ inst "$ROOT" "$H"
 check "a full install registers each marketplace over HTTPS" "1|plugin marketplace add anthropics/claude-plugins-official" "$(cat "$CLAUDE_CALLS")"
 check "from the notifications plugin's current source" "1|plugin marketplace add 777genius/agent-notifications" "$(cat "$CLAUDE_CALLS")"
 check "and installs each plugin at user scope over HTTPS" "1|plugin install claude-notifications-go@claude-notifications-go --scope user --json" "$(cat "$CLAUDE_CALLS")"
+# Three of the four share a marketplace, so a run that registered it once for
+# each would have registered it three times.
+same "a marketplace three plugins share is registered once" "1" \
+  "$(grep -c 'plugin marketplace add anthropics/claude-plugins-official' "$CLAUDE_CALLS")"
+same "and every plugin in the list is fetched" "4" \
+  "$(grep -c 'plugin install .* --scope user --json' "$CLAUDE_CALLS")"
 check "and asks for a restart" "plugins changed" "$out"
 : >"$CLAUDE_CALLS"
 inst "$ROOT" "$H" --sync
@@ -1474,8 +1953,22 @@ exit_is "a failing plugin install exits 1" 1
 check "with Claude Code's own message" "plugin pr-review-toolkit@claude-plugins-official was not installed: the stub fetch failed" "$(block 'Run install again')"
 check "and settings still applied" "agent-toolkit-run" "$(js "$H" '.statusLine.command')"
 H="$(home marketplace-fails)"
+: >"$CLAUDE_CALLS"
 out="$(HOME="$H" CLAUDE_STUB_FAIL=add "$ROOT/install.sh" 2>&1)"
 check "a failing marketplace fetch carries its message too" "was not registered: ✘ Failed to add marketplace: the stub refused" "$out"
+# Asked once, and every plugin behind it told, rather than asked once per plugin.
+same "a marketplace that would not register is asked for once" "1" \
+  "$(grep -c 'plugin marketplace add anthropics/claude-plugins-official' "$CLAUDE_CALLS")"
+same "and none of the plugins behind it is fetched" "" \
+  "$(grep 'plugin install .*claude-plugins-official' "$CLAUDE_CALLS")"
+# One refusing while the other registers is what separates "its three went with
+# it" from "nothing registered at all".
+H="$(home one-market-refused)"
+: >"$CLAUDE_CALLS"
+out="$(HOME="$H" CLAUDE_STUB_FAIL_MARKET=anthropics/claude-plugins-official "$ROOT/install.sh" 2>&1)"
+same "a marketplace that refuses takes every plugin behind it" "" \
+  "$(grep 'plugin install .*claude-plugins-official' "$CLAUDE_CALLS")"
+check "and leaves the one behind another alone" "plugin install claude-notifications-go@claude-notifications-go" "$(cat "$CLAUDE_CALLS")"
 
 # Which events notify is the plugin's setting and the user's decision, so the
 # doctor says the same thing either way. Both paths a check could plausibly
@@ -1561,7 +2054,7 @@ copy_root "$QUEUED_X"
 copy_root "$QUEUED_Y"
 inst "$QUEUED_Y" "$H"
 ln -sfn "$QUEUED_X" "$H/.claude/agent-toolkit"
-lock_holder "$H"
+lock_holder "$H/.claude"
 printf '{"hook_event_name":"SessionStart"}' >"$TMP/queued.payload"
 HOME="$H" "$QUEUED_X/install.sh" --sync <"$TMP/queued.payload" >"$TMP/queued.out" 2>&1 &
 queued=$!
@@ -1806,29 +2299,35 @@ PY
 check "every value a fresh install ledgers is one a later install can retire" "[]" \
   "$(python3 "$TMP/retirable.py" "$ROOT/hooks" "$H/.claude/agent-toolkit-applied.json")"
 
-# A VERSION file that will not read is not the same answer as no version: a
-# stamp that is right must not be removed on the strength of it.
+# A file that will not read is not the same answer as no version: a stamp that
+# is right must not be removed on the strength of it. Either half can be the one
+# that failed, and the finding names whichever it was.
 if [ "$(id -u)" -ne 0 ]; then
   H="$(home version-unreadable)"
   UNREADABLE_VERSION="$TMP/unreadable-version-root"
   copy_root "$UNREADABLE_VERSION"
-  printf 'v9·abc1234\n' >"$UNREADABLE_VERSION/VERSION"
+  printf '9.0.0\n' >"$UNREADABLE_VERSION/VERSION"
+  printf 'abc1234\n' >"$UNREADABLE_VERSION/REVISION"
   inst "$UNREADABLE_VERSION" "$H"
+  chmod 000 "$UNREADABLE_VERSION/REVISION"
+  inst "$UNREADABLE_VERSION" "$H"
+  chmod 644 "$UNREADABLE_VERSION/REVISION"
+  same "a REVISION that cannot be read keeps the stamp it had" "v9.0.0·abc1234" "$(cat "$H/.claude/agent-toolkit-version" 2>/dev/null)"
+  check "and names the half that failed" "the version stamp was left as it was: REVISION cannot be read: Permission denied" "$out"
+  exit_is "as an advisory" 0
   chmod 000 "$UNREADABLE_VERSION/VERSION"
   inst "$UNREADABLE_VERSION" "$H"
   chmod 644 "$UNREADABLE_VERSION/VERSION"
-  same "a VERSION that cannot be read keeps the stamp it had" "v9·abc1234" "$(cat "$H/.claude/agent-toolkit-version" 2>/dev/null)"
-  check "and says why" "the version directory's VERSION file cannot be read, so the version stamp was left as it was: Permission denied" "$out"
-  exit_is "as an advisory" 0
+  check "and names the other half when that is the one" "the version stamp was left as it was: VERSION cannot be read: Permission denied" "$out"
 else
-  skip "a VERSION that cannot be read keeps the stamp" "running as root, which reads anything"
+  skip "a version half that cannot be read keeps the stamp" "running as root, which reads anything"
 fi
 
 # A session start that gave up on the lock after the link moved still says nothing.
 H="$(home queued-timeout)"
 inst "$QUEUED_Y" "$H"
 ln -sfn "$QUEUED_X" "$H/.claude/agent-toolkit"
-lock_holder "$H"
+lock_holder "$H/.claude"
 HOME="$H" "$QUEUED_X/install.sh" --sync <"$TMP/queued.payload" >"$TMP/queued.out" 2>&1 &
 queued=$!
 sleep 1
@@ -1844,7 +2343,15 @@ wait "$holder" 2>/dev/null
 H="$(home missing-own-files)"
 inst "$ROOT" "$H"
 before="$(snapshot "$H")"
-for missing in hooks/launcher.sh hooks/lib/settings.py hooks/lib/version.py; do
+for missing in hooks/lib/report.sh hooks/lib/requirements.sh; do
+  copy_root "$TMP/missing-root"
+  rm -f "$TMP/missing-root/$missing"
+  inst "$TMP/missing-root" "$H"
+  exit_is "a version directory without $missing exits 1" 1
+  check "saying which library it cannot start without" "$missing is missing from" "$out"
+done
+same "and neither of them changes anything either" "$before" "$(snapshot "$H")"
+for missing in hooks/launcher.sh hooks/lib/settings.py hooks/lib/version.py hooks/update.sh; do
   copy_root "$TMP/missing-root"
   rm -f "$TMP/missing-root/$missing"
   inst "$TMP/missing-root" "$H"
@@ -1886,7 +2393,7 @@ cmp -s "$ROOT/hooks/launcher.sh" "$H/.claude/agent-toolkit-run" && [ -x "$H/.cla
 # keeps the old bytes.
 H="$(home renames)"
 inst "$EXTRA" "$H"
-printf 'v0·abc1234\n' >"$H/.claude/agent-toolkit-version"
+printf 'v0.9.0·abc1234\n' >"$H/.claude/agent-toolkit-version"
 printf '# stale\n' >>"$H/.claude/agent-toolkit-run"
 printf 'stale\n' >"$H/.claude/CLAUDE.md"
 printf 'stale\n' >"$H/.claude/agents/developer.md"

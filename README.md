@@ -17,9 +17,12 @@ Follow [`INSTALL.md`](INSTALL.md).
 | `CLAUDE.md` | the agreement: the CTO loop, tasks, code and writing style, the gates |
 | `agents/` | architect · developer · ui-developer · reviewer · project-manager · researcher, plus specialists: security-auditor · test-engineer · performance-engineer |
 | `skills/` | `backlog` · `diagnose` (the bug loop) · `toolkit` (change this repo) · `ui-review` (screenshot galleries) |
-| `hooks/` | the guard, the style check, the statusline, the task line, the retro recorder, the formatter |
+| `hooks/` | the guard, the style check, the statusline, the task line, the retro recorder, the formatter, the updater |
 | `INSTALL.md` | how to install, and what install touches |
 | `install.sh` | the installer, and the doctor that runs at every session start |
+| `VERSION` | the version a release is named for, bumped by the pull request that earns it |
+| `tools/penpot-mcp/` | the Penpot bridge install copies out to `~/.claude/tools/penpot-mcp` |
+| `.github/` | the release workflow, and the scripts it runs so the suite can judge them |
 | `RETRO.md` | learnings written by hand, read alongside the retro digest |
 | `documentation/brief.md` | what this toolkit is for |
 
@@ -55,7 +58,7 @@ Two hooks gate a session. Both fire regardless of permission mode, inside subage
 - **denies** AI attribution in a commit or a pull request, alongside the `attribution` settings `install.sh` holds off.
 - **asks** before anything leaves the machine (push, PR, release, package publish), before Linear writes, before touching the device outside the workspace, and before the few git commands the reflog cannot undo.
 
-Everything else is silent. `permissions.defaultMode` is `auto` and `~/.claude`, the scratchpad, and this checkout are approved working directories, so an agent runs unattended instead of stalling on a prompt nobody is watching. `Read` is denied on the credentials and settings files, which carry API tokens.
+Everything else is silent. `permissions.defaultMode` is `auto` and the scratchpad, `~/.claude/worktrees` and this checkout are approved working directories, so an agent runs unattended instead of stalling on a prompt nobody is watching. `Read` is denied on the credentials and settings files, which carry API tokens.
 
 [`hooks/style.py`](hooks/style.py) is the writing gate, described in [`documentation/specs/style-checks.md`](documentation/specs/style-checks.md). It reads a `git commit` before it runs and denies it over the message and the diff it is about to make, naming every finding at once with its path, its line and the offending text. A finding that is wrong or deliberately accepted is cleared by a `Style-ack:` trailer on the message, which lands in git history where it stays auditable.
 
@@ -94,7 +97,7 @@ It answers toolkit questions, not cost questions — every agent's `Retro:` line
 [`hooks/statusline.py`](hooks/statusline.py) shows: model · effort · context bar · lines changed · rate limits · tasks · branch and PR · directory · toolkit version.
 
 ```
-Opus 5 1M │ ⚡xhigh │ ▰▱▱▱▱▱▱▱ 18% 180k/1M │ +412/-96 │ ⏱ 63% 2h13m · 41% 3d2h │ ☰ 2/5 │ ⎇ main* #42 │ my-app │ ⬡ v10·12d438c
+Opus 5 1M │ ⚡xhigh │ ▰▱▱▱▱▱▱▱ 18% 180k/1M │ +412/-96 │ ⏱ 63% 2h13m · 41% 3d2h │ ☰ 2/5 │ ⎇ main* #42 │ my-app │ ⬡ v1.5.0·12d438c
 ```
 
 A segment with nothing to say takes no width, so the line stays short when little is happening. Lines changed and rate limits are the exception — they hold their slot with a dim `+0/-0` and `⏱ —` so the bar doesn't change shape mid-session. An API-key session never reports rate limits, so it keeps `⏱ —` throughout.
@@ -102,4 +105,4 @@ A segment with nothing to say takes no width, so the line stays short when littl
 - **`⏱ 63% 2h13m · 41% 3d2h`** — how much of each rate-limit window is used, and how long until it resets. The window's own length is deliberately not shown; a fixed `5h` label says nothing you can act on. Falls back to `5h` / `7d` labels only when the payload carries no reset time, since two bare percentages wouldn't say which is which.
 - **`☰ 2/5`** — tasks done out of open, from this session's own list. The platform clears the whole list once every task completes, so this only ever shows live work. A `?` means part of the list would not read, and the count is of what did; green is kept for a whole list with nothing left open.
 - **`⎇ main* #42`** — branch, dirty marker, and the open PR for it, coloured by review state.
-- **`⬡ v<count>·<sha>`**: the "are my changes applied?" light. A `⚠` means the installed version directory is not at the version last applied; a dim `?` means that could not be verified.
+- **`⬡ v<version>·<revision>`**: the "are my changes applied?" light. A `⚠` means the installed version directory is not at the version last applied; a dim `?` means that could not be verified.

@@ -225,7 +225,8 @@ Keep the PR itself short:
 
 - **Title** — one clear line.
 - **Body** — the goal, and why it was worth doing. A few short lines.
-- Nothing else: no change log, no file tour, no restating the diff. The diff is already there.
+- **A `## Changelog` section**, the one addition the body admits: one short line per entry, as a changelog entry is defined above, or the single word `none`. The release workflow reads it, and publishes nothing without it.
+- Nothing else: no file tour, no restating the diff. The diff is already there.
 - Link the spec, doc, or ticket instead of repeating what it says.
 - A long body means it is wrong.
 

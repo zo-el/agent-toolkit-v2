@@ -6,9 +6,10 @@ install.sh declares the values and holds the lock. This file does the rest of
 the Settings contract in documentation/specs/install.md.
 
 The request carries: settings, ledger and backups paths; desired, a fragment
-shaped like settings.json; absent, key paths the toolkit keeps unset; home,
-root and prev_root, for recognising what an earlier install wrote. The result
-is one JSON object on stdout.
+shaped like settings.json; absent, key paths the toolkit keeps unset; forbidden,
+array members it keeps unset, matched by what they are; home, root and
+prev_root, for recognising what an earlier install wrote. The result is one JSON
+object on stdout.
 """
 
 import copy
@@ -223,10 +224,35 @@ def predating(request, current, values, members):
     return found_values, found_members
 
 
+def refused(entry, rule, home):
+    """A member the toolkit keeps unset, matched by what it is rather than by a
+    ledger that vouches for who wrote it: one path exactly, or anything at or
+    below one. A path above either is the user's own and is left alone.
+
+    Normalised first, because the rule names a directory and there are a dozen
+    spellings of one: a trailing slash, a doubled separator, a "." or a ".."
+    that any path resolver collapses. A symlink pointing into one is not caught,
+    which would need the filesystem: an entry like that is one the user made and
+    approved deliberately, and it is theirs."""
+    path = entry_path(entry, home)
+    if path is None:
+        return False
+    if "is" in rule:
+        return path == os.path.normpath(rule["is"])
+    under = os.path.normpath(rule["under"])
+    return path == under or path.startswith(under + "/")
+
+
+def entry_path(entry, home):
+    if not isinstance(entry, str):
+        return None
+    if entry.startswith("~/"):
+        entry = home + entry[1:]
+    return os.path.normpath(entry)
+
+
 def merge(current, request, on_disk):
-    """(merged, ledger, restart reasons). on_disk is what the ledger holds, or
-    None when there is none and the file itself has to say what an earlier
-    install wrote."""
+    """(merged, ledger, restart reasons, approvals taken away)."""
     if not isinstance(current, dict):
         raise SettingsError("user", "the top level is not an object")
     desired = request["desired"]
@@ -245,6 +271,10 @@ def merge(current, request, on_disk):
             entries[:] = [e for e in entries if fingerprint(e) != item]
     for path in request.get("absent", []):
         drop(merged, tuple(path))
+    for rule in request.get("forbidden", []):
+        entries = get(merged, tuple(rule["path"]))
+        if isinstance(entries, list):
+            entries[:] = [e for e in entries if not refused(e, rule, request["home"])]
 
     for path, value in values.items():
         before = get(current, path)
@@ -275,7 +305,22 @@ def merge(current, request, on_disk):
         "values": [{"path": list(p), "value": v} for p, v in kept_values.items()],
         "members": [{"path": list(p), "value": json.loads(i)} for p, i in kept_members],
     }
-    return merged, ledger, restart
+    return merged, ledger, restart, taken_away(current, merged, request)
+
+
+def taken_away(current, merged, request):
+    """The paths a kept-unset rule names that the settings held before the merge
+    and do not after it. Read off both rather than the rule's own filter, because
+    the ledger retires the entry an earlier version wrote before that filter runs."""
+    home = request["home"]
+    gone = set()
+    for rule in request.get("forbidden", []):
+        before = get(current, tuple(rule["path"]))
+        after = get(merged, tuple(rule["path"]))
+        if isinstance(before, list):
+            left = {entry_path(e, home) for e in after} if isinstance(after, list) else set()
+            gone |= {entry_path(e, home) for e in before if refused(e, rule, home)} - left
+    return sorted(gone)
 
 
 def merge_hooks(merged, wiring):
@@ -455,7 +500,7 @@ def run(request, write, read=None):
         before = read(path)
         try:
             current = parse(before)
-            merged, ledger, restart = merge(current, request, on_disk)
+            merged, ledger, restart, taken = merge(current, request, on_disk)
         except SettingsError as e:
             raise for_the_user(e, request)
         try:
@@ -497,7 +542,7 @@ def run(request, write, read=None):
             except OSError as e:
                 os.unlink(staged)
                 raise write_failed(e, path)
-            result.update(settings="written", backup=saved, restart=restart)
+            result.update(settings="written", backup=saved, restart=restart, taken_away=taken)
             if link:
                 result["replaced_link"] = link
         write_ledger(request["ledger"], ledger, result)

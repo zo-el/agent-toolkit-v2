@@ -5,8 +5,18 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+case "$ROOT/" in
+  "/tmp/claude-$(id -u)/"*)
+    printf 'the suite cannot run from %s: install.sh refuses a version directory inside /tmp/claude-%s. Run it from a clone outside it.\n' "$ROOT" "$(id -u)" >&2
+    exit 1
+    ;;
+esac
+# An explicit template rather than $TMPDIR: install refuses a version directory
+# inside the scratchpad, and a harness that pointed TMPDIR there would have
+# every install case in the suite refuse itself.
+TMP="$(mktemp -d /tmp/agent-toolkit-suite.XXXXXX)"
+CLEANUP=("$TMP")
+trap 'rm -rf "${CLEANUP[@]}"' EXIT
 pass=0; fail=0; skipped=0
 
 ok()   { pass=$((pass + 1)); printf '  ✓ %s\n' "$1"; }
@@ -94,6 +104,42 @@ expect "linear get is free"           silent "$(tool_payload 'mcp__linear__get_i
 expect "linear write asks"            ask    "$(tool_payload 'mcp__linear__save_issue')"
 expect "linear delete asks"           ask    "$(tool_payload 'mcp__linear__delete_comment')"
 expect "non-linear mcp is free"       silent "$(tool_payload 'mcp__context7__query-docs')"
+
+expect "gh workflow run asks"         ask    "$(bash_payload 'gh workflow run release.yml --ref main')"
+expect "gh workflow disable asks"     ask    "$(bash_payload 'gh workflow disable release.yml')"
+expect "gh workflow enable asks"      ask    "$(bash_payload 'gh workflow enable release.yml')"
+expect "gh run rerun asks"            ask    "$(bash_payload 'gh run rerun 42 --failed')"
+expect "gh run cancel asks"           ask    "$(bash_payload 'gh run cancel 42')"
+expect "gh run delete asks"           ask    "$(bash_payload 'gh run delete 42')"
+expect "gh release create still asks" ask    "$(bash_payload 'gh release create v1.0.0 --notes x')"
+expect "and delete-asset with it"     ask    "$(bash_payload 'gh release delete-asset v1.0.0 toolkit.tar.gz')"
+expect "a methoded release write asks" ask \
+  "$(bash_payload 'gh api --method PATCH repos/zo-el/agent-toolkit-v2/releases/9 -f prerelease=true')"
+expect "and -X is the same method"    ask    "$(bash_payload 'gh api -X DELETE repos/zo-el/agent-toolkit-v2/git/refs/tags/v1.0.0')"
+expect "and a field alone implies one" ask   "$(bash_payload 'gh api repos/zo-el/agent-toolkit-v2/git/tags -f tag=v1.0.0')"
+expect "listing workflows is free"    silent "$(bash_payload 'gh workflow list')"
+expect "reading a run is free"        silent "$(bash_payload 'gh run view 42 --log')"
+expect "reading a release is free"    silent "$(bash_payload 'gh release view v1.0.0 --json tagName,targetCommitish')"
+expect "downloading one is free"      silent "$(bash_payload 'gh release download v1.0.0 --archive=tar.gz --output /tmp/t.tgz')"
+expect "an unmethoded release read is free" silent \
+  "$(bash_payload 'gh api repos/zo-el/agent-toolkit-v2/releases/latest --jq .tag_name')"
+expect "and an unmethoded ref read"   silent "$(bash_payload 'gh api repos/zo-el/agent-toolkit-v2/git/refs/tags/v1.0.0')"
+# A DELETE carries no field, so -X is the whole evidence that it mutates. Both
+# flags take their value glued on as well as after a space, and gh's own docs
+# use both, so a pattern needing the space is one spelling away from letting a
+# deny through.
+expect "-X on a comment endpoint is still denied" deny \
+  "$(bash_payload 'gh api -X DELETE repos/zo-el/agent-toolkit-v2/issues/comments/9')"
+expect "and glued to its method, which is the ordinary spelling" deny \
+  "$(bash_payload 'gh api -XDELETE repos/zo-el/agent-toolkit-v2/issues/comments/9')"
+expect "a glued field posts as the user too" deny \
+  "$(bash_payload 'gh api -XPOST repos/zo-el/agent-toolkit-v2/issues/1/comments -fbody=hi')"
+expect "a glued method on a release still asks" ask \
+  "$(bash_payload 'gh api -XDELETE repos/zo-el/agent-toolkit-v2/releases/9')"
+expect "and a lowercase one with it" ask \
+  "$(bash_payload 'gh api -X delete repos/zo-el/agent-toolkit-v2/git/refs/tags/v1.0.0')"
+expect "while a glued read is still free" silent \
+  "$(bash_payload 'gh api -XGET repos/zo-el/agent-toolkit-v2/releases/latest')"
 
 # ── attribution ──────────────────────────────────────────────────────────────
 # Absolute in CLAUDE.md, so the verdict is deny: there is nothing to approve.
@@ -802,6 +848,12 @@ GATE="$ROOT/hooks/guard.sh"
 
 # ── installer ────────────────────────────────────────────────────────────────
 . "$ROOT/tests/install.sh"
+
+# ── updater ──────────────────────────────────────────────────────────────────
+. "$ROOT/tests/update.sh"
+
+# ── release ──────────────────────────────────────────────────────────────────
+. "$ROOT/tests/release.sh"
 
 # ── statusline ───────────────────────────────────────────────────────────────
 echo "statusline.py"
@@ -2490,15 +2542,14 @@ printf '%s\n' "${filled%%·*}" | grep -qE "$SHAPE" \
 
 # Every bullet, not every dated one: a line that lost its date is what this
 # catches, and counting only dated lines would read it as an empty log.
-bullets="$(grep -c '^- ' "$ROOT/RETRO.md")"
-shaped="$(grep -cE "$SHAPE" "$ROOT/RETRO.md")"
-if [ "${bullets:-0}" -eq 0 ]; then
-  skip "every line in the log carries it" "the log holds no line, which is where a retro leaves it"
-elif [ "$bullets" = "$shaped" ]; then
-  ok "every line in the log carries it"
-else
-  bad "every line in the log carries it" "${shaped:-0} of ${bullets:-0} lines match"
-fi
+unshaped() { grep '^- ' "$1" | grep -cvE "$SHAPE"; }
+strays="$(unshaped "$ROOT/RETRO.md")"
+[ "$strays" -eq 0 ] && ok "every line in the log carries it" \
+                   || bad "every line in the log carries it" "$strays lines do not"
+printf '# Retro log\n\n- 2026-08-30 developer agent-toolkit: the separators are gone\n' >"$TMP/loose-log.md"
+[ "$(unshaped "$TMP/loose-log.md")" -eq 1 ] \
+  && ok "and a line that lost them would not" \
+  || bad "and a line that lost them would not" "the shape took it"
 
 # Each threshold is a judgement the spec argues for, so the two must not drift.
 drifted="$(python3 - "$ROOT" <<'PY'
