@@ -788,11 +788,6 @@ case "$(block 'Needs you')" in
   *) ok "a repository above the worktree is never read as its checkout" ;;
 esac
 rm -rf "$H/.git"
-out="$(HOME="$H" GIT_DIR="$TMP/elsewhere/.git" "$WT/install.sh" 2>&1)"
-case "$out" in
-  *"names the checkout"*) bad "and a git variable never answers for another repository" "it named one" ;;
-  *) ok "and a git variable never answers for another repository" ;;
-esac
 
 # A linked worktree knows the checkout it belongs to, so the finding names it and
 # the fix is the command that installs from there.
@@ -806,6 +801,17 @@ inst "$LINKED" "$H"
 exit_is "a linked worktree is refused too" 1
 check "naming the checkout it belongs to" "The worktree names the checkout at $CHECKOUT" "$(block 'Needs you')"
 worktree_fix="$(block 'Needs you' | grep -F "cd $CHECKOUT" | sed 's/^ *//')"
+# A variable naming another repository would answer for that one instead, which
+# is a checkout this worktree does not belong to.
+OTHER="$TMP/other-checkout"
+copy_root "$OTHER"
+git -C "$OTHER" init -q && git -C "$OTHER" add -A >/dev/null 2>&1 && git -C "$OTHER" commit -q -m other
+out="$(HOME="$H" GIT_DIR="$OTHER/.git" GIT_COMMON_DIR="$OTHER/.git" "$LINKED/install.sh" 2>&1)"
+case "$out" in
+  *"$OTHER"*) bad "and a git variable never answers for another repository" "it named $OTHER" ;;
+  *) ok "and a git variable never answers for another repository" ;;
+esac
+check "naming the one the worktree belongs to instead" "names the checkout at $CHECKOUT" "$out"
 check "with the command that installs from there" "cd $CHECKOUT && ./install.sh" "$worktree_fix"
 HOME="$H" bash -c "$worktree_fix" >/dev/null 2>&1
 same "and the fix, run as printed, is what goes live" "$CHECKOUT" "$(readlink "$H/.claude/agent-toolkit")"
