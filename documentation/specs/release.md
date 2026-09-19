@@ -175,6 +175,7 @@ Verifying asks whether the supplier gave what it said it would. Sealing asks a d
 - **The executable bit is the only mode bit in it.** It is the one the root checks and the launcher turn on. Ownership and timestamps change nothing about what running the tree does, and on a tree owned by the user install runs as, no other mode bit can.
 - **Directories appear only through the paths inside them.** An emptied `skills/` or `agents/` is something the root checks already refuse to install.
 - **It is one machine comparing two moments of its own.** It adds no second opinion on what GitHub served, and it is not meant to.
+- **A recorded seal the updater cannot read is no seal.** A digest in a form this version does not produce says the updater changed, not the tree, so the folder is discarded and staged afresh rather than set aside as altered. Otherwise every folder staged by the previous version would read as tampered with on the day the format moved.
 - **An activation drops the seal of the folder it ran.** Going live is itself what changes a tree: the first hook the launcher runs from it writes a bytecode cache inside it, within seconds. A seal taken before that cannot describe the tree afterwards, so it is dropped rather than left to fail later. A release chosen again after a rollback therefore has no seal, which Activating already answers: it is discarded and staged afresh, at the cost of one download.
 
 ### Activating
@@ -197,7 +198,8 @@ Verifying asks whether the supplier gave what it said it would. Sealing asks a d
 - The folder is set aside under a name that is not a version, and kept. Deleting it would destroy the only evidence of what happened.
 - It is no longer staged, so the next check downloads that release again and seals it afresh. The machine is not stuck, and a second alteration leaves a second folder, so a repeat is visible on disk.
 - The finding is required and names the folder that was kept. There is no automatic fix, because what to do depends on what is in it.
-- **A folder the record holds no seal for is not applied either.** It is discarded and staged again, which is what a replaced record leaves behind. Nothing is known about that tree, and nothing being known is not permission to run it.
+- **A folder the record holds no seal for is not applied either.** It is discarded and staged again, which is what a replaced record leaves behind, and what a release chosen again after it went live leaves behind. Nothing is known about that tree, and nothing being known is not permission to run it.
+- **The discard is said, as an advisory naming the version.** The folder discarded can be the one the previous activation left as the fallback, and a pin is a plain file write, so a folder the record names is never removed in silence. Nothing is broken, which is why it is not required: the release is staged again on its own.
 - **A version marked bad is a different thing.** That is a release that installed and did not go live, and `now` retries it. An altered tree is never retried as it stands, because the tree is the thing in question.
 
 **What a new version reaches, and when.**
@@ -246,6 +248,7 @@ A machine in dev mode is told once that a release exists which it is not going t
 | no check has succeeded in seven days | advisory | user | `~/.claude/agent-toolkit/hooks/update.sh now` |
 | the archive was not the commit the release names, declares another version, or the commit is not on `main` | required | user | nothing automatic: the release is wrong and the repository owner acts |
 | a staged release no longer matches the seal taken when it was staged | required | user | nothing automatic: read what was set aside, which the finding names. The release is staged again on its own |
+| a staged folder had no seal the updater could read, and was discarded | advisory | user | none: the release is staged again on its own |
 | the track holds something else | required | user | edit or remove `~/.claude/agent-toolkit-track` |
 | the track names a release nobody published | required | user | edit `~/.claude/agent-toolkit-track` to a release that exists, or to `latest` |
 | `gh` is missing, holds no token, or cannot see the repository | advisory | user | the same command install's requirement list names, which is where that text lives |
@@ -313,7 +316,7 @@ Reading stays free: `gh release download`, `gh release view`, and `gh api` witho
 | two stages overlap | the second takes no lock and exits |
 | `~/.claude/agent-toolkit-releases` cannot be created, written, or holds no room | nothing is staged, the reason is recorded, and the next `apply` reports it with its own fix |
 | the staged tree does not match its seal | nothing runs. The folder is set aside and kept, the release is staged again at the next check, and the finding is required |
-| the record holds no seal for a staged folder | it is not applied. The folder is discarded and staged again |
+| the record holds no seal for a staged folder | it is not applied. The folder is discarded, said as an advisory, and the release is staged again |
 | install from the staged folder does not go live | nothing on the machine changed. The version is marked bad and the report carries install's reason |
 | install goes live and a later write fails | install's own contract: the new version is live and the report names what did not apply |
 | an activation is killed partway | the stable link may already have moved, so the release is live and the rest of the install is not done. A `--sync` from the new root, in that session or the next, applies the remainder and stamps it. The report was lost with the process, so the next `apply` finds a live version the record never reported and says so then |
