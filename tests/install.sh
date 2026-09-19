@@ -831,7 +831,7 @@ case "$(block 'Needs you')" in
   *"$PLANTED_CHECKOUT"*) bad "and the fix never sends the user into a directory an agent may write" "it named $PLANTED_CHECKOUT" ;;
   *) ok "and the fix never sends the user into a directory an agent may write" ;;
 esac
-check "saying only what it can stand behind" "mv -T ~/.claude/worktrees/wt <a directory outside ~/.claude>" "$(block 'Needs you')"
+check "saying only what it can stand behind" "mv -T ~/.claude/worktrees/wt <a directory of your own>" "$(block 'Needs you')"
 rm -f "$WT/.git"
 
 # --sync needs no rule: a worktree never becomes the live root, so a --sync from
@@ -852,6 +852,53 @@ case "$out" in
   *"every agent may write"*) bad "which never refuses at a session start" "it refused: $out" ;;
   *) ok "which never refuses at a session start" ;;
 esac
+
+# ── a version directory inside the scratchpad ────────────────────────────────
+# The scratchpad is approved for every agent as well, and it is /tmp/claude-<uid>
+# whatever $HOME says, so no fake home keeps these cases away from the real one.
+# The directory made here is the suite's own, and goes with the suite.
+SCRATCH_DIR="/tmp/claude-$(id -u)"
+mkdir -p "$SCRATCH_DIR"
+SCRATCH_ROOTS="$(mktemp -d "$SCRATCH_DIR/agent-toolkit-suite.XXXXXX")"
+trap 'rm -rf "$TMP" "$SCRATCH_ROOTS"' EXIT
+H="$(home scratch-root)"
+IN_SCRATCH="$SCRATCH_ROOTS/toolkit"
+copy_root "$IN_SCRATCH"
+before="$(snapshot "$H")"
+inst "$IN_SCRATCH" "$H"
+exit_is "a version directory inside the scratchpad exits 1" 1
+check "exactly as one under the worktrees does" "✗ the version directory is under $SCRATCH_DIR, which every agent may write" \
+  "$(block 'Needs you')"
+same "writing nothing" "$before" "$(snapshot "$H")"
+inst "$IN_SCRATCH" "$H" --dry-run
+exit_is "and a dry run of one exits 1 too" 1
+same "writing nothing either" "$before" "$(snapshot "$H")"
+inst "$IN_SCRATCH" "$H" --sync
+[ "$rc" = 0 ] && [ -z "$out" ] && ok "while --sync from one says nothing, since it is not the live root" \
+  || bad "--sync from a scratchpad root says nothing" "exit $rc: $out"
+ln -sfn "$IN_SCRATCH" "$H/.claude/agent-toolkit"
+rm -f "$H/.claude/skills/toolkit"
+inst "$IN_SCRATCH" "$H" --sync
+[ -L "$H/.claude/skills/toolkit" ] && ok "and a machine already live from one still gets its doctor" \
+  || bad "a live scratchpad root still syncs" "exit $rc: $out"
+# The scratchpad is not under $HOME, so a home reached through a symlink changes
+# nothing about it: the refusal holds either way.
+SCRATCH_LINKED="$TMP/scratch-linked-home"
+rm -f "$SCRATCH_LINKED"
+ln -s "$(home scratch-linked)" "$SCRATCH_LINKED"
+out="$(HOME="$SCRATCH_LINKED" "$IN_SCRATCH/install.sh" 2>&1)"
+rc=$?
+exit_is "and through a symlinked home it is refused all the same" 1
+
+# The version directory's own approval is not in the list it is checked against:
+# a clone is approved because it is a work tree, and every root is inside itself.
+H="$(home clone-accepts-itself)"
+CLONE_SELF="$TMP/clone-self"
+copy_root "$CLONE_SELF"
+git -C "$CLONE_SELF" init -q && git -C "$CLONE_SELF" add -A >/dev/null 2>&1 && git -C "$CLONE_SELF" commit -q -m self
+inst "$CLONE_SELF" "$H"
+exit_is "a clone, which is approved, is never refused for sitting inside its own approval" 0
+check "and is approved" "$CLONE_SELF" "$(js "$H" '.permissions.additionalDirectories | join(" ")')"
 
 # A version directory resolves every component of its own path and $HOME need
 # not, so a home reached through a symlink is where a rule written against $HOME

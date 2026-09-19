@@ -29,6 +29,13 @@ BRIDGE_DST="$CLAUDE_DIR/tools/penpot-mcp"
 BRIDGE_FILES=(package.json package-lock.json start-bridge.sh check-bridge.sh)
 SCRATCH="/tmp/claude-$(id -u)"
 
+# The agents' own working state, which is what gets approved, and nothing else:
+# ~/.claude holds the credentials file, the transcripts, the plugin store and
+# settings.json, so approving the parent approves a silent write to each. One
+# list, so the directories approved and the directories a version directory may
+# not sit in cannot drift apart.
+working_directories() { printf '%s\n' "$SCRATCH" "$WORKTREES"; }
+
 # The report shape and the requirement text hooks/update.sh prints too. Sourced
 # before anything else needs them, so a root missing one says so in a line
 # rather than in a bash error partway through a report.
@@ -117,16 +124,12 @@ def run($caller; $entry): "\"$HOME/.claude/agent-toolkit-run\" \($caller) \($ent
   permissions: {
     # Safe because the guard hook fires in every permission mode.
     defaultMode: "auto",
-    # The agents' own working state, and nothing else. A path inside one is
-    # approved before any rule is consulted, which is what stops a background
-    # agent stalling on a prompt, and it approves writing as readily as reading:
-    # ~/.claude holds the credentials file, the transcripts, the plugin store and
-    # settings.json, so approving the parent approves a silent write to each.
-    #
-    # The version directory only where somebody edits it. On a machine installed
-    # from a release the same entry would hand every agent the code that runs at
-    # the next session start.
-    additionalDirectories: ([$scratch, $worktrees] + (if $work_tree then [$root] else [] end)),
+    # A path inside one is approved before any rule is consulted, which is what
+    # stops a background agent stalling on a prompt, and it approves writing as
+    # readily as reading. The version directory only where somebody edits it: on
+    # a machine installed from a release the same entry would hand every agent
+    # the code that runs at the next session start.
+    additionalDirectories: ($working + (if $work_tree then [$root] else [] end)),
     # A deny governs the Read tool only, so jq and python still reach settings.
     deny: [
       "Read(~/.claude/.credentials.json)",
@@ -578,37 +581,39 @@ for module in sorted(wanted - {"lib"}):
 PY
 }
 
-# Every path a tool reaches without the user being asked, which is every path an
-# agent writes unprompted. Resolved, because a path is compared against $ROOT.
-approved_directory() { # a path → 0 when it is one of them, or inside one
-  local approved
-  for approved in "$(resolve "$CLAUDE_DIR")" "$(resolve "$SCRATCH")"; do
-    [ -n "$approved" ] || continue
-    case "$1/" in "$approved/"*) return 0 ;; esac
+# The directory in the list that holds a path, or nothing. Resolved on both
+# sides, because $ROOT resolves every component of its path and these are
+# written as $HOME names them, so a home reached through a symlink would miss.
+inside() { # a path, then the directories
+  local path="$1" dir real
+  shift
+  for dir in "$@"; do
+    real="$(resolve "$dir")"
+    [ -n "$real" ] || continue
+    case "$path/" in "$real/"*) printf '%s' "$dir" && return 0 ;; esac
   done
   return 1
 }
 
-# A worktree is approved for every agent, so it never becomes the live toolkit.
-# A machine already live from one is exempt at --sync: a doctor that refused
-# would leave it with no doctor at all until somebody ran a full install.
+# A directory every agent writes in never becomes the live toolkit. The version
+# directory's own approval is not in the list it is checked against, and has to
+# stay out: a clone is approved because it is a work tree, and every root is
+# inside itself. A machine already live from one is exempt at --sync, because a
+# doctor that refused would leave it with no doctor until a full install.
 check_location() {
-  local worktrees common checkout tail fix
+  local within checkout tail fix working
   [ "$MODE" != sync ] || return 0
-  # $ROOT resolves every component of its path and $CLAUDE_DIR is written as
-  # $HOME names it, so a home reached through a symlink would make this miss.
-  worktrees="$(resolve "$WORKTREES")"
-  [ -n "$worktrees" ] || return 0
-  case "$ROOT/" in "$worktrees/"*) ;; *) return 0 ;; esac
+  mapfile -t working < <(working_directories)
+  within="$(inside "$ROOT" "${working[@]}")" || return 0
   checkout="$(names_a_checkout)"
   if [ -n "$checkout" ]; then
     tail=". The worktree names the checkout at $(home_path "$checkout"), which is what installs"
     fix="cd $(home_path "$checkout") && ./install.sh"
   else
     tail=""
-    fix="mv -T $(home_path "$ROOT") <a directory outside ~/.claude> && <that directory>/install.sh"
+    fix="mv -T $(home_path "$ROOT") <a directory of your own> && <that directory>/install.sh"
   fi
-  finding required user "the version directory is under ~/.claude/worktrees, which every agent may write, so nothing was changed$tail" "$fix"
+  finding required user "the version directory is under $(home_path "$within"), which every agent may write, so nothing was changed$tail" "$fix"
   return 1
 }
 
@@ -619,13 +624,16 @@ check_location() {
 # unasked: a rewritten gitdir line would otherwise have the finding hand the user
 # a command that installs whatever an agent put there.
 names_a_checkout() {
-  local common checkout
+  local common checkout reach
   python3 "$ROOT/hooks/lib/version.py" worktree "$ROOT" >/dev/null 2>&1 || return 0
   common="$( (cd "$ROOT" && cd "$(env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
     timeout 5 git rev-parse --git-common-dir 2>/dev/null)" && pwd -P) 2>/dev/null)"
   checkout="${common%/.git}"
   [ -n "$checkout" ] && [ "$checkout" != "$common" ] && [ "$checkout" != "$ROOT" ] || return 0
-  approved_directory "$checkout" || printf '%s' "$checkout"
+  # ~/.claude as a whole as well as the working directories: a machine taking
+  # this version still approves it wholesale until the apply this one runs.
+  mapfile -t reach < <(working_directories)
+  inside "$checkout" "$CLAUDE_DIR" "${reach[@]}" >/dev/null || printf '%s' "$checkout"
 }
 
 # ~/.claude/agent-toolkit must stay a link, free to point at any version
@@ -803,8 +811,8 @@ settings_request() {
       case $? in 0 | 3 | 4) work_tree=true ;; esac
       ;;
   esac
-  desired="$(jq -n --arg scratch "$SCRATCH" --arg root "$ROOT" \
-    --arg worktrees "$WORKTREES" \
+  desired="$(jq -n --arg root "$ROOT" \
+    --argjson working "$(working_directories | jq -R . | jq -s .)" \
     --argjson work_tree "$work_tree" \
     --arg statusline "$STATUSLINE_ENTRY" --argjson wiring "$WIRING" \
     --argjson plugins "$(printf '%s\n' "${PLUGINS[@]}" | jq -R 'split(" ")[0]' | jq -s .)" \

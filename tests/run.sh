@@ -5,7 +5,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-TMP="$(mktemp -d)"
+# An explicit template rather than $TMPDIR: install refuses a version directory
+# inside the scratchpad, /tmp/claude-<uid>, and a harness that pointed TMPDIR
+# there would have every install case in the suite refuse itself.
+TMP="$(mktemp -d /tmp/agent-toolkit-suite.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0; skipped=0
 
