@@ -234,21 +234,27 @@ def refused(entry, rule, home):
     that any path resolver collapses. A symlink pointing into one is not caught,
     which would need the filesystem: an entry like that is one the user made and
     approved deliberately, and it is theirs."""
-    if not isinstance(entry, str):
+    path = named(entry, home)
+    if path is None:
         return False
-    path = entry
-    if path.startswith("~/"):
-        path = home + path[1:]
-    path = os.path.normpath(path)
     if "is" in rule:
         return path == rule["is"]
     return path == rule["under"] or path.startswith(rule["under"] + "/")
 
 
+def named(entry, home):
+    """The directory an entry names, or None for an entry that is not a path."""
+    if not isinstance(entry, str):
+        return None
+    if entry.startswith("~/"):
+        entry = home + entry[1:]
+    return os.path.normpath(entry)
+
+
 def merge(current, request, on_disk):
-    """(merged, ledger, restart reasons). on_disk is what the ledger holds, or
-    None when there is none and the file itself has to say what an earlier
-    install wrote."""
+    """(merged, ledger, restart reasons, approvals taken away). on_disk is what
+    the ledger holds, or None when there is none and the file itself has to say
+    what an earlier install wrote."""
     if not isinstance(current, dict):
         raise SettingsError("user", "the top level is not an object")
     desired = request["desired"]
@@ -301,7 +307,22 @@ def merge(current, request, on_disk):
         "values": [{"path": list(p), "value": v} for p, v in kept_values.items()],
         "members": [{"path": list(p), "value": json.loads(i)} for p, i in kept_members],
     }
-    return merged, ledger, restart
+    return merged, ledger, restart, taken_away(current, merged, request)
+
+
+def taken_away(current, merged, request):
+    """The paths a kept-unset rule names that current approves and merged does
+    not. Read off the two files rather than the rule's own filter, because the
+    ledger retires the entry an earlier version wrote before that filter runs."""
+    home = request["home"]
+    gone = set()
+    for rule in request.get("forbidden", []):
+        before = get(current, tuple(rule["path"]))
+        after = get(merged, tuple(rule["path"]))
+        if isinstance(before, list):
+            left = {named(e, home) for e in after} if isinstance(after, list) else set()
+            gone |= {named(e, home) for e in before if refused(e, rule, home)} - left
+    return sorted(gone)
 
 
 def merge_hooks(merged, wiring):
@@ -481,7 +502,7 @@ def run(request, write, read=None):
         before = read(path)
         try:
             current = parse(before)
-            merged, ledger, restart = merge(current, request, on_disk)
+            merged, ledger, restart, taken = merge(current, request, on_disk)
         except SettingsError as e:
             raise for_the_user(e, request)
         try:
@@ -523,7 +544,7 @@ def run(request, write, read=None):
             except OSError as e:
                 os.unlink(staged)
                 raise write_failed(e, path)
-            result.update(settings="written", backup=saved, restart=restart)
+            result.update(settings="written", backup=saved, restart=restart, taken_away=taken)
             if link:
                 result["replaced_link"] = link
         write_ledger(request["ledger"], ledger, result)

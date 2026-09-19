@@ -85,6 +85,13 @@ reports() { # name, expected substring of additionalContext
   said="$(jq -r '.hookSpecificOutput.additionalContext // ""' <<<"$out" 2>/dev/null)"
   check "$1" "$2" "$said"
 }
+advises() { # name, expected substring of additionalContext, which says nothing is broken
+  reports "$1" "$2"
+  case "$(jq -r '.hookSpecificOutput.additionalContext // ""' <<<"$out" 2>/dev/null)" in
+    *✗*) bad "$1, with no required finding beside it" "$out" ;;
+    *) ok "$1, with no required finding beside it" ;;
+  esac
+}
 staged() { printf '%s' "$UH/.claude/agent-toolkit-releases/$1"; }
 asked() { cat "$AT_GH_STATE/calls" 2>/dev/null; }
 forget_calls() { : >"$AT_GH_STATE/calls"; }
@@ -616,7 +623,8 @@ recheck
 keep 'del(.seals)'
 before="$(readlink "$UH/.claude/agent-toolkit")"
 up apply
-says_nothing "a folder the record holds no seal for is discarded without a word"
+advises "a folder the record holds no seal for is discarded, and said" \
+  "! v1.5.0 was unpacked here with nothing recorded to check it against, so it was discarded rather than installed. It is staged again on its own"
 same "changing nothing" "$before" "$(readlink "$UH/.claude/agent-toolkit")"
 [ ! -d "$(staged v1.5.0)" ] && ok "and is not kept, because nothing happened to it" \
   || bad "an unsealed folder is discarded" "it is still staged"
@@ -904,6 +912,26 @@ up apply
 same "and when latest goes back, so does the machine" "$(staged v1.4.0)" "$(readlink "$UH/.claude/agent-toolkit")"
 reports "saying which version it came down from" "v1.4.0 is live, from v1.5.0·${SHA:0:7}"
 same "and the stamp follows it down" "v1.4.0·${OLD:0:7}" "$(cat "$UH/.claude/agent-toolkit-version")"
+
+# The folder it came down from is the fallback, unsealed since it went live, and a
+# pin is a plain file write: taking it back is a discard the machine says.
+[ -d "$(staged v1.5.0)" ] || bad "the release it came down from is still on disk" "it is not, so the case proves nothing"
+track v1.5.0
+up apply
+advises "a pin on the release it came down from discards that folder, naming it" \
+  "! v1.5.0 was unpacked here with nothing recorded to check it against, so it was discarded rather than installed"
+[ ! -d "$(staged v1.5.0)" ] && ok "and the folder is gone" || bad "the unsealed fallback is discarded" "it is still there"
+same "leaving the machine where it was" "$(staged v1.4.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+forget_calls
+recheck
+case "$(asked)" in
+  *tarball*) ok "the next check stages the pinned release afresh" ;;
+  *) bad "the pinned release is staged again" "it asked for no tarball" ;;
+esac
+[ -n "$(kept '.seals["v1.5.0"]')" ] && ok "and seals it" || bad "the release staged again is sealed" "no seal was recorded"
+up apply
+same "and the pin takes the machine to it" "$(staged v1.5.0)" "$(readlink "$UH/.claude/agent-toolkit")"
+track
 
 # ── nowhere to put it ────────────────────────────────────────────────────────
 # The state a machine reaches on its own when a disk fills, and the fix it is

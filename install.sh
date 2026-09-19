@@ -826,7 +826,7 @@ settings_request() {
 }
 
 apply_settings() {
-  local request result state reason fix newest aside saved shown lines
+  local request result state reason fix newest aside saved shown lines taken
   if ! request="$(settings_request)"; then
     finding required toolkit "install.sh does not build its own settings" "$ROOT/install.sh"
     return
@@ -867,6 +867,10 @@ apply_settings() {
     aside="$(jq -r '.ledger_aside // ""' <<<"$result")"
     finding advisory user "the ledger ~/.claude/agent-toolkit-applied.json does not read ($reason), so what the toolkit owns was read back from settings.json for this run, which can only vouch for what the file still holds${aside:+. The old ledger is kept at $(home_path "$aside")}"
   fi
+  while IFS= read -r taken; do
+    [ -n "$taken" ] || continue
+    finding advisory user "$(home_path "$taken") was approved for every agent without a question, which this toolkit keeps unset, so it was removed from settings.json"
+  done < <(jq -r '.taken_away[]? // empty' <<<"$result")
   if [ "$(jq -r '.replaced_link // ""' <<<"$result")" != "" ]; then
     finding advisory user "settings.json was a link to $(jq -r '.replaced_link' <<<"$result") and is now a file, so the link's target no longer receives changes"
   fi

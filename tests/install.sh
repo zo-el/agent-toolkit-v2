@@ -729,11 +729,25 @@ case " $(js "$H" '.permissions.additionalDirectories | join(" ")') " in
   *" $H/.claude "*) ok "a home that was installed with ~/.claude approved has it" ;;
   *) bad "a home that was installed with ~/.claude approved has it" "$(js "$H" '.permissions.additionalDirectories | join(" ")')" ;;
 esac
+# A write that leaves it approved took nothing away, whichever rule moved it.
+jq '.permissions.deny = []' "$H/.claude/settings.json" >"$TMP/settings" \
+  && cp "$TMP/settings" "$H/.claude/settings.json"
+inst "$WHOLESALE" "$H"
+case "$out" in
+  *"settings.json updated"*) ;;
+  *) bad "the version that approves it writes settings.json again" "it wrote nothing, so the case proves nothing: $out" ;;
+esac
+case "$out" in
+  *"was approved for every agent"*) bad "and a run that leaves it approved never says it was taken away" "$out" ;;
+  *) ok "and a run that leaves it approved never says it was taken away" ;;
+esac
 inst "$ROOT" "$H"
 case " $(js "$H" '.permissions.additionalDirectories | join(" ")') " in
   *" $H/.claude "*) bad "and the next install takes it away" "it is still approved" ;;
   *) ok "and the next install takes it away" ;;
 esac
+check "saying so, though the ledger took it before the rule did" \
+  "! ~/.claude was approved for every agent without a question, which this toolkit keeps unset, so it was removed from settings.json" "$out"
 
 # The ledger is what says the toolkit wrote a value, and a machine that lost one
 # is exactly the machine this approval must still be taken from.
@@ -761,6 +775,43 @@ case " $approved " in
   *" $H "*) ok "and so does their home, which the toolkit never wrote" ;;
   *) bad "the user's home stays" "it went: $approved" ;;
 esac
+same "two spellings of ~/.claude are one approval taken away, said once" 1 \
+  "$(grep -c '! ~/.claude was approved for every agent without a question' <<<"$out")"
+check "and the release directory is said on its own" \
+  "! ~/.claude/agent-toolkit-releases/v1.5.0 was approved for every agent without a question, which this toolkit keeps unset" "$out"
+case "$out" in
+  *"! /my/own/dir was approved"* | *"! ~ was approved"*) bad "and nothing the user keeps is said" "$out" ;;
+  *) ok "and nothing the user keeps is said" ;;
+esac
+
+# The session start is the run that takes it away on most machines, and it says
+# so there. One set again is one taken away again.
+H="$(home approved-revoked)"
+inst "$ROOT" "$H"
+sets_claude_dir() {
+  jq '.permissions.additionalDirectories += ["~/.claude"]' "$H/.claude/settings.json" >"$TMP/settings" \
+    && cp "$TMP/settings" "$H/.claude/settings.json"
+}
+revoked() { # name, how often the session start says it
+  hook "$H" "$(command_for "$H" SessionStart install.sh)" '{"hook_event_name":"SessionStart"}'
+  same "$1" "$2" "$(jq -r '.hookSpecificOutput.additionalContext // ""' <<<"$out" 2>/dev/null \
+    | grep -c '! ~/.claude was approved for every agent without a question, which this toolkit keeps unset, so it was removed from settings.json')" \
+    "said $(grep -c 'was approved for every agent' <<<"$out") times: ${out:-<empty>}"
+}
+sets_claude_dir
+revoked "a session start that takes ~/.claude away says so once" 1
+case " $(js "$H" '.permissions.additionalDirectories | join(" ")') " in
+  *" ~/.claude "*) bad "having taken it" "it is still approved" ;;
+  *) ok "having taken it" ;;
+esac
+revoked "and the next one says nothing of it" 0
+sets_claude_dir
+inst "$ROOT" "$H" --dry-run
+case "$out" in
+  *"was approved for every agent"*) bad "a dry run takes nothing away, so says nothing was" "$out" ;;
+  *) ok "a dry run takes nothing away, so says nothing was" ;;
+esac
+revoked "and setting it again is said again" 1
 
 # ── a version directory under ~/.claude/worktrees ────────────────────────────
 # Every agent may write there without being asked, so the one path by which an
@@ -1400,6 +1451,8 @@ check "and the user's own env kept" "1" "$(js "$H" '.env.MINE')"
 # so retirement alone would leave the wholesale entry there for good.
 same "with the approval a previous generation wrote gone, ledger or none" \
   "/tmp/claude-$(id -u) $ROOT $H/.claude/worktrees" "$(js "$H" '.permissions.additionalDirectories | join(" ")')"
+check "and the upgrade says it took that approval away" \
+  "! ~/.claude was approved for every agent without a question, which this toolkit keeps unset, so it was removed from settings.json" "$out"
 LEAN="$TMP/root-without-todo-tools"
 copy_root "$LEAN"
 patch_desired "$LEAN" 'del(.desired.env.CLAUDE_CODE_ENABLE_TODO_TOOLS)'

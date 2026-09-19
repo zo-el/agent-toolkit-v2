@@ -557,6 +557,7 @@ seal_holds() { # the staged folder
   if [ -z "$recorded" ]; then
     # Nothing being known about a tree is not permission to run it.
     rm -rf "$1"
+    finding advisory user "$WANTED was unpacked here with nothing recorded to check it against, so it was discarded rather than installed. It is staged again on its own"
     return 1
   fi
   # A tree this machine unpacked and could seal an hour ago, that will not read
